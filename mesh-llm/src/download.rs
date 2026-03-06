@@ -31,6 +31,11 @@ pub struct MoeConfig {
     /// Expert IDs sorted by gate mass descending (hottest first).
     /// This is the content of the ranking CSV, embedded directly.
     pub ranking: &'static [u32],
+    /// Pre-split shard URLs. If present, nodes download only their shard
+    /// instead of the full model + local splitting.
+    /// Index 0 = shard for node 0, etc. Must match the ranking-based split.
+    #[allow(dead_code)]
+    pub shards: &'static [&'static str],
 }
 
 // Pre-computed expert rankings by gate mass (hottest first).
@@ -175,22 +180,44 @@ pub const MODEL_CATALOG: &[CatalogModel] = &[
         file: "GLM-4.7-Flash-Q4_K_M.gguf",
         url: "https://huggingface.co/unsloth/GLM-4.7-Flash-GGUF/resolve/main/GLM-4.7-Flash-Q4_K_M.gguf",
         size: "18GB",
-        description: "MoE 30B/3B active, fast inference, tool calling",
+        description: "MoE 30B/3B active, 64 experts top-4, fast inference, tool calling",
         draft: None,
-        moe: None,
+        moe: Some(MoeConfig {
+            n_expert: 64,
+            n_expert_used: 4,
+            min_experts_per_node: 24,
+            ranking: &[], // no pre-baked ranking — uses GGUF auto-detect + fallback
+            shards: &[],
+        }),
+    },
+    CatalogModel {
+        name: "Qwen3-30B-A3B-Q4_K_M",
+        file: "Qwen3-30B-A3B-Q4_K_M.gguf",
+        url: "https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF/resolve/main/Qwen3-30B-A3B-Q4_K_M.gguf",
+        size: "17.3GB",
+        description: "MoE general chat, 128 experts top-8, thinking/non-thinking",
+        draft: Some("Qwen3-0.6B-Q4_K_M"),
+        moe: Some(MoeConfig {
+            n_expert: 128,
+            n_expert_used: 8,
+            min_experts_per_node: 46,
+            ranking: QWEN3_30B_A3B_RANKING, // same arch as Coder variant
+            shards: &[],
+        }),
     },
     CatalogModel {
         name: "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M",
         file: "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
         url: "https://huggingface.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/resolve/main/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
         size: "18.6GB",
-        description: "MoE agentic coding, tool use, 30B/3B active",
+        description: "MoE agentic coding, tool use, 128 experts top-8",
         draft: Some("Qwen3-0.6B-Q4_K_M"),
         moe: Some(MoeConfig {
             n_expert: 128,
             n_expert_used: 8,
             min_experts_per_node: 46,
             ranking: QWEN3_30B_A3B_RANKING, // same arch as Qwen3-30B-A3B
+            shards: &[],
         }),
     },
     CatalogModel {
@@ -243,9 +270,15 @@ pub const MODEL_CATALOG: &[CatalogModel] = &[
         file: "Llama-4-Scout-4bit-Q4_K_M.gguf",
         url: "https://huggingface.co/glogwa68/Llama-4-scout-GGUF/resolve/main/Llama-4-Scout-4bit-Q4_K_M.gguf",
         size: "22.5GB",
-        description: "MoE 109B/17B active, Meta latest, tool calling",
+        description: "MoE 109B/17B active, 16 experts top-1, Meta latest, tool calling",
         draft: None,
-        moe: None,
+        moe: Some(MoeConfig {
+            n_expert: 16,
+            n_expert_used: 1,
+            min_experts_per_node: 6,
+            ranking: &[], // no pre-baked ranking — uses GGUF auto-detect
+            shards: &[],
+        }),
     },
     CatalogModel {
         name: "Gemma-3-27B-it-Q4_K_M",

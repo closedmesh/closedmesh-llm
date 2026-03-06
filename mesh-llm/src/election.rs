@@ -189,7 +189,11 @@ fn lookup_moe_config(model_name: &str, model_path: &Path) -> Option<download::Mo
         .find(|m| m.name.to_lowercase() == q || m.file.to_lowercase().contains(&q))
         .and_then(|m| m.moe.clone())
     {
-        return Some(cfg);
+        if !cfg.ranking.is_empty() {
+            return Some(cfg);
+        }
+        // Catalog says MoE but no ranking — fall through to GGUF detect + sequential fallback
+        // (keeps n_expert/n_expert_used/min_experts from catalog)
     }
 
     // Tier 2: auto-detect from GGUF header
@@ -212,6 +216,7 @@ fn lookup_moe_config(model_name: &str, model_path: &Path) -> Option<download::Mo
             n_expert_used: info.expert_used_count,
             min_experts_per_node: min_experts,
             ranking,
+            shards: &[],
         });
     }
 
@@ -224,6 +229,7 @@ fn lookup_moe_config(model_name: &str, model_path: &Path) -> Option<download::Mo
         n_expert_used: info.expert_used_count,
         min_experts_per_node: min_experts,
         ranking,
+        shards: &[],
     })
 }
 
