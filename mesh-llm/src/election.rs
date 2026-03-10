@@ -675,7 +675,7 @@ async fn moe_election_loop(
                     let expert_ids: Vec<u32> = my_assignment.experts.clone();
                     match download::download_exploded_experts(repo, &expert_ids, &model_name).await {
                         Ok(exploded_dir) => {
-                            match download::assemble_shard(&bin_dir, &exploded_dir, &expert_ids, &shard_path) {
+                            match download::assemble_shard(&exploded_dir, &expert_ids, &shard_path) {
                                 Ok(()) => {
                                     let size = std::fs::metadata(&shard_path).map(|m| m.len()).unwrap_or(0);
                                     eprintln!("  ✅ Assembled shard: {:.1} GB", size as f64 / 1e9);

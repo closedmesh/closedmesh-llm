@@ -498,7 +498,10 @@ pub async fn download_model(model: &CatalogModel) -> Result<PathBuf> {
     }
 
     eprintln!("📥 Downloading {} ({})...", model.name, model.size);
-    for (i, (file, url)) in files.iter().enumerate() {
+
+    // Collect files that still need downloading
+    let mut needed: Vec<(String, String)> = Vec::new();
+    for (file, url) in &files {
         let path = dir.join(file);
         if path.exists() {
             let size = tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
@@ -507,11 +510,34 @@ pub async fn download_model(model: &CatalogModel) -> Result<PathBuf> {
                 continue;
             }
         }
-        if files.len() > 1 {
-            eprintln!("  📥 [{}/{}] {file}...", i + 1, files.len());
-        }
-        download_with_resume(&path, url).await?;
+        needed.push((file.to_string(), url.to_string()));
     }
+
+    if needed.len() > 1 {
+        // Parallel download of split files
+        eprintln!("  ⚡ Downloading {} files in parallel...", needed.len());
+        let total = needed.len();
+        let completed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for (file, url) in needed {
+            let path = dir.join(&file);
+            let completed = completed.clone();
+            handles.push(tokio::spawn(async move {
+                download_with_resume(&path, &url).await?;
+                let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                eprintln!("  ✅ {file} [{done}/{total}]");
+                Ok::<(), anyhow::Error>(())
+            }));
+        }
+        for handle in handles {
+            handle.await??;
+        }
+    } else if let Some((file, url)) = needed.into_iter().next() {
+        // Single file — just download it
+        let path = dir.join(&file);
+        download_with_resume(&path, &url).await?;
+    }
+
     eprintln!("✅ Downloaded {} to {}", model.name, dir.display());
     Ok(dest)
 }
@@ -572,45 +598,22 @@ pub async fn download_exploded_experts(
 
 /// Assemble a shard GGUF from exploded expert files.
 ///
-/// Runs `llama-moe-explode --assemble` to combine trunk + expert files into
-/// a single GGUF that llama-server can load.
+/// Assemble a shard GGUF from trunk + expert files using the Rust assembler.
 ///
-/// - `bin_dir`: directory containing llama-moe-explode binary
 /// - `exploded_dir`: directory with trunk.gguf + expert-NNN.gguf files
 /// - `expert_ids`: which experts to include (must exist in exploded_dir)
 /// - `output_path`: where to write the assembled shard GGUF
 pub fn assemble_shard(
-    bin_dir: &Path,
     exploded_dir: &Path,
     expert_ids: &[u32],
     output_path: &Path,
 ) -> Result<()> {
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
     let trunk = exploded_dir.join("trunk.gguf");
-    let expert_files: Vec<String> = expert_ids.iter()
-        .map(|&eid| exploded_dir.join(format!("expert-{:03}.gguf", eid)).to_string_lossy().to_string())
+    let expert_paths: Vec<PathBuf> = expert_ids.iter()
+        .map(|&eid| exploded_dir.join(format!("expert-{:03}.gguf", eid)))
         .collect();
-    let experts_arg = expert_files.join(",");
 
-    eprintln!("🔧 Assembling shard: trunk + {} experts → {}", expert_ids.len(), output_path.display());
-    let status = std::process::Command::new(bin_dir.join("llama-moe-explode"))
-        .args([
-            "--assemble",
-            "--trunk", &trunk.to_string_lossy(),
-            "--experts", &experts_arg,
-            "-o", &output_path.to_string_lossy(),
-        ])
-        .status()
-        .map_err(|e| anyhow::anyhow!("Failed to run llama-moe-explode: {e}"))?;
-
-    anyhow::ensure!(status.success(), "llama-moe-explode --assemble exited with {status}");
-
-    let size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
-    eprintln!("✅ Assembled shard: {:.1}GB", size as f64 / 1e9);
-    Ok(())
+    crate::moe::assemble_shard(&trunk, &expert_paths, output_path)
 }
 
 /// Path to a cached assembled shard for exploded models.
