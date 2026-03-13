@@ -1,5 +1,6 @@
 Read server.py in this directory. What does it do and what are the problems?
-#wait:25
+#wait:30
 Fix all the bugs: add auto-incrementing IDs, input validation (require "title"), implement DELETE, add proper JSON error responses, and add GET by ID. Edit server.py directly.
-#wait:45
+#wait:60
 Read the file back and verify your changes look correct.
+#wait:30
