@@ -428,7 +428,14 @@ pub async fn start(
 
 async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Result<()> {
     let mut buf = vec![0u8; 8192];
-    let n = stream.read(&mut buf).await?;
+    let n = match tokio::time::timeout(std::time::Duration::from_secs(5), stream.read(&mut buf)).await {
+        Ok(Ok(n)) => n,
+        Ok(Err(e)) => return Err(e.into()),
+        Err(_) => return Ok(()), // read timeout — health check probe, just close
+    };
+    if n == 0 {
+        return Ok(()); // empty read — closed before sending
+    }
     let req = String::from_utf8_lossy(&buf[..n]);
     let method = req.split_whitespace().next().unwrap_or("GET");
     let path = req.split_whitespace().nth(1).unwrap_or("/");
