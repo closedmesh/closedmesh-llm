@@ -125,6 +125,7 @@ pub async fn start_llama_server(
     draft: Option<&Path>,
     draft_max: u16,
     model_bytes: u64,
+    my_vram: u64,
 ) -> Result<tokio::sync::oneshot::Receiver<()>> {
     let llama_server = bin_dir.join("llama-server");
     anyhow::ensure!(
@@ -157,12 +158,13 @@ pub async fn start_llama_server(
     let log_file2 = log_file.try_clone()?;
 
     // llama-server uses --rpc only for remote workers.
-    // The host's own GPU is used directly via Metal (no local rpc-server in the list).
-    // Context size: 32K for everything. Agents need large context for system prompts,
-    // tool schemas, and multi-turn conversations. With q4_0/q8_0 KV cache compression
-    // this is cheap even for large models.
-    let ctx_size: u32 = 32768;
-    tracing::info!("Context size: {ctx_size} tokens (model {:.1}GB)", model_bytes as f64 / GB as f64);
+    // Context size: 128K base. These models all support 128K+ natively.
+    // With q4_0/q8_0 KV cache compression this fits comfortably.
+    // If VRAM is very tight, the model shouldn't be assigned to this node.
+    const GB: u64 = 1_000_000_000;
+    let ctx_size: u32 = 131072;
+    let _ = my_vram; // available for future VRAM-aware sizing
+    tracing::info!("Context size: {ctx_size} tokens (model {:.1}GB, {:.0}GB VRAM)", model_bytes as f64 / GB as f64, my_vram as f64 / GB as f64);
 
     let mut args = vec![
         "-m".to_string(), model.to_string_lossy().to_string(),
@@ -187,7 +189,6 @@ pub async fn start_llama_server(
     //   < 5GB: leave default (FP16) — small models, KV cache is negligible
     //   5-50GB: Q8_0 — essentially lossless, halves KV memory
     //   > 50GB: Q4_0 — slight long-context quality trade, but critical memory savings
-    const GB: u64 = 1_000_000_000;
     if model_bytes >= 50 * GB {
         args.extend_from_slice(&[
             "--cache-type-k".to_string(), "q4_0".to_string(),

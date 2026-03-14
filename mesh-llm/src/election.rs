@@ -606,7 +606,7 @@ async fn moe_election_loop(
 
                 let mb = total_model_bytes(&model);
                 match launch::start_llama_server(
-                    &bin_dir, &model, llama_port, &[], None, None, 0, mb,
+                    &bin_dir, &model, llama_port, &[], None, None, 0, mb, my_vram,
                 ).await {
                     Ok(_death_rx) => {
                         node.set_role(NodeRole::Host { http_port: llama_port }).await;
@@ -677,7 +677,7 @@ async fn moe_election_loop(
 
             let shard_bytes = std::fs::metadata(&shard_path).map(|m| m.len()).unwrap_or(0);
             match launch::start_llama_server(
-                &bin_dir, &shard_path, llama_port, &[], None, None, 0, shard_bytes,
+                &bin_dir, &shard_path, llama_port, &[], None, None, 0, shard_bytes, my_vram,
             ).await {
                 Ok(_death_rx) => {
                     node.set_role(NodeRole::Host { http_port: llama_port }).await;
@@ -957,6 +957,7 @@ async fn start_llama(
         draft,
         draft_max,
         model_bytes,
+        my_vram,
     )
     .await
     {
