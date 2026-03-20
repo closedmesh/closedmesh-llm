@@ -2017,7 +2017,7 @@ function InviteFriendEmptyState({ inviteToken, selectedModel, isPublicMesh }: { 
           <BrandIcon className="h-12 w-12 text-primary/50 animate-wiggle" />
         </div>
         <p className="text-sm text-muted-foreground">
-          Mesh LLM is a project to let people contribute spare compute, or build private networks of compute for AI, using mixtures of open models.
+          Mesh LLM is a project to let people contribute spare compute, build private personal AI, using open models.
         </p>
         <button
           type="button"
@@ -2077,7 +2077,7 @@ function InviteFriendEmptyState({ inviteToken, selectedModel, isPublicMesh }: { 
         <BrandIcon className="h-12 w-12 text-primary/50 animate-wiggle" />
       </div>
       <p className="text-sm text-muted-foreground">
-        Mesh LLM lets you build private networks of compute for AI, using mixtures of open models.{' '}
+        Mesh LLM lets you build private personal AI, using open models.{' '}
         <a href={DOCS_URL} target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">
           Learn more →
         </a>
@@ -2208,8 +2208,8 @@ function DashboardPage({
         </AlertTitle>
         <AlertDescription className="text-xs text-muted-foreground">
           {isPublicMesh
-            ? 'Mesh LLM is a project to let people contribute spare compute, or build private networks of compute for AI, using mixtures of open models.'
-            : 'Mesh LLM lets you build private networks of compute for AI, using mixtures of open models. Pool machines across your home, office, or friends — fully private, no cloud needed.'}
+            ? 'Mesh LLM is a project to let people contribute spare compute, build private personal AI, using open models.'
+            : 'Mesh LLM lets you build private personal AI, using open models. Pool machines across your home, office, or friends, no cloud needed.'}
           {' '}
           <a href={DOCS_URL} target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">
             Learn more →
