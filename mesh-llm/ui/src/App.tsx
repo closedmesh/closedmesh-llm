@@ -1931,7 +1931,7 @@ function ChatPage(props: {
                   }
                 }}
                 rows={2}
-                placeholder={props.canChat ? 'Send a prompt to the mesh...' : 'Waiting for a warm model...'}
+                placeholder={props.canChat ? 'Ask me anything...' : 'Waiting for a warm model...'}
                 disabled={!props.canChat || isSending}
                 className="min-h-[56px] md:min-h-[80px] resize-none text-base md:text-sm"
               />
