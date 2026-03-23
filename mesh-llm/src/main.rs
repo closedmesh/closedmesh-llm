@@ -213,6 +213,11 @@ enum Command {
         #[arg(long, default_value = "9337")]
         port: u16,
     },
+    /// Install the knowledge whiteboard skill for pi/agent use.
+    ///
+    /// Copies the skill file to ~/.pi/agent/skills/knowledge/SKILL.md
+    #[command(name = "install-skill")]
+    InstallSkill,
     /// Knowledge whiteboard — post, search, and read messages shared across the mesh.
     ///
     /// Post a message:  mesh-llm knowledge "your message here"
@@ -308,6 +313,9 @@ async fn main() -> Result<()> {
             }
             Command::Claude { model, port } => {
                 return run_claude(model.clone(), *port).await;
+            }
+            Command::InstallSkill => {
+                return install_skill();
             }
             Command::Knowledge { text, search, from, reply, thread, limit, port } => {
                 return run_knowledge(text.clone(), search.clone(), from.clone(), reply.clone(), thread.clone(), *limit, *port).await;
@@ -2313,6 +2321,19 @@ fn chrono_format(ts: u64) -> String {
     else if ago < 3600 { format!("{}m ago", ago / 60) }
     else if ago < 86400 { format!("{}h ago", ago / 3600) }
     else { format!("{}d ago", ago / 86400) }
+}
+
+fn install_skill() -> Result<()> {
+    let skill_content = include_str!("../../.skills/knowledge/SKILL.md");
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
+    let skill_dir = home.join(".pi").join("agent").join("skills").join("knowledge");
+    std::fs::create_dir_all(&skill_dir)?;
+    let skill_path = skill_dir.join("SKILL.md");
+    std::fs::write(&skill_path, skill_content)?;
+    eprintln!("✅ Installed knowledge skill to {}", skill_path.display());
+    eprintln!("   Agents with this skill will search/post to the whiteboard automatically.");
+    eprintln!("   Make sure mesh-llm is running with --knowledge.");
+    Ok(())
 }
 
 async fn check_for_update() {
