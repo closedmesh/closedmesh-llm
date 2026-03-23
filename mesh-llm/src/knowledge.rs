@@ -11,6 +11,10 @@ use tokio::sync::Mutex;
 const MAX_ITEMS: usize = 500;
 /// Items older than this are pruned.
 const TTL_SECS: u64 = 48 * 3600; // 48 hours
+/// Max posts per peer per minute.
+const RATE_LIMIT_PER_MIN: usize = 10;
+/// Max text length per message (bytes).
+const MAX_TEXT_LEN: usize = 4096;
 
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
@@ -77,6 +81,8 @@ pub enum KnowledgeMessage {
 pub struct KnowledgeStore {
     items: Arc<Mutex<Vec<KnowledgeItem>>>,
     enabled: Arc<std::sync::atomic::AtomicBool>,
+    /// Rate limit tracking: peer_id → list of post timestamps (unix secs).
+    rate_log: Arc<Mutex<std::collections::HashMap<String, Vec<u64>>>>,
 }
 
 impl KnowledgeStore {
@@ -84,6 +90,7 @@ impl KnowledgeStore {
         Self {
             items: Arc::new(Mutex::new(Vec::new())),
             enabled: Arc::new(std::sync::atomic::AtomicBool::new(enabled)),
+            rate_log: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -96,6 +103,7 @@ impl KnowledgeStore {
     }
 
     /// Insert an item if not already present. Returns true if new.
+    /// Used for items received from the network (no rate limiting).
     pub async fn insert(&self, item: KnowledgeItem) -> bool {
         let mut items = self.items.lock().await;
         if items.iter().any(|i| i.id == item.id) {
@@ -104,6 +112,31 @@ impl KnowledgeStore {
         items.push(item);
         self.prune_locked(&mut items);
         true
+    }
+
+    /// Post a new item locally — enforces rate limit and text length.
+    /// Returns Ok(item) on success, Err(reason) if rejected.
+    pub async fn post(&self, item: KnowledgeItem) -> Result<KnowledgeItem, String> {
+        // Text length check
+        if item.text.len() > MAX_TEXT_LEN {
+            return Err(format!("Message too long ({} bytes, max {})", item.text.len(), MAX_TEXT_LEN));
+        }
+
+        // Rate limit check
+        let now = now_secs();
+        let mut log = self.rate_log.lock().await;
+        let timestamps = log.entry(item.peer_id.clone()).or_default();
+        // Prune old entries
+        timestamps.retain(|&t| now - t < 60);
+        if timestamps.len() >= RATE_LIMIT_PER_MIN {
+            return Err(format!("Rate limited ({} posts/min max)", RATE_LIMIT_PER_MIN));
+        }
+        timestamps.push(now);
+        drop(log);
+
+        // Insert
+        self.insert(item.clone()).await;
+        Ok(item)
     }
 
     /// Get all items (newest first).
@@ -127,17 +160,33 @@ impl KnowledgeStore {
         items.iter().filter(|i| ids.contains(&i.id)).cloned().collect()
     }
 
-    /// Search items by substring (case-insensitive).
+    /// Search items by multi-term OR matching (like megamind).
+    /// Query is split into terms — any term matching is a hit.
+    /// Results ranked by number of matching terms (most relevant first).
     pub async fn search(&self, query: &str) -> Vec<KnowledgeItem> {
-        let q = query.to_lowercase();
+        let terms: Vec<String> = query.to_lowercase()
+            .split_whitespace()
+            .filter(|w| !w.is_empty())
+            .map(|w| w.to_string())
+            .collect();
+        if terms.is_empty() {
+            return self.all().await;
+        }
         let mut items = self.items.lock().await;
         self.prune_locked(&mut items);
-        let mut result: Vec<_> = items.iter()
-            .filter(|i| i.text.to_lowercase().contains(&q) || i.from.to_lowercase().contains(&q))
-            .cloned()
+        let mut scored: Vec<(usize, KnowledgeItem)> = items.iter()
+            .filter_map(|i| {
+                let text_lower = i.text.to_lowercase();
+                let from_lower = i.from.to_lowercase();
+                let hits = terms.iter()
+                    .filter(|t| text_lower.contains(t.as_str()) || from_lower.contains(t.as_str()))
+                    .count();
+                if hits > 0 { Some((hits, i.clone())) } else { None }
+            })
             .collect();
-        result.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-        result
+        // Sort by hits descending, then by timestamp descending
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.timestamp.cmp(&a.1.timestamp)));
+        scored.into_iter().map(|(_, item)| item).collect()
     }
 
     /// Get items from a specific peer.
@@ -358,13 +407,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_store_search() {
+    async fn test_store_search_single_term() {
         let store = KnowledgeStore::new(true);
         store.insert(KnowledgeItem::new("alice".into(), "a".into(), "CUDA OOM fix".into(), None)).await;
         store.insert(KnowledgeItem::new("bob".into(), "b".into(), "networking stuff".into(), None)).await;
         let results = store.search("cuda").await;
         assert_eq!(results.len(), 1);
         assert!(results[0].text.contains("CUDA"));
+    }
+
+    #[tokio::test]
+    async fn test_store_search_multi_term_or() {
+        let store = KnowledgeStore::new(true);
+        store.insert(KnowledgeItem::new("alice".into(), "a".into(), "CUDA OOM fix".into(), None)).await;
+        store.insert(KnowledgeItem::new("bob".into(), "b".into(), "networking refactor".into(), None)).await;
+        store.insert(KnowledgeItem::new("carol".into(), "c".into(), "unrelated stuff".into(), None)).await;
+        // "CUDA networking" should match both alice and bob (OR)
+        let results = store.search("CUDA networking").await;
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_store_search_ranking() {
+        let store = KnowledgeStore::new(true);
+        store.insert(KnowledgeItem::new("alice".into(), "a".into(), "CUDA OOM on GPU".into(), None)).await;
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        store.insert(KnowledgeItem::new("bob".into(), "b".into(), "CUDA fix for GPU OOM issue".into(), None)).await;
+        // "CUDA OOM GPU" — bob matches 3 terms, alice matches 3 terms, bob is newer
+        let results = store.search("CUDA OOM GPU").await;
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_post_rate_limit() {
+        let store = KnowledgeStore::new(true);
+        for i in 0..10 {
+            let item = KnowledgeItem::new("alice".into(), "a".into(), format!("msg {i}"), None);
+            assert!(store.post(item).await.is_ok());
+        }
+        // 11th should be rate limited
+        let item = KnowledgeItem::new("alice".into(), "a".into(), "one too many".into(), None);
+        assert!(store.post(item).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_post_text_too_long() {
+        let store = KnowledgeStore::new(true);
+        let long_text = "x".repeat(5000);
+        let item = KnowledgeItem::new("alice".into(), "a".into(), long_text, None);
+        let result = store.post(item).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("too long"));
     }
 
     #[tokio::test]

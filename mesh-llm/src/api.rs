@@ -666,14 +666,20 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
                             let item = crate::knowledge::KnowledgeItem::new(
                                 peer_name, peer_id_hex, text, reply_to,
                             );
-                            node.knowledge.insert(item.clone()).await;
-                            node.broadcast_knowledge(&item).await;
-                            let json = serde_json::to_string(&item).unwrap_or_else(|_| "{}".into());
-                            let resp = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                                json.len(), json
-                            );
-                            stream.write_all(resp.as_bytes()).await?;
+                            match node.knowledge.post(item).await {
+                                Ok(posted) => {
+                                    node.broadcast_knowledge(&posted).await;
+                                    let json = serde_json::to_string(&posted).unwrap_or_else(|_| "{}".into());
+                                    let resp = format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                                        json.len(), json
+                                    );
+                                    stream.write_all(resp.as_bytes()).await?;
+                                }
+                                Err(reason) => {
+                                    respond_error(&mut stream, 429, &reason).await?;
+                                }
+                            }
                         }
                     }
                     Err(_) => {

@@ -142,6 +142,10 @@ struct Cli {
     #[arg(long)]
     knowledge: bool,
 
+    /// Your display name on the knowledge whiteboard (default: short node ID).
+    #[arg(long)]
+    name: Option<String>,
+
     /// Internal: set when this node joined via Nostr discovery (not --join).
     #[arg(skip)]
     nostr_discovery: bool,
@@ -842,10 +846,12 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     // Enable knowledge whiteboard if requested
     if cli.knowledge {
         node.knowledge.set_enabled(true);
-        if let Some(ref name) = cli.mesh_name {
-            node.set_knowledge_name(name.clone()).await;
-        }
-        eprintln!("📝 Knowledge whiteboard enabled");
+        let display_name = cli.name.clone()
+            .or_else(|| std::env::var("USER").ok())
+            .or_else(|| std::env::var("USERNAME").ok())
+            .unwrap_or_else(|| node.id().fmt_short().to_string());
+        node.set_knowledge_name(display_name.clone()).await;
+        eprintln!("📝 Knowledge whiteboard enabled (name: {display_name})");
     }
 
     // Advertise what we have on disk and what we want the mesh to serve
