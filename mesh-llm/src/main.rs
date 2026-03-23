@@ -2208,6 +2208,12 @@ async fn run_knowledge(
         .build()?;
     let base = format!("http://127.0.0.1:{port}");
 
+    // Quick connectivity check
+    if client.get(format!("{base}/api/status")).send().await.is_err() {
+        eprintln!("Cannot reach mesh-llm on port {port} — is it running with --knowledge?");
+        std::process::exit(1);
+    }
+
     // Show a thread
     if let Some(id_prefix) = thread {
         let resp = client.get(format!("{base}/api/knowledge/thread/{id_prefix}"))
