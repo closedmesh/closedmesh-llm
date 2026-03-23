@@ -73,6 +73,7 @@ import githubBlackLogo from './assets/icons/github-invertocat-black.svg';
 import githubWhiteLogo from './assets/icons/github-invertocat-white.svg';
 
 const DOCS_URL = 'https://docs.anarchai.org';
+const FLY_DOMAINS = ['mesh-llm-console.fly.dev', 'mesh-llm-api.fly.dev'];
 
 type MeshModel = {
   name: string;
@@ -480,6 +481,7 @@ export function App() {
     return token ? `mesh-llm --client --join ${token}` : '';
   }, [status?.token]);
   const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+  const isFlyHosted = typeof window !== 'undefined' && FLY_DOMAINS.includes(window.location.hostname);
   const apiDirectUrl = useMemo(() => {
     if (!isLocalhost) return '';
     const port = status?.api_port ?? 9337;
@@ -1041,6 +1043,7 @@ export function App() {
               <ChatPage
                 inviteToken={status?.token ?? ''}
                 isPublicMesh={status?.nostr_discovery ?? false}
+                isFlyHosted={isFlyHosted}
                 warmModels={warmModels}
                 modelStatsByName={modelStatsByName}
                 selectedModel={selectedModel}
@@ -1541,6 +1544,7 @@ function AppHeader({
 function ChatPage(props: {
   inviteToken: string;
   isPublicMesh: boolean;
+  isFlyHosted: boolean;
   warmModels: string[];
   modelStatsByName: Record<string, ModelServingStat>;
   selectedModel: string;
@@ -1895,6 +1899,13 @@ function ChatPage(props: {
                 messages.length === 0 ? '' : 'space-y-4',
               )}
             >
+              {props.isFlyHosted ? (
+                <div className="mb-3 rounded-md border border-dashed border-muted-foreground/25 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                  <span className="font-medium">Community demo</span> — this is a best-effort public instance. For direct access, run{' '}
+                  <code className="rounded bg-muted px-1 py-0.5">mesh-llm --auto</code> to join the mesh or start your own.{' '}
+                  <a href={DOCS_URL} target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">Learn more →</a>
+                </div>
+              ) : null}
               {messages.length === 0 ? (
                 <div className="flex min-h-full items-center justify-center">
                   <InviteFriendEmptyState inviteToken={inviteToken} selectedModel={selectedModel || warmModels[0] || ''} isPublicMesh={props.isPublicMesh} />
