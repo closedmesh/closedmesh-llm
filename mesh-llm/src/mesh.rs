@@ -268,58 +268,57 @@ pub fn detect_vram_bytes() -> u64 {
 
     #[cfg(target_os = "linux")]
     {
-        // Try NVIDIA GPU first (nvidia-smi)
-        let output = std::process::Command::new("nvidia-smi")
-            .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
-            .output()
-            .ok();
-        if let Some(out) = output {
-            if out.status.success() {
-                if let Ok(s) = String::from_utf8(out.stdout) {
-                    // Sum all GPUs (multi-GPU systems), nvidia-smi reports in MiB
-                    let total_mib: u64 = s.lines()
-                        .filter_map(|line| line.trim().parse::<u64>().ok())
-                        .sum();
-                    if total_mib > 0 {
-                        return total_mib * 1024 * 1024;
-                    }
-                }
-            }
-        }
-
-        // Fallback: try AMD ROCm (rocm-smi)
-        let output = std::process::Command::new("rocm-smi")
-            .args(["--showmeminfo", "vram", "--csv"])
-            .output()
-            .ok();
-        if let Some(out) = output {
-            if out.status.success() {
-                if let Ok(s) = String::from_utf8(out.stdout) {
-                    // Parse total VRAM from CSV output
-                    for line in s.lines().skip(1) {
-                        if let Some(total) = line.split(',').nth(1) {
-                            if let Ok(bytes) = total.trim().parse::<u64>() {
-                                return bytes;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // No GPU found — fall back to system RAM for CPU inference.
-        // Use 75% of physical RAM (same heuristic as macOS unified memory).
-        if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
+        // Read system RAM from /proc/meminfo (always available on Linux)
+        let system_ram = (|| -> Option<u64> {
+            let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
             for line in meminfo.lines() {
                 if line.starts_with("MemTotal:") {
-                    if let Some(kb_str) = line.split_whitespace().nth(1) {
-                        if let Ok(kb) = kb_str.parse::<u64>() {
-                            let bytes = kb * 1024;
-                            return (bytes as f64 * 0.75) as u64;
-                        }
+                    let kb = line.split_whitespace().nth(1)?.parse::<u64>().ok()?;
+                    return Some(kb * 1024);
+                }
+            }
+            None
+        })().unwrap_or(0);
+
+        // Try NVIDIA GPU (nvidia-smi)
+        let gpu_vram = (|| -> Option<u64> {
+            let out = std::process::Command::new("nvidia-smi")
+                .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+                .output().ok()?;
+            if !out.status.success() { return None; }
+            let s = String::from_utf8(out.stdout).ok()?;
+            let total_mib: u64 = s.lines()
+                .filter_map(|line| line.trim().parse::<u64>().ok())
+                .sum();
+            if total_mib > 0 { Some(total_mib * 1024 * 1024) } else { None }
+        })().or_else(|| {
+            // Try AMD ROCm (rocm-smi)
+            let out = std::process::Command::new("rocm-smi")
+                .args(["--showmeminfo", "vram", "--csv"])
+                .output().ok()?;
+            if !out.status.success() { return None; }
+            let s = String::from_utf8(out.stdout).ok()?;
+            for line in s.lines().skip(1) {
+                if let Some(total) = line.split(',').nth(1) {
+                    if let Ok(bytes) = total.trim().parse::<u64>() {
+                        return Some(bytes);
                     }
                 }
             }
+            None
+        });
+
+        if let Some(vram) = gpu_vram {
+            // GPU + RAM offload: full VRAM + 75% of remaining system RAM.
+            // llama.cpp offloads layers that don't fit in VRAM to system RAM
+            // (-ngl 99 loads as many layers as fit on GPU, rest stay in RAM).
+            let ram_offload = system_ram.saturating_sub(vram);
+            return vram + (ram_offload as f64 * 0.75) as u64;
+        }
+
+        // No GPU — CPU-only inference uses system RAM.
+        if system_ram > 0 {
+            return (system_ram as f64 * 0.75) as u64;
         }
     }
 
