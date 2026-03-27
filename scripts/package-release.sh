@@ -9,6 +9,7 @@ fi
 
 VERSION="$1"
 OUTPUT_DIR="${2:-dist}"
+RELEASE_FLAVOR="${MESH_RELEASE_FLAVOR:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -105,6 +106,11 @@ case "$os_name" in
         exit 1
         ;;
 esac
+
+if [[ -n "$RELEASE_FLAVOR" ]]; then
+    TARGET_TRIPLE="${TARGET_TRIPLE}-${RELEASE_FLAVOR}"
+    STABLE_ASSET="mesh-llm-${TARGET_TRIPLE}.${ARCHIVE_EXT}"
+fi
 
 VERSIONED_ASSET="mesh-llm-${VERSION}-${TARGET_TRIPLE}.${ARCHIVE_EXT}"
 

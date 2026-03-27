@@ -13,6 +13,8 @@ This file covers local build and development workflows for this repository.
 
 **Linux**: x86_64 with an NVIDIA GPU. Requires the CUDA toolkit (`nvcc` in your `PATH`). On Arch Linux, CUDA is typically at `/opt/cuda`; on Ubuntu/Debian it's at `/usr/local/cuda`. Auto-detection finds the right SM architecture for your GPU.
 
+**Linux AMD**: ROCm/HIP is supported when ROCm is installed (typically under `/opt/rocm`).
+
 ## Build from source
 
 Build everything (llama.cpp fork, mesh binary, and UI production build):
@@ -35,6 +37,18 @@ The build script auto-detects your GPU's CUDA architecture. To override:
 
 ```bash
 just build cuda_arch=90   # e.g. H100
+```
+
+For AMD ROCm builds:
+
+```bash
+scripts/build-linux-amd.sh
+```
+
+To override the AMD GPU target list:
+
+```bash
+scripts/build-linux-amd.sh "gfx90a;gfx942;gfx1100"
 ```
 
 Create a portable bundle:
