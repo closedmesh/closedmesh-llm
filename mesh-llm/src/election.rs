@@ -243,6 +243,7 @@ pub async fn election_loop(
     draft: Option<std::path::PathBuf>,
     draft_max: u16,
     force_split: bool,
+    binary_flavor: Option<launch::BinaryFlavor>,
     ctx_size_override: Option<u32>,
     target_tx: Arc<watch::Sender<ModelTargets>>,
     mut on_change: impl FnMut(bool, bool) + Send,
@@ -287,6 +288,7 @@ pub async fn election_loop(
                 moe_cfg.clone(),
                 my_vram,
                 model_bytes as u64,
+                binary_flavor,
                 ctx_size_override,
                 target_tx,
                 &mut on_change,
@@ -470,6 +472,7 @@ pub async fn election_loop(
                 draft.as_deref(),
                 draft_max,
                 force_split,
+                binary_flavor,
                 ctx_size_override,
             )
             .await
@@ -580,6 +583,7 @@ async fn moe_election_loop(
     moe_cfg: download::MoeConfig,
     my_vram: u64,
     model_bytes: u64,
+    binary_flavor: Option<launch::BinaryFlavor>,
     ctx_size_override: Option<u32>,
     target_tx: Arc<watch::Sender<ModelTargets>>,
     on_change: &mut impl FnMut(bool, bool),
@@ -650,6 +654,7 @@ async fn moe_election_loop(
                 let mb = total_model_bytes(&model);
                 match launch::start_llama_server(
                     &bin_dir,
+                    binary_flavor,
                     &model,
                     llama_port,
                     &[],
@@ -757,6 +762,7 @@ async fn moe_election_loop(
             let shard_bytes = std::fs::metadata(&shard_path).map(|m| m.len()).unwrap_or(0);
             match launch::start_llama_server(
                 &bin_dir,
+                binary_flavor,
                 &shard_path,
                 llama_port,
                 &[],
@@ -915,6 +921,7 @@ async fn start_llama(
     draft: Option<&Path>,
     draft_max: u16,
     force_split: bool,
+    binary_flavor: Option<launch::BinaryFlavor>,
     ctx_size_override: Option<u32>,
 ) -> Option<(u16, tokio::sync::oneshot::Receiver<()>)> {
     let my_vram = node.vram_bytes();
@@ -1088,6 +1095,7 @@ async fn start_llama(
 
     match launch::start_llama_server(
         bin_dir,
+        binary_flavor,
         model,
         llama_port,
         &rpc_ports,

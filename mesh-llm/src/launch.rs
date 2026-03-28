@@ -4,12 +4,142 @@
 //! wired up to the mesh tunnel ports.
 
 use anyhow::{Context, Result};
+use clap::ValueEnum;
 use std::path::{Path, PathBuf};
 use tokio::net::TcpListener;
 use tokio::process::Command;
 
-fn bin_path(bin_dir: &Path, name: &str) -> PathBuf {
-    bin_dir.join(name)
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum BinaryFlavor {
+    Cpu,
+    Cuda,
+    Rocm,
+    Vulkan,
+    Metal,
+}
+
+impl BinaryFlavor {
+    pub const ALL: [BinaryFlavor; 5] = [
+        BinaryFlavor::Cpu,
+        BinaryFlavor::Cuda,
+        BinaryFlavor::Rocm,
+        BinaryFlavor::Vulkan,
+        BinaryFlavor::Metal,
+    ];
+
+    pub fn suffix(self) -> &'static str {
+        match self {
+            BinaryFlavor::Cpu => "cpu",
+            BinaryFlavor::Cuda => "cuda",
+            BinaryFlavor::Rocm => "rocm",
+            BinaryFlavor::Vulkan => "vulkan",
+            BinaryFlavor::Metal => "metal",
+        }
+    }
+
+    fn preferred_devices(self) -> &'static [&'static str] {
+        match self {
+            BinaryFlavor::Cpu => &["CPU"],
+            BinaryFlavor::Cuda => &["CUDA0", "CPU"],
+            BinaryFlavor::Rocm => &["HIP0", "CPU"],
+            BinaryFlavor::Vulkan => &["Vulkan0", "CPU"],
+            BinaryFlavor::Metal => &["MTL0", "CPU"],
+        }
+    }
+
+    fn primary_device(self) -> &'static str {
+        self.preferred_devices()[0]
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedBinary {
+    path: PathBuf,
+    flavor: Option<BinaryFlavor>,
+}
+
+fn flavored_bin_name(name: &str, flavor: BinaryFlavor) -> String {
+    format!("{name}-{}", flavor.suffix())
+}
+
+fn infer_binary_flavor(name: &str, path: &Path) -> Option<BinaryFlavor> {
+    let file_name = path.file_name()?.to_string_lossy();
+    for flavor in BinaryFlavor::ALL {
+        if file_name == flavored_bin_name(name, flavor) {
+            return Some(flavor);
+        }
+    }
+    None
+}
+
+fn resolve_binary_path(
+    bin_dir: &Path,
+    name: &str,
+    requested_flavor: Option<BinaryFlavor>,
+) -> Result<ResolvedBinary> {
+    if let Some(flavor) = requested_flavor {
+        let flavored = bin_dir.join(flavored_bin_name(name, flavor));
+        if flavored.exists() {
+            return Ok(ResolvedBinary {
+                path: flavored,
+                flavor: Some(flavor),
+            });
+        }
+
+        let generic = bin_dir.join(name);
+        if generic.exists() {
+            return Ok(ResolvedBinary {
+                path: generic,
+                flavor: Some(flavor),
+            });
+        }
+
+        anyhow::bail!(
+            "{} not found in {} for requested flavor '{}'",
+            flavored.display(),
+            bin_dir.display(),
+            flavor.suffix()
+        );
+    }
+
+    let generic = bin_dir.join(name);
+    if generic.exists() {
+        let flavor = infer_binary_flavor(name, &generic);
+        return Ok(ResolvedBinary {
+            path: generic,
+            flavor,
+        });
+    }
+
+    let matches: Vec<ResolvedBinary> = BinaryFlavor::ALL
+        .into_iter()
+        .map(|flavor| ResolvedBinary {
+            path: bin_dir.join(flavored_bin_name(name, flavor)),
+            flavor: Some(flavor),
+        })
+        .filter(|candidate| candidate.path.exists())
+        .collect();
+
+    match matches.len() {
+        1 => Ok(matches.into_iter().next().unwrap()),
+        0 => anyhow::bail!(
+            "{} not found in {}",
+            bin_dir.join(name).display(),
+            bin_dir.display()
+        ),
+        _ => {
+            let options = matches
+                .iter()
+                .filter_map(|candidate| candidate.flavor.map(|flavor| flavor.suffix()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!(
+                "multiple {} flavors found in {} ({options}). Pass --llama-flavor to choose one.",
+                name,
+                bin_dir.display()
+            );
+        }
+    }
 }
 
 fn temp_log_path(name: &str) -> PathBuf {
@@ -67,16 +197,26 @@ fn probe_available_devices(binary: &Path) -> Vec<String> {
     parse_available_devices(&combined)
 }
 
-fn preferred_device(available: &[String]) -> Option<String> {
-    for candidate in ["MTL0", "CUDA0", "HIP0", "Vulkan0", "CPU"] {
+fn preferred_device(available: &[String], flavor: Option<BinaryFlavor>) -> Option<String> {
+    let candidates: &[&str] = if let Some(flavor) = flavor {
+        flavor.preferred_devices()
+    } else {
+        &["MTL0", "CUDA0", "HIP0", "Vulkan0", "CPU"]
+    };
+
+    for candidate in candidates {
         if available.iter().any(|device| device == candidate) {
-            return Some(candidate.to_string());
+            return Some((*candidate).to_string());
         }
     }
     available.first().cloned()
 }
 
-fn resolve_device_for_binary(binary: &Path, requested: Option<&str>) -> Result<String> {
+fn resolve_device_for_binary(
+    binary: &Path,
+    flavor: Option<BinaryFlavor>,
+    requested: Option<&str>,
+) -> Result<String> {
     let available = probe_available_devices(binary);
 
     if let Some(device) = requested {
@@ -90,23 +230,15 @@ fn resolve_device_for_binary(binary: &Path, requested: Option<&str>) -> Result<S
         return Ok(device.to_string());
     }
 
-    let detected = detect_device();
-    if available.is_empty() || available.iter().any(|candidate| candidate == &detected) {
-        return Ok(detected);
+    if let Some(selected) = preferred_device(&available, flavor) {
+        return Ok(selected);
     }
 
-    if let Some(fallback) = preferred_device(&available) {
-        tracing::warn!(
-            "Auto-detected device {} is not supported by {}. Falling back to {} (available: {}).",
-            detected,
-            binary.display(),
-            fallback,
-            available.join(", ")
-        );
-        return Ok(fallback);
+    if let Some(flavor) = flavor {
+        return Ok(flavor.primary_device().to_string());
     }
 
-    Ok(detected)
+    Ok(detect_device())
 }
 
 fn command_has_output(command: &str, args: &[&str]) -> bool {
@@ -124,20 +256,16 @@ fn command_has_output(command: &str, args: &[&str]) -> bool {
 /// If `gguf_path` is provided, passes `--gguf` so the server loads weights from the local file.
 pub async fn start_rpc_server(
     bin_dir: &Path,
+    binary_flavor: Option<BinaryFlavor>,
     device: Option<&str>,
     gguf_path: Option<&Path>,
 ) -> Result<u16> {
-    let rpc_server = bin_path(bin_dir, "rpc-server");
-    anyhow::ensure!(
-        rpc_server.exists(),
-        "rpc-server not found at {}. Build llama.cpp with -DGGML_RPC=ON first.",
-        rpc_server.display()
-    );
+    let rpc_server = resolve_binary_path(bin_dir, "rpc-server", binary_flavor)?;
 
     // Find a free port
     let port = find_free_port().await?;
 
-    let device = resolve_device_for_binary(&rpc_server, device)?;
+    let device = resolve_device_for_binary(&rpc_server.path, rpc_server.flavor, device)?;
     let startup_timeout = if device.starts_with("Vulkan") {
         std::time::Duration::from_secs(90)
     } else {
@@ -167,12 +295,14 @@ pub async fn start_rpc_server(
         );
     }
 
-    let mut child = Command::new(&rpc_server)
+    let mut child = Command::new(&rpc_server.path)
         .args(&args)
         .stdout(std::process::Stdio::from(rpc_log_file))
         .stderr(std::process::Stdio::from(rpc_log_file2))
         .spawn()
-        .with_context(|| format!("Failed to start rpc-server at {}", rpc_server.display()))?;
+        .with_context(|| {
+        format!("Failed to start rpc-server at {}", rpc_server.path.display())
+    })?;
 
     // Wait for it to be listening
     for _ in 0..startup_polls {
@@ -186,7 +316,7 @@ pub async fn start_rpc_server(
         if let Some(status) = child.try_wait().with_context(|| {
             format!(
                 "Failed to poll rpc-server status for {}",
-                rpc_server.display()
+                rpc_server.path.display()
             )
         })? {
             let tail = log_tail(&rpc_log, 40);
@@ -277,6 +407,7 @@ pub async fn kill_llama_server() {
 /// Start llama-server. Returns a oneshot receiver that fires when the process exits.
 pub async fn start_llama_server(
     bin_dir: &Path,
+    binary_flavor: Option<BinaryFlavor>,
     model: &Path,
     http_port: u16,
     tunnel_ports: &[u16],
@@ -289,12 +420,7 @@ pub async fn start_llama_server(
     ctx_size_override: Option<u32>,
     total_group_vram: Option<u64>,
 ) -> Result<tokio::sync::oneshot::Receiver<()>> {
-    let llama_server = bin_path(bin_dir, "llama-server");
-    anyhow::ensure!(
-        llama_server.exists(),
-        "llama-server not found at {}. Build llama.cpp first.",
-        llama_server.display()
-    );
+    let llama_server = resolve_binary_path(bin_dir, "llama-server", binary_flavor)?;
 
     anyhow::ensure!(model.exists(), "Model not found at {}", model.display());
 
@@ -424,7 +550,8 @@ pub async fn start_llama_server(
         args.push("--tensor-split".to_string());
         args.push(ts.to_string());
     }
-    let local_device = resolve_device_for_binary(&llama_server, None)?;
+    let local_device =
+        resolve_device_for_binary(&llama_server.path, llama_server.flavor, None)?;
     if let Some(draft_path) = draft {
         if draft_path.exists() {
             if local_device != "CPU" {
@@ -467,12 +594,12 @@ pub async fn start_llama_server(
             tracing::warn!("mmproj not found at {}, skipping vision", proj.display());
         }
     }
-    let mut child = Command::new(&llama_server)
+    let mut child = Command::new(&llama_server.path)
         .args(&args)
         .stdout(std::process::Stdio::from(log_file))
         .stderr(std::process::Stdio::from(log_file2))
         .spawn()
-        .with_context(|| format!("Failed to start llama-server at {}", llama_server.display()))?;
+        .with_context(|| format!("Failed to start llama-server at {}", llama_server.path.display()))?;
 
     // Wait for health check
     let url = format!("http://localhost:{http_port}/health");
@@ -592,3 +719,46 @@ async fn reqwest_health_check(url: &str) -> bool {
 }
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_available_devices, preferred_device, BinaryFlavor};
+    use std::path::Path;
+
+    #[test]
+    fn parse_available_devices_ignores_non_device_lines() {
+        let output = r#"
+error: unknown device: HIP0
+available devices:
+No devices found
+  Vulkan0: AMD Radeon RX 9070 XT (16304 MiB, 13737 MiB free)
+  CPU: AMD Ryzen 7 7800X3D 8-Core Processor (192857 MiB, 192857 MiB free)
+"#;
+
+        assert_eq!(
+            parse_available_devices(output),
+            vec!["Vulkan0".to_string(), "CPU".to_string()]
+        );
+    }
+
+    #[test]
+    fn preferred_device_picks_vulkan_when_that_is_all_binary_supports() {
+        let available = vec!["Vulkan0".to_string(), "CPU".to_string()];
+        assert_eq!(
+            preferred_device(&available, Some(BinaryFlavor::Vulkan)),
+            Some("Vulkan0".to_string())
+        );
+    }
+
+    #[test]
+    fn infer_binary_flavor_from_filename() {
+        assert_eq!(
+            super::infer_binary_flavor("rpc-server", Path::new("rpc-server-vulkan")),
+            Some(BinaryFlavor::Vulkan)
+        );
+        assert_eq!(
+            super::infer_binary_flavor("rpc-server", Path::new("rpc-server")),
+            None
+        );
+    }
+}

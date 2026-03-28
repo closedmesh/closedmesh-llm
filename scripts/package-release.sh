@@ -45,6 +45,28 @@ copy_runtime_libs() {
     shopt -u nullglob
 }
 
+bundle_bin_name() {
+    local name="$1"
+    if [[ "$name" == "mesh-llm" ]]; then
+        echo "$name"
+        return
+    fi
+
+    local binary_flavor="$RELEASE_FLAVOR"
+    if [[ -z "$binary_flavor" ]]; then
+        case "$(uname -s)" in
+            Darwin) binary_flavor="metal" ;;
+            Linux) binary_flavor="cpu" ;;
+        esac
+    fi
+
+    if [[ -n "$binary_flavor" ]]; then
+        echo "${name}-${binary_flavor}"
+    else
+        echo "$name"
+    fi
+}
+
 create_archive() {
     local source_dir="$1"
     local archive_path="$2"
@@ -121,9 +143,9 @@ trap 'rm -rf "$staging_dir"' EXIT
 bundle_dir="$staging_dir/mesh-bundle"
 mkdir -p "$bundle_dir"
 
-cp "$RELEASE_BIN_DIR/mesh-llm${BIN_EXT}" "$bundle_dir/"
-cp "$BUILD_BIN_DIR/rpc-server${BIN_EXT}" "$bundle_dir/"
-cp "$BUILD_BIN_DIR/llama-server${BIN_EXT}" "$bundle_dir/"
+cp "$RELEASE_BIN_DIR/mesh-llm${BIN_EXT}" "$bundle_dir/$(bundle_bin_name mesh-llm)"
+cp "$BUILD_BIN_DIR/rpc-server${BIN_EXT}" "$bundle_dir/$(bundle_bin_name rpc-server)"
+cp "$BUILD_BIN_DIR/llama-server${BIN_EXT}" "$bundle_dir/$(bundle_bin_name llama-server)"
 copy_runtime_libs "$bundle_dir"
 
 if [[ "$os_name" == "Darwin" ]]; then

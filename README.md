@@ -36,6 +36,20 @@ curl -fsSL https://github.com/michaelneale/mesh-llm/releases/latest/download/mes
 curl -fsSL https://github.com/michaelneale/mesh-llm/releases/latest/download/mesh-llm-x86_64-unknown-linux-gnu-vulkan.tar.gz | tar xz && mkdir -p ~/.local/bin && mv mesh-bundle/* ~/.local/bin/
 ```
 
+Release bundles install flavor-specific llama.cpp binaries:
+
+- macOS: `rpc-server-metal`, `llama-server-metal`
+- Linux CPU: `rpc-server-cpu`, `llama-server-cpu`
+- Linux CUDA: `rpc-server-cuda`, `llama-server-cuda`
+- Linux ROCm: `rpc-server-rocm`, `llama-server-rocm`
+- Linux Vulkan: `rpc-server-vulkan`, `llama-server-vulkan`
+
+If you keep more than one flavor installed in the same `bin` directory, select the one you want explicitly:
+
+```bash
+mesh-llm --llama-flavor vulkan --model Qwen2.5-32B
+```
+
 If you want a local GPU build from source instead:
 
 ```bash

@@ -178,14 +178,25 @@ bundle output="/tmp/mesh-bundle.tar.gz":
     DIR=$(mktemp -d)
     BUNDLE="$DIR/mesh-bundle"
     mkdir -p "$BUNDLE"
+    case "$(uname -s)" in
+        Darwin) LLAMA_FLAVOR="metal" ;;
+        Linux) LLAMA_FLAVOR="cpu" ;;
+        *) LLAMA_FLAVOR="" ;;
+    esac
+    rpc_name="rpc-server"
+    llama_name="llama-server"
+    if [ -n "$LLAMA_FLAVOR" ]; then
+        rpc_name="rpc-server-$LLAMA_FLAVOR"
+        llama_name="llama-server-$LLAMA_FLAVOR"
+    fi
     cp {{ mesh_bin }} "$BUNDLE/"
-    cp {{ build_dir }}/bin/rpc-server "$BUNDLE/"
-    cp {{ build_dir }}/bin/llama-server "$BUNDLE/"
+    cp {{ build_dir }}/bin/rpc-server "$BUNDLE/$rpc_name"
+    cp {{ build_dir }}/bin/llama-server "$BUNDLE/$llama_name"
     for lib in {{ build_dir }}/bin/*.dylib; do
         cp "$lib" "$BUNDLE/" 2>/dev/null || true
     done
     # Fix rpaths for portability
-    for bin in "$BUNDLE/mesh-llm" "$BUNDLE/rpc-server" "$BUNDLE/llama-server"; do
+    for bin in "$BUNDLE/mesh-llm" "$BUNDLE/$rpc_name" "$BUNDLE/$llama_name"; do
         [ -f "$bin" ] || continue
         install_name_tool -add_rpath @executable_path/ "$bin" 2>/dev/null || true
     done

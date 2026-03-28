@@ -34,7 +34,15 @@ Each should only show the binary name — no `/opt/homebrew/` paths.
 just bundle
 ```
 
-Creates `/tmp/mesh-bundle.tar.gz` containing `mesh-llm`, `rpc-server`, `llama-server`.
+Creates `/tmp/mesh-bundle.tar.gz` containing `mesh-llm` plus flavor-specific llama.cpp binaries.
+
+Bundle naming now follows the same convention everywhere:
+
+- macOS bundles package `rpc-server-metal` and `llama-server-metal`
+- generic Linux bundles package `rpc-server-cpu` and `llama-server-cpu`
+- CUDA Linux bundles package `rpc-server-cuda` and `llama-server-cuda`
+- ROCm Linux bundles package `rpc-server-rocm` and `llama-server-rocm`
+- Vulkan Linux bundles package `rpc-server-vulkan` and `llama-server-vulkan`
 
 ### 4. Smoke test the bundle
 
@@ -84,6 +92,7 @@ After the workflow finishes, verify:
 
 - The unversioned asset name `mesh-bundle.tar.gz` is still required for the README's macOS install one-liner.
 - The default Linux release bundle is a generic CPU build.
+- Release bundles use flavor-specific `rpc-server-<flavor>` and `llama-server-<flavor>` names so multiple flavors can coexist in one install directory. Use `mesh-llm --llama-flavor <flavor>` to force a specific pair.
 - The CUDA Linux release bundle is built in CI with an explicit multi-arch `CMAKE_CUDA_ARCHITECTURES` list and is not runtime-tested during the workflow.
 - The ROCm and Vulkan Linux release bundles are compile-tested in CI, but not runtime-tested against real GPUs during the workflow.
 - `codesign` and `xattr` may be needed on the receiving machine if macOS Gatekeeper blocks unsigned binaries:
