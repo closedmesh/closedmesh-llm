@@ -72,19 +72,6 @@ release-build-amd amd_arch="gfx90a;gfx942;gfx1100;gfx1101;gfx1102;gfx1200;gfx120
 release-build-vulkan:
     @scripts/build-linux.sh --backend vulkan
 
-# Build a Linux AMD ROCm release artifact inside Docker.
-release-rocm-docker amd_arch="" image="rocm/dev-ubuntu-24.04:7.0-complete" platform="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    ARGS=(--build-only --image "{{ image }}")
-    if [ -n "{{ amd_arch }}" ]; then
-        ARGS+=(--rocm-arch "{{ amd_arch }}")
-    fi
-    if [ -n "{{ platform }}" ]; then
-        ARGS+=(--platform "{{ platform }}")
-    fi
-    exec scripts/run-rocm-docker-build.sh "${ARGS[@]}"
-
 # Bump release version consistently across source and Cargo manifests.
 release-version version:
     @scripts/release-version.sh "{{ version }}"
