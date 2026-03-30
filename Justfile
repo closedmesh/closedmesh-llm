@@ -50,6 +50,17 @@ release-build-vulkan:
 release-version version:
     @scripts/release-version.sh "{{ version }}"
 
+# Tag and push a release. Bumps version, updates Cargo.lock, commits, tags, pushes.
+# CI builds and publishes the GitHub release automatically.
+release version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scripts/release-version.sh "{{ version }}"
+    git add -A
+    git commit -m "{{ version }}: release"
+    git tag "{{ version }}"
+    git push origin main --tags
+
 # Download the default model (GLM-4.7-Flash Q4_K_M, 17GB)
 download-model:
     #!/usr/bin/env bash

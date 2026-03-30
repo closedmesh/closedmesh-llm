@@ -124,26 +124,16 @@ See `RELEASE.md` for the full process.
 
 Current release flow:
 
-1. Bump the version everywhere with:
-   ```bash
-   just release-version v0.X.Y
-   ```
-   This updates `mesh-llm/src/main.rs` and the relevant `Cargo.toml` files together.
-2. Build and verify locally:
+1. Build and verify locally:
    ```bash
    just build
    just bundle
    ```
-3. Commit the release:
+2. Release (bumps version, updates Cargo.lock, commits, tags, pushes):
    ```bash
-   git add -A && git commit -m "v0.X.Y: <summary>"
+   just release v0.X.Y
    ```
-4. Tag and push:
-   ```bash
-   git tag v0.X.Y
-   git push origin main --tags
-   ```
-5. Pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds the release artifacts on Linux CPU, Linux CUDA, and macOS and creates the GitHub release automatically.
+3. Pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds the release artifacts on Linux CPU, Linux CUDA, and macOS and creates the GitHub release automatically.
 
 ## Credentials
 
