@@ -63,23 +63,23 @@ fn build_gpus(gpu_name: Option<&str>, gpu_vram: Option<&str>, gpu_bandwidth: Opt
     if names.is_empty() {
         return vec![];
     }
-    let vrams: Vec<u64> = gpu_vram
+    let vrams: Vec<Option<u64>> = gpu_vram
         .map(|s| {
             s.split(',')
-                .filter_map(|v| v.trim().parse::<u64>().ok())
+                .map(|v| v.trim().parse::<u64>().ok())
                 .collect()
         })
         .unwrap_or_default();
-    let bandwidths: Vec<f64> = gpu_bandwidth
-        .map(|s| s.split(',').filter_map(|v| v.trim().parse::<f64>().ok()).collect())
+    let bandwidths: Vec<Option<f64>> = gpu_bandwidth
+        .map(|s| s.split(',').map(|v| v.trim().parse::<f64>().ok()).collect())
         .unwrap_or_default();
     names
         .into_iter()
         .enumerate()
         .map(|(i, name)| GpuEntry {
             name: name.to_string(),
-            vram_bytes: vrams.get(i).copied().unwrap_or(0),
-            bandwidth_gbps: bandwidths.get(i).copied(),
+            vram_bytes: vrams.get(i).copied().flatten().unwrap_or(0),
+            bandwidth_gbps: bandwidths.get(i).copied().flatten(),
         })
         .collect()
 }
@@ -1123,5 +1123,37 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].bandwidth_gbps, Some(1948.70));
         assert_eq!(result[1].bandwidth_gbps, Some(780.10));
+    }
+
+    #[test]
+    fn test_build_gpus_unparsable_vram_preserves_index() {
+        let result = build_gpus(
+            Some("GPU0, GPU1, GPU2"),
+            Some("100,foo,300"),
+            None,
+        );
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].vram_bytes, 100);
+        assert_eq!(
+            result[1].vram_bytes, 0,
+            "unparsable vram should default to 0, not shift indices"
+        );
+        assert_eq!(result[2].vram_bytes, 300);
+    }
+
+    #[test]
+    fn test_build_gpus_unparsable_bandwidth_preserves_index() {
+        let result = build_gpus(
+            Some("GPU0, GPU1, GPU2"),
+            Some("100,200,300"),
+            Some("1.0,bad,3.0"),
+        );
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].bandwidth_gbps, Some(1.0));
+        assert_eq!(
+            result[1].bandwidth_gbps, None,
+            "unparsable bandwidth should be None, not shift indices"
+        );
+        assert_eq!(result[2].bandwidth_gbps, Some(3.0));
     }
 }

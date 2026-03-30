@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::hardware::HardwareSurvey;
 
@@ -252,29 +253,65 @@ pub fn parse_benchmark_output(stdout: &[u8]) -> Option<Vec<BenchmarkOutput>> {
 
 /// Run the benchmark binary synchronously and return per-device outputs.
 ///
+/// Spawns the binary as a subprocess and polls for completion up to `timeout`.
+/// If the process exceeds the timeout, it is killed to avoid zombie processes.
+///
 /// Designed to be called inside `tokio::task::spawn_blocking` — never `async`.
-pub fn run_benchmark(binary: &Path) -> Option<Vec<BenchmarkOutput>> {
-    let output = match std::process::Command::new(binary).arg("--json").output() {
-        Ok(o) => o,
+pub fn run_benchmark(binary: &Path, timeout: Duration) -> Option<Vec<BenchmarkOutput>> {
+    use std::io::Read;
+
+    let mut child = match std::process::Command::new(binary)
+        .arg("--json")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
         Err(e) => {
             tracing::error!("failed to spawn {binary:?}: {e}");
             return None;
         }
     };
 
-    if !output.status.success() {
-        tracing::warn!("benchmark exited with {:?}", output.status);
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    tracing::warn!("benchmark timed out after {timeout:?}, killing subprocess");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                tracing::error!("error waiting for benchmark: {e}");
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+
+    if !status.success() {
+        tracing::warn!("benchmark exited with {:?}", status);
         return None;
     }
 
-    parse_benchmark_output(&output.stdout)
+    let mut stdout_bytes = Vec::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = pipe.read_to_end(&mut stdout_bytes);
+    }
+    parse_benchmark_output(&stdout_bytes)
 }
 
 /// Load a cached fingerprint if hardware is unchanged, otherwise run the
 /// benchmark binary and persist the result.
 ///
 /// Not `async` — intended for use inside `tokio::task::spawn_blocking`.
-pub fn run_or_load(hw: &HardwareSurvey, bin_dir: &Path) -> Option<Vec<f64>> {
+pub fn run_or_load(hw: &HardwareSurvey, bin_dir: &Path, timeout: Duration) -> Option<Vec<f64>> {
     let path = fingerprint_path();
 
     // Cache-hit path
@@ -289,7 +326,7 @@ pub fn run_or_load(hw: &HardwareSurvey, bin_dir: &Path) -> Option<Vec<f64>> {
     tracing::info!("Hardware changed or no cache — running memory bandwidth benchmark");
 
     let binary = detect_benchmark_binary(hw, bin_dir)?;
-    let outputs = run_benchmark(&binary)?;
+    let outputs = run_benchmark(&binary, timeout)?;
 
     // Build per-GPU entries by zipping benchmark output with hw survey data.
     // Both are in device order (nvidia-smi / CUDA enumerate the same order).
@@ -557,6 +594,53 @@ mod tests {
         assert!(
             result.is_none(),
             "old cache format should fail to parse and return None"
+        );
+    }
+
+    #[test]
+    fn test_fingerprint_path_filename() {
+        let path = fingerprint_path();
+        assert!(
+            path.ends_with("benchmark-fingerprint.json"),
+            "fingerprint_path() should use 'benchmark-fingerprint.json', got {:?}",
+            path.file_name()
+        );
+        let parent = path.parent().expect("path should have parent");
+        assert!(
+            parent.ends_with(".mesh-llm"),
+            "fingerprint should be under .mesh-llm directory, got {:?}",
+            parent
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_benchmark_kills_on_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join("mesh-llm-test-bm-timeout");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create test dir");
+
+        let script = dir.join("hang.sh");
+        std::fs::write(&script, "#!/bin/sh\nsleep 999\n").expect("write script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("set permissions");
+
+        let start = std::time::Instant::now();
+        let result = run_benchmark(&script, Duration::from_secs(1));
+        let elapsed = start.elapsed();
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            result.is_none(),
+            "hanging benchmark should return None on timeout"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "should kill subprocess promptly, took {:?}",
+            elapsed
         );
     }
 }

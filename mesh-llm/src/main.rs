@@ -1199,7 +1199,7 @@ async fn run_auto(
                         tracing::debug!("no GPUs detected — skipping memory bandwidth benchmark");
                         return None;
                     }
-                    benchmark::run_or_load(&hw, &bin_dir_clone)
+                    benchmark::run_or_load(&hw, &bin_dir_clone, std::time::Duration::from_secs(25))
                 })
             ).await
             .map_err(|_| tracing::warn!("benchmark timed out after 30s — bandwidth will not be gossiped"))
