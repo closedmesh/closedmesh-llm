@@ -4623,41 +4623,6 @@ function ModelSidebar({
               )}
             </div>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <CapabilityBadge
-              label="Text"
-              icon={<MessageSquarePlus className="h-3.5 w-3.5" />}
-              tooltip="Supports text input and text generation."
-            />
-            {model.vision ? (
-              <CapabilityBadge
-                label="Vision"
-                icon={<ImagePlus className="h-3.5 w-3.5" />}
-                tooltip="Can understand image input."
-              />
-            ) : null}
-            {model.reasoning ? (
-              <CapabilityBadge
-                label="Reasoning"
-                icon={<Brain className="h-3.5 w-3.5" />}
-                tooltip="Reasoning-oriented model behavior."
-              />
-            ) : null}
-            {model.moe ? (
-              <CapabilityBadge
-                label="MoE"
-                icon={<Boxes className="h-3.5 w-3.5" />}
-                tooltip="Mixture-of-experts architecture."
-              />
-            ) : null}
-            {model.tool_use ? (
-              <CapabilityBadge
-                label="Tool Use"
-                icon={<Braces className="h-3.5 w-3.5" />}
-                tooltip={toolUseTooltip(model.tool_use_status)}
-              />
-            ) : null}
-          </div>
         </SheetHeader>
       </div>
 
@@ -4690,6 +4655,49 @@ function ModelSidebar({
             />
           ) : null}
         </div>
+
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm">Capabilities</CardTitle>
+          </CardHeader>
+          <CardContent className="pt-0">
+            <div className="flex flex-wrap gap-2">
+              <CapabilityBadge
+                label="Text"
+                icon={<MessageSquarePlus className="h-3.5 w-3.5" />}
+                tooltip="Supports text input and text generation."
+              />
+              {model.vision ? (
+                <CapabilityBadge
+                  label="Vision"
+                  icon={<ImagePlus className="h-3.5 w-3.5" />}
+                  tooltip="Can understand image input."
+                />
+              ) : null}
+              {model.reasoning ? (
+                <CapabilityBadge
+                  label="Reasoning"
+                  icon={<Brain className="h-3.5 w-3.5" />}
+                  tooltip="Reasoning-oriented model behavior."
+                />
+              ) : null}
+              {model.moe ? (
+                <CapabilityBadge
+                  label="MoE"
+                  icon={<Boxes className="h-3.5 w-3.5" />}
+                  tooltip="Mixture-of-experts architecture."
+                />
+              ) : null}
+              {model.tool_use ? (
+                <CapabilityBadge
+                  label="Tool Use"
+                  icon={<Braces className="h-3.5 w-3.5" />}
+                  tooltip={toolUseTooltip(model.tool_use_status)}
+                />
+              ) : null}
+            </div>
+          </CardContent>
+        </Card>
 
         {(model.description
           || model.architecture
