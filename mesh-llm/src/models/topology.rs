@@ -1,5 +1,6 @@
 use super::catalog;
-use super::local::huggingface_identity_for_path;
+use super::local::{huggingface_hub_cache, huggingface_identity_for_path};
+use hf_hub::Repo;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
@@ -39,10 +40,6 @@ pub fn infer_local_model_topology(
         return Some(model);
     }
 
-    if huggingface_identity_for_path(path).is_none() {
-        return None;
-    }
-
     read_local_config(path).and_then(|config| infer_hf_metadata_topology(&config))
 }
 
@@ -68,8 +65,14 @@ fn infer_hf_metadata_topology(config: &Value) -> Option<ModelTopology> {
 }
 
 fn read_local_config(path: &Path) -> Option<Value> {
-    let parent = path.parent()?;
-    let config_path = parent.join("config.json");
+    // Derive the snapshot root using the hf-hub CacheRepo::pointer_path() API.
+    // This matches the authoritative cache layout: cache/models--{org}--{repo}/snapshots/{revision}/
+    // config.json always lives at the snapshot root, even when the GGUF is in a subdirectory.
+    let identity = huggingface_identity_for_path(path)?;
+    let snapshot_root = huggingface_hub_cache()
+        .repo(Repo::model(identity.repo_id))
+        .pointer_path(&identity.revision);
+    let config_path = snapshot_root.join("config.json");
     let text = std::fs::read_to_string(config_path).ok()?;
     serde_json::from_str(&text).ok()
 }

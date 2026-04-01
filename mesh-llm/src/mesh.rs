@@ -3990,9 +3990,11 @@ impl Node {
         let my_demand = self.get_demand();
         let stale_cutoff =
             std::time::Instant::now() - std::time::Duration::from_secs(PEER_STALE_SECS);
-        let local_inventory = scan_local_inventory_snapshot();
-        let my_model_metadata: Vec<_> = local_inventory.metadata_by_name.into_values().collect();
-        let my_model_sizes = local_inventory.size_by_name;
+        // Gossip wire encoding strips available_model_metadata and available_model_sizes,
+        // and remote ingest ignores them. Avoid an expensive scan_local_inventory_snapshot()
+        // on the hot gossip path.
+        let my_model_metadata: Vec<_> = Vec::new();
+        let my_model_sizes: HashMap<_, _> = HashMap::new();
         let mut announcements: Vec<PeerAnnouncement> = {
             let state = self.state.lock().await;
             state

@@ -3236,7 +3236,7 @@ function DashboardPage({
                         </div>
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-2">
-                            <div className="text-sm font-medium leading-5 [overflow-wrap:anywhere]">{shortName(model.name)}</div>
+                            <div className="text-sm font-medium leading-5 [overflow-wrap:anywhere]">{shortName(modelDisplayName(model))}</div>
                             <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
                               {model.vision ? <span role="img" aria-label="Vision">👁</span> : null}
                               {model.reasoning ? <span role="img" aria-label="Reasoning">🧠</span> : null}
@@ -3250,7 +3250,6 @@ function DashboardPage({
                           label={model.status === 'warm' ? 'Warm' : model.status === 'cold' ? 'Cold' : model.status}
                           tone={model.status === 'warm' ? 'warm' : model.status === 'cold' ? 'cold' : 'neutral'}
                           dot
-                          tooltip={modelStatusTooltip(model.status)}
                         />
                       </div>
                       <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
@@ -5012,7 +5011,7 @@ function StatusPill({
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="inline-flex" tabIndex={0}>{badge}</span>
+        <span className="inline-flex">{badge}</span>
       </TooltipTrigger>
       <TooltipContent side="bottom" align="center" sideOffset={8}>
         {tooltip}
@@ -5061,8 +5060,14 @@ function modelFullFileName(model?: MeshModel | null) {
 }
 
 function modelRevisionFileName(model?: MeshModel | null) {
+  if (!model?.source_revision) return null;
+  // Prefer canonical Hugging Face style: repo@rev/file
+  if (model.source_ref && model.source_file) {
+    return `${model.source_ref}@${model.source_revision}/${model.source_file}`;
+  }
+  // Fallback: append revision to whatever name we have
   const fullName = modelFullFileName(model);
-  if (!fullName || !model?.source_revision) return null;
+  if (!fullName) return null;
   return `${fullName}@${model.source_revision}`;
 }
 
