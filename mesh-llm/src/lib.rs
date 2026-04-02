@@ -1,5 +1,4 @@
 mod api;
-mod benchmark;
 mod cli;
 mod inference;
 mod mesh;
@@ -22,6 +21,7 @@ pub(crate) use inference::{election, launch, moe, pipeline};
 pub(crate) use network::{nostr, proxy, rewrite, router, tunnel};
 pub use plugins::blackboard;
 pub use plugins::blackboard::mcp as blackboard_mcp;
+pub(crate) use system::benchmark;
 pub(crate) use system::{affinity, autoupdate, hardware};
 
 use anyhow::Result;
