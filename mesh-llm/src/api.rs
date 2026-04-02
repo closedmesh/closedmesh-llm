@@ -17,7 +17,6 @@
 use crate::{affinity, election, mesh, nostr, plugin, proxy};
 use include_dir::{include_dir, Dir};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -1743,37 +1742,18 @@ fn decode_runtime_model_path(path: &str) -> Option<String> {
 
 async fn respond_console_index(stream: &mut TcpStream) -> anyhow::Result<bool> {
     if let Some(file) = CONSOLE_DIST.get_file("index.html") {
-        let mut html = String::from_utf8_lossy(file.contents()).into_owned();
-        if let Some(fingerprint) = console_asset_fingerprint("assets/index.js") {
-            html = html.replace(
-                "/assets/index.js",
-                &format!("/assets/index.js?v={fingerprint}"),
-            );
-        }
-        if let Some(fingerprint) = console_asset_fingerprint("assets/index.css") {
-            html = html.replace(
-                "/assets/index.css",
-                &format!("/assets/index.css?v={fingerprint}"),
-            );
-        }
         respond_bytes_cached(
             stream,
             200,
             "OK",
             "text/html; charset=utf-8",
-            "no-store",
-            html.as_bytes(),
+            "no-cache",
+            file.contents(),
         )
         .await?;
         return Ok(true);
     }
     Ok(false)
-}
-
-fn console_asset_fingerprint(rel: &str) -> Option<String> {
-    let file = CONSOLE_DIST.get_file(rel)?;
-    let digest = Sha256::digest(file.contents());
-    Some(hex::encode(&digest[..6]))
 }
 
 async fn respond_console_asset(stream: &mut TcpStream, path: &str) -> anyhow::Result<bool> {
