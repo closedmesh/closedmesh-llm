@@ -1418,18 +1418,26 @@ async fn run_auto(
     };
 
     // Set model source for gossip (so other joiners can discover it too)
-    let model_source = if !cli.model.is_empty() {
-        cli.model[0].to_string_lossy().to_string()
-    } else {
-        model_name.clone()
-    };
-    node.set_model_source(model_source).await;
-    // Declare which models this node may serve, but do not advertise them as
-    // live/routable until their local processes have passed health checks.
-    let all_declared = build_serving_list(&resolved_models, &model_name);
-    node.set_serving_models(all_declared.clone()).await;
+    let model_source = models::exact_model_source_for_path(&model).unwrap_or_else(|| {
+        if !cli.model.is_empty() {
+            cli.model[0].to_string_lossy().to_string()
+        } else {
+            model_name.clone()
+        }
+    });
+    node.set_model_source(model_source.clone()).await;
+    // Set all serving models (primary + extras)
+    let all_serving = build_serving_list(&resolved_models, &model_name);
+    node.set_serving_models(all_serving.clone()).await;
+    node.set_served_model_descriptors(mesh::infer_served_model_descriptors(
+        &model_name,
+        &all_serving,
+        Some(model_source.as_str()),
+        Some(&model),
+    ))
+    .await;
     node.set_hosted_models(Vec::new()).await;
-    node.set_models(all_declared.clone()).await;
+    node.set_models(all_serving).await;
     // Re-gossip so peers learn our catalog/requested state without prematurely
     // routing requests to not-yet-ready local processes.
     node.regossip().await;

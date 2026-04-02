@@ -1,28 +1,36 @@
 pub mod capabilities;
 pub mod catalog;
 pub mod cli;
+pub mod gguf;
+pub mod inventory;
 pub mod local;
+pub mod search;
+pub mod topology;
 
 use anyhow::{anyhow, bail, Context, Result};
 use hf_hub::api::sync::{Api, ApiBuilder};
+use hf_hub::api::tokio::{Api as TokioApi, ApiBuilder as TokioApiBuilder};
 use hf_hub::api::RepoInfo;
+use hf_hub::cache::CacheInfo;
 use hf_hub::{Repo, RepoType};
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-pub use capabilities::ModelCapabilities;
+pub use capabilities::{CapabilityLevel, ModelCapabilities};
 pub use cli::{
     run_model_download, run_model_installed, run_model_recommended, run_model_search,
     run_model_show, warn_about_legacy_model_usage,
 };
+pub use inventory::{scan_local_inventory_snapshot_with_progress, LocalModelInventorySnapshot};
 pub use local::{
-    find_model_path, huggingface_hub_cache, huggingface_hub_cache_dir, legacy_models_dir,
-    legacy_models_present, model_dirs, path_is_in_legacy_models_dir, scan_installed_models,
-    scan_local_models,
+    exact_model_source_for_path, find_model_path, huggingface_hub_cache, huggingface_hub_cache_dir,
+    huggingface_identity_for_path, legacy_models_dir, legacy_models_present, model_dirs,
+    path_is_in_legacy_models_dir, scan_installed_models, scan_local_models,
 };
+pub use search::{search_catalog_models, search_huggingface, SearchProgress};
+pub use topology::{infer_local_model_topology, ModelMoeInfo, ModelTopology};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MigrationStatus {
@@ -66,18 +74,6 @@ struct UpdateCounts {
 }
 
 #[derive(Clone, Debug)]
-pub struct SearchHit {
-    pub repo_id: String,
-    pub file: String,
-    pub exact_ref: String,
-    pub size_label: Option<String>,
-    pub downloads: Option<u64>,
-    pub likes: Option<u64>,
-    pub catalog: Option<&'static catalog::CatalogModel>,
-    pub capabilities: ModelCapabilities,
-}
-
-#[derive(Clone, Debug)]
 pub struct ModelDetails {
     pub display_name: String,
     pub exact_ref: String,
@@ -104,32 +100,12 @@ enum ExactModelRef {
     },
 }
 
-#[derive(Debug, Deserialize)]
-struct HuggingFaceRepoSummary {
-    id: String,
-    downloads: Option<u64>,
-    likes: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct HuggingFaceRepoDetail {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default, rename = "modelId")]
-    model_id: Option<String>,
-    #[serde(default)]
-    siblings: Vec<HuggingFaceSibling>,
-}
-
-#[derive(Debug, Deserialize)]
-struct HuggingFaceSibling {
-    rfilename: String,
-}
-
 fn merge_capabilities(left: ModelCapabilities, right: ModelCapabilities) -> ModelCapabilities {
     ModelCapabilities {
         vision: left.vision.max(right.vision),
         reasoning: left.reasoning.max(right.reasoning),
+        tool_use: left.tool_use.max(right.tool_use),
+        moe: left.moe || right.moe,
     }
 }
 
@@ -140,20 +116,6 @@ pub fn find_catalog_model_exact(query: &str) -> Option<&'static catalog::Catalog
             || model.file.to_lowercase() == q
             || model.file.trim_end_matches(".gguf").to_lowercase() == q
     })
-}
-
-pub fn search_catalog_models(query: &str) -> Vec<&'static catalog::CatalogModel> {
-    let q = query.to_lowercase();
-    let mut results: Vec<_> = catalog::MODEL_CATALOG
-        .iter()
-        .filter(|model| {
-            model.name.to_lowercase().contains(&q)
-                || model.file.to_lowercase().contains(&q)
-                || model.description.to_lowercase().contains(&q)
-        })
-        .collect();
-    results.sort_by(|left, right| left.name.cmp(&right.name));
-    results
 }
 
 pub async fn download_exact_ref(input: &str) -> Result<PathBuf> {
@@ -269,105 +231,6 @@ pub async fn show_exact_model(input: &str) -> Result<ModelDetails> {
     }
 }
 
-// Keep search custom for now. `hf-hub` handles cache and file transport well,
-// but it does not expose a Hub search surface in this crate version.
-pub async fn search_huggingface(query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-    let repo_limit = limit.clamp(1, 100);
-    let client = http_client()?;
-    let mut request = client.get("https://huggingface.co/api/models").query(&[
-        ("search", query),
-        ("filter", "gguf"),
-        ("limit", &repo_limit.to_string()),
-    ]);
-    if let Some(token) = hf_token_override() {
-        request = request.bearer_auth(token);
-    }
-    let repos: Vec<HuggingFaceRepoSummary> = request
-        .send()
-        .await
-        .context("Search Hugging Face")?
-        .error_for_status()
-        .context("Hugging Face search failed")?
-        .json()
-        .await
-        .context("Parse Hugging Face search response")?;
-
-    let mut hits = Vec::new();
-    for repo in repos {
-        let mut detail_request =
-            client.get(format!("https://huggingface.co/api/models/{}", repo.id));
-        if let Some(token) = hf_token_override() {
-            detail_request = detail_request.bearer_auth(token);
-        }
-        let detail: HuggingFaceRepoDetail = detail_request
-            .send()
-            .await
-            .with_context(|| format!("Fetch Hugging Face repo {}", repo.id))?
-            .error_for_status()
-            .with_context(|| format!("Hugging Face repo {} returned an error", repo.id))?
-            .json()
-            .await
-            .with_context(|| format!("Parse Hugging Face repo {}", repo.id))?;
-
-        let repo_id = detail.id.or(detail.model_id).unwrap_or(repo.id.clone());
-        let sibling_names: Vec<String> = detail
-            .siblings
-            .iter()
-            .map(|sibling| sibling.rfilename.clone())
-            .collect();
-        let mut files: Vec<String> = detail
-            .siblings
-            .into_iter()
-            .map(|sibling| sibling.rfilename)
-            .filter(|file| file.ends_with(".gguf"))
-            .collect();
-        if files.is_empty() {
-            continue;
-        }
-        files.sort_by(|left, right| {
-            file_preference_score(left)
-                .cmp(&file_preference_score(right))
-                .then_with(|| left.cmp(right))
-        });
-        if let Some(file) = files.into_iter().next() {
-            let catalog = matching_catalog_model_for_huggingface(&repo_id, None, &file);
-            let download_url = huggingface_resolve_url(&repo_id, None, &file);
-            let size_label = match catalog {
-                Some(model) => Some(model.size.to_string()),
-                None => remote_size_label(&download_url).await,
-            };
-            let remote_caps = capabilities::infer_remote_hf_capabilities(
-                &repo_id,
-                None,
-                &file,
-                Some(&sibling_names),
-            )
-            .await;
-            let capabilities = match catalog {
-                Some(model) => {
-                    let base = capabilities::infer_catalog_capabilities(model);
-                    merge_capabilities(base, remote_caps)
-                }
-                None => remote_caps,
-            };
-            hits.push(SearchHit {
-                repo_id: repo_id.clone(),
-                file: file.clone(),
-                exact_ref: format!("{repo_id}/{file}"),
-                size_label,
-                downloads: repo.downloads,
-                likes: repo.likes,
-                catalog,
-                capabilities,
-            });
-            if hits.len() >= limit {
-                return Ok(hits);
-            }
-        }
-    }
-    Ok(hits)
-}
-
 pub fn run_migrate(apply: bool, prune: bool) -> Result<()> {
     let entries = migration_entries();
     let legacy_dir = legacy_models_dir();
@@ -423,7 +286,7 @@ pub fn run_migrate(apply: bool, prune: bool) -> Result<()> {
         return run_prune(&entries);
     }
 
-    let api = build_hf_api(true)?;
+    let api = build_hf_api()?;
     let mut migrated = 0usize;
     let mut totals = MigrationCounts::default();
     let mut grouped = BTreeMap::<String, Vec<&MigrationEntry>>::new();
@@ -464,7 +327,7 @@ pub fn run_migrate(apply: bool, prune: bool) -> Result<()> {
 }
 
 pub fn run_update(repo: Option<&str>, all: bool, check: bool) -> Result<()> {
-    let api = build_hf_api(!check)?;
+    let api = build_hf_api()?;
     let repos = cached_repos()?;
     if repos.is_empty() {
         eprintln!("📦 No cached Hugging Face model repos found");
@@ -568,7 +431,7 @@ pub fn warn_about_updates_for_paths(paths: &[PathBuf]) {
         return;
     }
 
-    let api = match build_hf_api(false) {
+    let api = match build_hf_api() {
         Ok(api) => api,
         Err(err) => {
             eprintln!("Warning: could not initialize Hugging Face update checks: {err}");
@@ -607,8 +470,8 @@ pub fn installed_model_display_name(model_name: &str) -> String {
         .unwrap_or_else(|| model_name.to_string())
 }
 
-fn build_hf_api(progress: bool) -> Result<Api> {
-    let mut builder = ApiBuilder::from_cache(huggingface_hub_cache()).with_progress(progress);
+fn build_hf_api() -> Result<Api> {
+    let mut builder = ApiBuilder::from_cache(huggingface_hub_cache()).with_progress(false);
     if let Ok(endpoint) = std::env::var("HF_ENDPOINT") {
         let endpoint = endpoint.trim();
         if !endpoint.is_empty() {
@@ -617,6 +480,20 @@ fn build_hf_api(progress: bool) -> Result<Api> {
     }
     builder = builder.with_token(hf_token_override());
     builder.build().context("Build Hugging Face API client")
+}
+
+pub(super) fn build_hf_tokio_api(progress: bool) -> Result<TokioApi> {
+    let mut builder = TokioApiBuilder::from_cache(huggingface_hub_cache()).with_progress(progress);
+    if let Ok(endpoint) = std::env::var("HF_ENDPOINT") {
+        let endpoint = endpoint.trim();
+        if !endpoint.is_empty() {
+            builder = builder.with_endpoint(endpoint.to_string());
+        }
+    }
+    builder = builder.with_token(hf_token_override());
+    builder
+        .build()
+        .context("Build Hugging Face async API client")
 }
 
 fn hf_token_override() -> Option<String> {
@@ -970,14 +847,18 @@ fn http_client() -> Result<reqwest::Client> {
 }
 
 async fn remote_size_label(url: &str) -> Option<String> {
-    let client = http_client().ok()?;
-    let mut request = client.head(url);
-    if url.contains("huggingface.co/") {
-        if let Some(token) = hf_token_override() {
-            request = request.bearer_auth(token);
-        }
+    if let Some((repo, revision, file)) = parse_hf_resolve_url(url) {
+        let api = build_hf_tokio_api(false).ok()?;
+        return remote_hf_size_label_with_api(&api, &repo, revision.as_deref(), &file).await;
     }
-    let response = request.send().await.ok()?.error_for_status().ok()?;
+    let client = http_client().ok()?;
+    let response = client
+        .head(url)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?;
     let size = response
         .headers()
         .get(reqwest::header::CONTENT_LENGTH)?
@@ -986,6 +867,22 @@ async fn remote_size_label(url: &str) -> Option<String> {
         .parse::<u64>()
         .ok()?;
     Some(format_size_bytes(size))
+}
+
+async fn remote_hf_size_label_with_api(
+    api: &TokioApi,
+    repo: &str,
+    revision: Option<&str>,
+    file: &str,
+) -> Option<String> {
+    let repo = match revision {
+        Some(revision) => {
+            Repo::with_revision(repo.to_string(), RepoType::Model, revision.to_string())
+        }
+        None => Repo::new(repo.to_string(), RepoType::Model),
+    };
+    let metadata = api.repo(repo).file_metadata(file).await.ok()?;
+    Some(format_size_bytes(metadata.size() as u64))
 }
 
 fn format_size_bytes(bytes: u64) -> String {
@@ -1285,37 +1182,38 @@ fn clear_progress_line() -> Result<()> {
 }
 
 fn cached_repos() -> Result<Vec<CachedRepo>> {
-    let root = huggingface_hub_cache_dir();
+    let cache = huggingface_hub_cache();
     let mut repos = Vec::new();
-    if !root.exists() {
-        return Ok(repos);
-    }
-
-    for entry in std::fs::read_dir(&root).with_context(|| format!("Read {}", root.display()))? {
-        let entry = entry?;
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+    let cache_info =
+        CacheInfo::scan_dir(Some(cache.path())).context("Enumerate cached Hugging Face repos")?;
+    for repo in &cache_info.repos {
+        let cache_id = repo.cache_id();
+        let Some(repo_id) = cache_id.strip_prefix("model/") else {
             continue;
         };
-        if !name.starts_with("models--") {
-            continue;
-        }
-        let Some(repo_id) = cache_repo_id_from_dir(name) else {
+        let Some(revision) = repo
+            .revisions
+            .iter()
+            .find(|revision| revision.refs.contains("main"))
+            .or_else(|| repo.revisions.iter().next())
+        else {
             continue;
         };
-        // `hf-hub` does not currently expose cached ref enumeration, so we
-        // still inspect the repo directory to discover installed revisions.
-        let refs_dir = path.join("refs");
-        if !refs_dir.is_dir() {
-            continue;
-        }
-        if let Some((ref_name, local_revision)) = first_cache_ref(&refs_dir)? {
-            repos.push(CachedRepo {
-                repo_id,
-                ref_name,
-                local_revision,
-            });
-        }
+        let ref_name = if revision.refs.contains("main") {
+            "main".to_string()
+        } else {
+            revision
+                .refs
+                .iter()
+                .next()
+                .cloned()
+                .unwrap_or_else(|| "main".to_string())
+        };
+        repos.push(CachedRepo {
+            repo_id: repo_id.to_string(),
+            ref_name,
+            local_revision: revision.commit_hash.clone(),
+        });
     }
 
     repos.sort_by(|left, right| left.repo_id.cmp(&right.repo_id));
@@ -1323,110 +1221,39 @@ fn cached_repos() -> Result<Vec<CachedRepo>> {
 }
 
 fn cached_repo_for_path(path: &Path) -> Result<Option<CachedRepo>> {
-    let root = huggingface_hub_cache_dir();
-    let rel = match path.strip_prefix(&root) {
-        Ok(rel) => rel,
-        Err(_) => return Ok(None),
-    };
-    let mut components = rel.components();
-    let Some(repo_component) = components.next() else {
+    let Some(identity) = huggingface_identity_for_path(path) else {
         return Ok(None);
     };
-    let Some(repo_dir_name) = repo_component.as_os_str().to_str() else {
-        return Ok(None);
-    };
-    if !repo_dir_name.starts_with("models--") {
-        return Ok(None);
-    }
-    let Some(snapshot_component) = components.next() else {
-        return Ok(None);
-    };
-    if snapshot_component.as_os_str() != "snapshots" {
-        return Ok(None);
-    }
-    let Some(revision_component) = components.next() else {
-        return Ok(None);
-    };
-    let Some(local_revision) = revision_component.as_os_str().to_str() else {
-        return Ok(None);
-    };
-    let Some(repo_id) = cache_repo_id_from_dir(repo_dir_name) else {
-        return Ok(None);
-    };
-    let repo_dir = root.join(repo_dir_name);
-    let ref_name =
-        matching_ref_name(&repo_dir, local_revision)?.unwrap_or_else(|| "main".to_string());
+    let cache = huggingface_hub_cache();
+    let cache_info =
+        CacheInfo::scan_dir(Some(cache.path())).context("Enumerate cached Hugging Face repos")?;
+    let ref_name = cache_info
+        .repos
+        .iter()
+        .find(|repo| repo.cache_id().strip_prefix("model/") == Some(identity.repo_id.as_str()))
+        .and_then(|repo| {
+            repo.revisions
+                .iter()
+                .find(|revision| revision.commit_hash == identity.revision)
+        })
+        .map(|revision| {
+            if revision.refs.contains("main") {
+                "main".to_string()
+            } else {
+                revision
+                    .refs
+                    .iter()
+                    .next()
+                    .cloned()
+                    .unwrap_or_else(|| "main".to_string())
+            }
+        })
+        .unwrap_or_else(|| "main".to_string());
     Ok(Some(CachedRepo {
-        repo_id,
+        repo_id: identity.repo_id,
         ref_name,
-        local_revision: local_revision.to_string(),
+        local_revision: identity.revision,
     }))
-}
-
-fn cache_repo_id_from_dir(name: &str) -> Option<String> {
-    Some(name.strip_prefix("models--")?.replace("--", "/"))
-}
-
-fn first_cache_ref(refs_dir: &Path) -> Result<Option<(String, String)>> {
-    let main = refs_dir.join("main");
-    if main.is_file() {
-        let value = std::fs::read_to_string(&main)
-            .with_context(|| format!("Read {}", main.display()))?
-            .trim()
-            .to_string();
-        if !value.is_empty() {
-            return Ok(Some(("main".to_string(), value)));
-        }
-    }
-
-    let mut refs = Vec::new();
-    collect_ref_files(refs_dir, refs_dir, &mut refs)?;
-    refs.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(refs.into_iter().next())
-}
-
-fn matching_ref_name(repo_dir: &Path, revision: &str) -> Result<Option<String>> {
-    let refs_dir = repo_dir.join("refs");
-    if !refs_dir.is_dir() {
-        return Ok(None);
-    }
-    let mut refs = Vec::new();
-    collect_ref_files(&refs_dir, &refs_dir, &mut refs)?;
-    refs.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(refs
-        .into_iter()
-        .find(|(_, value)| value == revision)
-        .map(|(name, _)| name))
-}
-
-// This remains a small compatibility layer around the on-disk cache because
-// `hf-hub` does not expose "list all refs for this cached repo" yet.
-fn collect_ref_files(root: &Path, dir: &Path, refs: &mut Vec<(String, String)>) -> Result<()> {
-    for entry in std::fs::read_dir(dir).with_context(|| format!("Read {}", dir.display()))? {
-        let entry = entry?;
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            collect_ref_files(root, &path, refs)?;
-            continue;
-        }
-        if !file_type.is_file() {
-            continue;
-        }
-        let ref_name = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        let revision = std::fs::read_to_string(&path)
-            .with_context(|| format!("Read {}", path.display()))?
-            .trim()
-            .to_string();
-        if !revision.is_empty() {
-            refs.push((ref_name, revision));
-        }
-    }
-    Ok(())
 }
 
 fn remote_repo_info(api: &Api, repo_id: &str, ref_name: &str) -> Result<RepoInfo> {
@@ -1504,39 +1331,32 @@ fn is_not_found_error(message: &str) -> bool {
 
 fn cached_repo_files(repo: &CachedRepo) -> Result<Vec<String>> {
     let cache = huggingface_hub_cache();
-    let repo_handle =
-        Repo::with_revision(repo.repo_id.clone(), RepoType::Model, repo.ref_name.clone());
-    let root = cache.repo(repo_handle).pointer_path(&repo.local_revision);
-    if !root.is_dir() {
-        return Ok(Vec::new());
-    }
-
-    let mut files = Vec::new();
-    collect_snapshot_files(&root, &root, &mut files)?;
-    files.sort();
+    let cache_info =
+        CacheInfo::scan_dir(Some(cache.path())).context("Enumerate cached Hugging Face repos")?;
+    let files = cache_info
+        .repos
+        .iter()
+        .find(|cached| cached.cache_id().strip_prefix("model/") == Some(repo.repo_id.as_str()))
+        .and_then(|cached| {
+            cached
+                .revisions
+                .iter()
+                .find(|revision| revision.commit_hash == repo.local_revision)
+        })
+        .map(|revision| {
+            revision
+                .files
+                .iter()
+                .filter_map(|file| {
+                    file.file_path
+                        .strip_prefix(&revision.snapshot_path)
+                        .ok()
+                        .map(|path| path.to_string_lossy().replace('\\', "/"))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     Ok(files)
-}
-
-fn collect_snapshot_files(root: &Path, dir: &Path, files: &mut Vec<String>) -> Result<()> {
-    for entry in std::fs::read_dir(dir).with_context(|| format!("Read {}", dir.display()))? {
-        let entry = entry?;
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            collect_snapshot_files(root, &path, files)?;
-            continue;
-        }
-        if !file_type.is_file() && !file_type.is_symlink() {
-            continue;
-        }
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        files.push(rel);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1555,11 +1375,9 @@ mod tests {
     }
 
     #[test]
-    fn cache_repo_id_from_dir_decodes_hf_cache_names() {
-        assert_eq!(
-            cache_repo_id_from_dir("models--Qwen--Qwen3-8B-GGUF"),
-            Some("Qwen/Qwen3-8B-GGUF".to_string())
-        );
+    fn hf_hub_repo_folder_name_matches_cache_layout() {
+        let repo = Repo::model("Qwen/Qwen3-8B-GGUF".to_string());
+        assert_eq!(repo.folder_name(), "models--Qwen--Qwen3-8B-GGUF");
     }
 
     #[test]

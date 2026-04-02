@@ -2,10 +2,11 @@ use super::{
     capabilities, catalog, download_exact_ref, find_catalog_model_exact, huggingface_hub_cache_dir,
     installed_model_capabilities, legacy_models_dir, legacy_models_present,
     path_is_in_legacy_models_dir, scan_installed_models, search_catalog_models, search_huggingface,
-    show_exact_model,
+    show_exact_model, SearchProgress,
 };
 use crate::hardware;
 use anyhow::{anyhow, Result};
+use std::io::Write;
 use std::path::PathBuf;
 
 pub fn print_legacy_storage_warning() {
@@ -54,7 +55,29 @@ pub async fn run_model_search(query: &[String], catalog_only: bool, limit: usize
         return Ok(());
     }
 
-    let results = search_huggingface(&query, limit).await?;
+    eprintln!("🔎 Searching Hugging Face GGUF repos for '{query}'...");
+    let mut announced_repo_scan = false;
+    let results = search_huggingface(&query, limit, |progress| match progress {
+        SearchProgress::SearchingHub => {}
+        SearchProgress::InspectingRepos { completed, total } => {
+            if total == 0 {
+                return;
+            }
+            if !announced_repo_scan {
+                announced_repo_scan = true;
+                eprintln!("   Inspecting {total} candidate repos...");
+            }
+            if completed == 0 {
+                return;
+            }
+            eprint!("\r   Inspected {completed}/{total} candidate repos...");
+            let _ = std::io::stderr().flush();
+            if completed == total {
+                eprintln!();
+            }
+        }
+    })
+    .await?;
     if results.is_empty() {
         eprintln!("🔎 No Hugging Face GGUF matches for '{query}'.");
         return Ok(());
@@ -87,6 +110,9 @@ pub async fn run_model_search(query: &[String], catalog_only: bool, limit: usize
         }
         if let Some(label) = result.capabilities.reasoning_label() {
             caps.push(format!("🧠 reasoning ({label})"));
+        }
+        if let Some(label) = result.capabilities.tool_use_label() {
+            caps.push(format!("🛠️ tool use ({label})"));
         }
         println!("   capabilities: {}", caps.join("  "));
         println!("   ref: {}", result.exact_ref);
@@ -121,6 +147,9 @@ pub fn run_model_recommended() {
         }
         if let Some(label) = model_capabilities.reasoning_label() {
             println!("  🧠 Reasoning: {}", label);
+        }
+        if let Some(label) = model_capabilities.tool_use_label() {
+            println!("  🛠️ Tool Use: {}", label);
         }
         if model.moe.is_some() {
             println!("  🧩 MoE: yes");
@@ -182,6 +211,9 @@ pub fn run_model_installed() {
         if let Some(label) = model_capabilities.reasoning_label() {
             println!("  🧠 Reasoning: {}", label);
         }
+        if let Some(label) = model_capabilities.tool_use_label() {
+            println!("  🛠️ Tool Use: {}", label);
+        }
         println!();
     }
 }
@@ -214,6 +246,9 @@ pub async fn run_model_show(model_ref: &str) -> Result<()> {
     }
     if let Some(label) = details.capabilities.reasoning_label() {
         println!("  🧠 reasoning ({label})");
+    }
+    if let Some(label) = details.capabilities.tool_use_label() {
+        println!("  🛠️ tool use ({label})");
     }
     if let Some(moe) = details.moe {
         println!(

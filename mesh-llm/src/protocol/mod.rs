@@ -26,6 +26,7 @@ use iroh::{Endpoint, EndpointAddr, EndpointId};
 use prost::Message;
 pub(crate) use v0::*;
 pub const ALPN_V1: &[u8] = b"mesh-llm/1";
+#[cfg(test)]
 pub const ALPN: &[u8] = ALPN_V1;
 pub(crate) const NODE_PROTOCOL_GENERATION: u32 = 1;
 pub(crate) const MAX_CONTROL_FRAME_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
@@ -49,19 +50,34 @@ pub(crate) enum ControlProtocol {
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum ControlFrameError {
-    OversizeFrame { size: usize },
-    BadGeneration { got: u32 },
-    InvalidEndpointId { got: usize },
-    InvalidSenderId { got: usize },
+    #[cfg(test)]
+    OversizeFrame {
+        size: usize,
+    },
+    BadGeneration {
+        got: u32,
+    },
+    InvalidEndpointId {
+        got: usize,
+    },
+    InvalidSenderId {
+        got: usize,
+    },
     MissingHttpPort,
+    #[cfg(test)]
     DecodeError(String),
-    WrongStreamType { expected: u8, got: u8 },
+    #[cfg(test)]
+    WrongStreamType {
+        expected: u8,
+        got: u8,
+    },
     ForgedSender,
 }
 
 impl std::fmt::Display for ControlFrameError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            #[cfg(test)]
             ControlFrameError::OversizeFrame { size } => write!(
                 f,
                 "control frame too large: {} bytes (max {})",
@@ -81,7 +97,9 @@ impl std::fmt::Display for ControlFrameError {
             ControlFrameError::MissingHttpPort => {
                 write!(f, "HOST-role peer annotation missing http_port")
             }
+            #[cfg(test)]
             ControlFrameError::DecodeError(msg) => write!(f, "protobuf decode error: {}", msg),
+            #[cfg(test)]
             ControlFrameError::WrongStreamType { expected, got } => write!(
                 f,
                 "wrong stream type: expected {:#04x}, got {:#04x}",
@@ -256,8 +274,12 @@ pub(crate) async fn write_gossip_payload(
             write_len_prefixed(send, &frame.encode_to_vec()).await?;
         }
         ControlProtocol::JsonV0 => {
+            let sanitized: Vec<PeerAnnouncement> = anns
+                .iter()
+                .map(crate::protocol::convert::sanitize_gossip_announcement_for_wire)
+                .collect();
             let legacy_anns: Vec<PeerAnnouncementV0> =
-                anns.iter().map(PeerAnnouncementV0::from).collect();
+                sanitized.iter().map(PeerAnnouncementV0::from).collect();
             let json = serde_json::to_vec(&legacy_anns)?;
             write_len_prefixed(send, &json).await?;
         }
@@ -294,7 +316,11 @@ pub(crate) fn decode_gossip_payload(
             Ok(anns
                 .into_iter()
                 .map(|ann| {
-                    let ann = ann.into_internal();
+                    let mut ann = ann.into_internal();
+                    ann.available_models.clear();
+                    ann.available_model_metadata.clear();
+                    ann.available_model_sizes.clear();
+                    crate::mesh::backfill_legacy_descriptors(&mut ann);
                     (ann.addr.clone(), ann)
                 })
                 .collect::<Vec<_>>())
@@ -302,6 +328,7 @@ pub(crate) fn decode_gossip_payload(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn encode_control_frame(stream_type: u8, msg: &impl prost::Message) -> Vec<u8> {
     let proto_bytes = msg.encode_to_vec();
     let len = proto_bytes.len() as u32;
@@ -312,6 +339,7 @@ pub(crate) fn encode_control_frame(stream_type: u8, msg: &impl prost::Message) -
     buf
 }
 
+#[cfg(test)]
 pub(crate) fn decode_control_frame<T: ValidateControlFrame>(
     expected_stream_type: u8,
     data: &[u8],
@@ -395,6 +423,7 @@ mod tests {
             available_model_metadata: vec![],
             experts_summary: None,
             available_model_sizes: HashMap::new(),
+            served_model_descriptors: vec![],
         }
     }
 
@@ -441,6 +470,7 @@ mod tests {
             available_model_metadata: vec![],
             experts_summary: None,
             available_model_sizes: HashMap::from([("Qwen".into(), 1234_u64)]),
+            served_model_descriptors: vec![],
         };
         let json = serde_json::to_vec(&vec![PeerAnnouncementV0::from(&ann)]).unwrap();
 
@@ -453,6 +483,10 @@ mod tests {
             Some("Qwen")
         );
         assert_eq!(decoded[0].1.mesh_id.as_deref(), Some("mesh-compat"));
+        assert!(
+            decoded[0].1.available_models.is_empty(),
+            "legacy JSON gossip must not populate passive available_models"
+        );
     }
 
     #[test]
@@ -842,6 +876,7 @@ mod tests {
             available_model_metadata: vec![],
             experts_summary: None,
             available_model_sizes: HashMap::new(),
+            served_model_descriptors: vec![],
         };
         let json = serde_json::to_vec(&vec![PeerAnnouncementV0::from(&ann)])
             .expect("JSON serialization must succeed");
