@@ -333,9 +333,14 @@ impl BlobStore {
             Ok(index) => index,
             Err(_) => return Ok(()),
         };
-        index
-            .tokens
-            .retain(|token| self.token_path(token).exists() || self.object_path(token).exists());
+        index.tokens.retain(|token| {
+            let has_metadata = self.token_path(token).exists();
+            if !has_metadata {
+                // Remove orphaned object file that reap_expired cannot discover
+                let _ = std::fs::remove_file(self.object_path(token));
+            }
+            has_metadata
+        });
         if index.tokens.is_empty() {
             let _ = std::fs::remove_file(path);
             return Ok(());

@@ -1389,7 +1389,12 @@ async fn relay_translated_responses_stream<R: AsyncRead + Unpin>(
         if n == 0 {
             break;
         }
-        carry.push_str(&String::from_utf8_lossy(&chunk[..n]));
+        let new_data = String::from_utf8_lossy(&chunk[..n]);
+        carry.push_str(&new_data);
+        // Normalize CRLF so frame parsing works for both LF and CRLF upstreams
+        if carry.contains('\r') {
+            carry = carry.replace("\r\n", "\n");
+        }
     }
 
     let text_done =
