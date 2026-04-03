@@ -57,10 +57,27 @@ pub(crate) async fn check_for_update() {
                 std::env::consts::ARCH,
             )
         {
-            eprintln!(
-                "✨ New version: v{VERSION} -> v{}. Run 'mesh-llm update'.",
-                release.version
-            );
+            let is_bundle_install = std::env::current_exe()
+                .ok()
+                .and_then(|exe| bundle_install_dir(&exe, None))
+                .is_some();
+            if is_bundle_install {
+                eprintln!(
+                    "✨ New version: v{VERSION} -> v{}. Run 'mesh-llm update'.",
+                    release.version
+                );
+            } else {
+                #[cfg(not(windows))]
+                eprintln!(
+                    "✨ New version: v{VERSION} -> v{}. Reinstall with: curl -fsSL {INSTALL_SCRIPT_URL} | sh",
+                    release.version
+                );
+                #[cfg(windows)]
+                eprintln!(
+                    "✨ New version: v{VERSION} -> v{}. Download from {RELEASES_URL}",
+                    release.version
+                );
+            }
         }
     }
 }
