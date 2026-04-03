@@ -122,6 +122,10 @@ import {
 } from "./components/ui/sheet";
 import { BrandIcon } from "./components/brand-icon";
 import { MeshLlmWordmark } from "./components/mesh-llm-wordmark";
+import {
+  getAttachmentSendIssue,
+  validateAttachmentFile,
+} from "./lib/attachments";
 import { cn } from "./lib/utils";
 import githubBlackLogo from "./assets/icons/github-invertocat-black.svg";
 import githubWhiteLogo from "./assets/icons/github-invertocat-white.svg";
@@ -832,6 +836,7 @@ export function App() {
   const [selectedModel, setSelectedModel] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
+  const [composerError, setComposerError] = useState<string | null>(null);
   const [reasoningOpen, setReasoningOpen] = useState<Record<string, boolean>>(
     {},
   );
@@ -921,6 +926,30 @@ export function App() {
     if (selectedModel) return multimodalModels.has(selectedModel);
     return meshModels.some((m) => m.status === "warm" && m.multimodal);
   }, [meshModels, multimodalModels, selectedModel]);
+  const pendingKinds = useMemo(
+    () => new Set(pendingAttachments.map((attachment) => attachment.kind)),
+    [pendingAttachments],
+  );
+  const attachmentSendIssue = useMemo(() => {
+    if (!pendingAttachments.length || !status) return null;
+    return getAttachmentSendIssue({
+      pendingKinds,
+      selectedModel,
+      warmModels,
+      visionModels,
+      audioModels,
+      multimodalModels,
+    });
+  }, [
+    audioModels,
+    multimodalModels,
+    pendingAttachments.length,
+    pendingKinds,
+    selectedModel,
+    status,
+    visionModels,
+    warmModels,
+  ]);
   const meshModelByName = useMemo(() => {
     const entries = meshModels.map((model) => [model.name, model] as const);
     return Object.fromEntries(entries) as Record<string, MeshModel>;
@@ -1235,6 +1264,17 @@ export function App() {
     setChatState((prev) => updater(prev));
   }
 
+  function markComposerAttachment(
+    attachmentId: string,
+    patch: Partial<Pick<ChatAttachment, "status" | "error">>,
+  ) {
+    setPendingAttachments((prev) =>
+      prev.map((attachment) =>
+        attachment.id === attachmentId ? { ...attachment, ...patch } : attachment,
+      ),
+    );
+  }
+
   async function uploadRequestObject(params: {
     requestId: string;
     dataUrl: string;
@@ -1258,43 +1298,71 @@ export function App() {
     return (await response.json()) as { token: string };
   }
 
+  async function buildAttachmentBlocks(
+    attachments: ChatAttachment[],
+    requestId: string,
+    clientId: string,
+    onStatusChange?: (
+      attachmentId: string,
+      patch: Partial<Pick<ChatAttachment, "status" | "error">>,
+    ) => void,
+  ) {
+    const contentBlocks: Array<Record<string, unknown>> = [];
+    for (const attachment of attachments) {
+      onStatusChange?.(attachment.id, { status: "uploading", error: undefined });
+      try {
+        const upload = await uploadRequestObject({
+          requestId,
+          dataUrl: attachment.dataUrl,
+          fileName: attachment.fileName,
+        });
+        const url = `mesh://blob/${clientId}/${upload.token}`;
+        if (attachment.kind === "image") {
+          contentBlocks.push({
+            type: "input_image",
+            image_url: url,
+          });
+        } else if (attachment.kind === "audio") {
+          contentBlocks.push({
+            type: "input_audio",
+            audio_url: url,
+          });
+        } else {
+          contentBlocks.push({
+            type: "input_file",
+            url,
+            mime_type: attachment.mimeType,
+            file_name: attachment.fileName,
+          });
+        }
+        onStatusChange?.(attachment.id, { status: "pending", error: undefined });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        onStatusChange?.(attachment.id, { status: "failed", error: message });
+        throw error;
+      }
+    }
+    return contentBlocks;
+  }
+
   async function buildResponsesInput(
     historyForRequest: ChatMessage[],
     requestId: string,
     clientId: string,
+    prebuiltContentByMessageId?: Record<string, Array<Record<string, unknown>>>,
   ) {
     return Promise.all(
       historyForRequest.map(async (message) => {
-        const contentBlocks: Array<Record<string, unknown>> = [];
+        const contentBlocks: Array<Record<string, unknown>> =
+          prebuiltContentByMessageId?.[message.id]?.slice() ?? [];
         const attachments = messageAttachments(message);
         if (message.content.trim()) {
           contentBlocks.push({ type: "input_text", text: message.content });
         }
-        for (const attachment of attachments) {
-          const upload = await uploadRequestObject({
-            requestId,
-            dataUrl: attachment.dataUrl,
-            fileName: attachment.fileName,
-          });
-          const url = `mesh://blob/${clientId}/${upload.token}`;
-          if (attachment.kind === "image") {
-            contentBlocks.push({
-              type: "input_image",
-              image_url: url,
-            });
-          } else if (attachment.kind === "audio") {
-            contentBlocks.push({
-              type: "input_audio",
-              audio_url: url,
-            });
-          } else {
-            contentBlocks.push({
-              type: "input_file",
-              url,
-              mime_type: attachment.mimeType,
-              file_name: attachment.fileName,
-            });
-          }
+        if (!prebuiltContentByMessageId?.[message.id] && attachments.length > 0) {
+          contentBlocks.push(
+            ...(await buildAttachmentBlocks(attachments, requestId, clientId)),
+          );
         }
         return {
           role: message.role,
@@ -1314,19 +1382,29 @@ export function App() {
     assistantId: string;
     model: string;
     historyForRequest: ChatMessage[];
+    requestId?: string;
+    prebuiltContentByMessageId?: Record<string, Array<Record<string, unknown>>>;
   }) {
-    const { conversationId, assistantId, model, historyForRequest } = params;
+    const {
+      conversationId,
+      assistantId,
+      model,
+      historyForRequest,
+      requestId: providedRequestId,
+      prebuiltContentByMessageId,
+    } = params;
     const reqStart = performance.now();
     const controller = new AbortController();
     currentAbortRef.current = controller;
 
     try {
-      const requestId = randomId();
+      const requestId = providedRequestId ?? randomId();
       const clientId = chatClientIdRef.current;
       const requestInput = await buildResponsesInput(
         historyForRequest,
         requestId,
         clientId,
+        prebuiltContentByMessageId,
       );
       const MAX_RETRIES = 3;
       const RETRY_DELAYS = [1000, 2000, 4000];
@@ -1524,10 +1602,13 @@ export function App() {
     const trimmed = text.trim();
     if ((!trimmed && pendingAttachments.length === 0) || !status || isSending)
       return;
+    if (attachmentSendIssue) {
+      setComposerError(attachmentSendIssue);
+      return;
+    }
 
     // Prefer an explicitly compatible model when sending media with model=auto.
     let model = selectedModel || status.model_name;
-    const pendingKinds = new Set(pendingAttachments.map((attachment) => attachment.kind));
     if (pendingAttachments.length > 0 && (!model || model === "auto")) {
       const multimodalModel = warmModels.find(
         (m) =>
@@ -1548,6 +1629,7 @@ export function App() {
         if (fileModel) model = fileModel;
       }
     }
+    setComposerError(null);
     const conversationId = activeConversation?.id ?? randomId();
     const userMessage: ChatMessage = {
       id: randomId(),
@@ -1559,6 +1641,24 @@ export function App() {
           ? pendingAttachments.map(({ status, error, ...attachment }) => attachment)
           : undefined,
     };
+    const requestId = randomId();
+    const clientId = chatClientIdRef.current;
+    let prebuiltContentByMessageId: Record<string, Array<Record<string, unknown>>> | undefined;
+    if (pendingAttachments.length > 0) {
+      try {
+        const blocks = await buildAttachmentBlocks(
+          pendingAttachments,
+          requestId,
+          clientId,
+          (attachmentId, patch) => markComposerAttachment(attachmentId, patch),
+        );
+        prebuiltContentByMessageId = { [userMessage.id]: blocks };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setComposerError(`Attachment upload failed: ${message}`);
+        return;
+      }
+    }
     const assistantId = randomId();
     const assistantMessage: ChatMessage = {
       id: assistantId,
@@ -1618,6 +1718,8 @@ export function App() {
       assistantId,
       model,
       historyForRequest,
+      requestId,
+      prebuiltContentByMessageId,
     });
   }
 
@@ -1858,6 +1960,9 @@ export function App() {
                   selectedModelVision={selectedModelVision}
                   selectedModelAudio={selectedModelAudio}
                   selectedModelMultimodal={selectedModelMultimodal}
+                  composerError={composerError}
+                  setComposerError={setComposerError}
+                  attachmentSendIssue={attachmentSendIssue}
                   pendingAttachments={pendingAttachments}
                   setPendingAttachments={setPendingAttachments}
                   conversations={conversations}
@@ -2463,7 +2568,7 @@ function AppHeader({
   );
 }
 
-function ChatPage(props: {
+export function ChatPage(props: {
   status: StatusPayload | null;
   inviteToken: string;
   isPublicMesh: boolean;
@@ -2479,6 +2584,9 @@ function ChatPage(props: {
   selectedModelVision: boolean;
   selectedModelAudio: boolean;
   selectedModelMultimodal: boolean;
+  composerError: string | null;
+  setComposerError: React.Dispatch<React.SetStateAction<string | null>>;
+  attachmentSendIssue: string | null;
   pendingAttachments: ChatAttachment[];
   setPendingAttachments: React.Dispatch<React.SetStateAction<ChatAttachment[]>>;
   conversations: ChatConversation[];
@@ -2516,6 +2624,9 @@ function ChatPage(props: {
     selectedModelVision,
     selectedModelAudio,
     selectedModelMultimodal,
+    composerError,
+    setComposerError,
+    attachmentSendIssue,
     pendingAttachments,
     setPendingAttachments,
     conversations,
@@ -2551,7 +2662,19 @@ function ChatPage(props: {
   const audioInputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  function markPendingAttachment(
+    attachmentId: string,
+    patch: Partial<Pick<ChatAttachment, "status" | "error">>,
+  ) {
+    setPendingAttachments((prev) =>
+      prev.map((attachment) =>
+        attachment.id === attachmentId ? { ...attachment, ...patch } : attachment,
+      ),
+    );
+  }
+
   function addPendingAttachment(attachment: Omit<ChatAttachment, "id" | "status" | "error">) {
+    setComposerError(null);
     setPendingAttachments((prev) => [
       ...prev,
       {
@@ -2563,14 +2686,26 @@ function ChatPage(props: {
   }
 
   function removePendingAttachment(attachmentId: string) {
+    setComposerError(null);
     setPendingAttachments((prev) =>
       prev.filter((attachment) => attachment.id !== attachmentId),
     );
   }
 
+  function resetAttachmentStatus(attachmentId: string) {
+    markPendingAttachment(attachmentId, { status: "pending", error: undefined });
+    setComposerError(null);
+  }
+
   function handleImageSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
+    const validationError = validateAttachmentFile(file, "image");
+    if (validationError) {
+      setComposerError(validationError);
+      e.target.value = "";
+      return;
+    }
     // Read as data URL first (handles HEIC, JPEG, PNG — whatever the browser supports)
     // then resize via canvas to max 512px (vision encoders tile at ~448px internally)
     const reader = new FileReader();
@@ -2624,6 +2759,12 @@ function ChatPage(props: {
   function handleAudioSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
+    const validationError = validateAttachmentFile(file, "audio");
+    if (validationError) {
+      setComposerError(validationError);
+      e.target.value = "";
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => {
       const dataUrl = reader.result as string;
@@ -2641,6 +2782,12 @@ function ChatPage(props: {
   function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
+    const validationError = validateAttachmentFile(file, "file");
+    if (validationError) {
+      setComposerError(validationError);
+      e.target.value = "";
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => {
       const dataUrl = reader.result as string;
@@ -3117,7 +3264,11 @@ function ChatPage(props: {
                 <div className="flex flex-wrap gap-2">
                   {pendingAttachments.map((attachment) =>
                     attachment.kind === "image" ? (
-                      <div key={attachment.id} className="relative inline-block">
+                      <div
+                        key={attachment.id}
+                        className="relative inline-block"
+                        data-testid="pending-attachment"
+                      >
                         <img
                           src={attachment.dataUrl}
                           alt={attachment.fileName || "Attached image"}
@@ -3130,11 +3281,31 @@ function ChatPage(props: {
                         >
                           <X className="h-3 w-3" />
                         </button>
+                        {attachment.status === "uploading" ? (
+                          <div className="absolute inset-0 flex items-center justify-center rounded-md bg-background/70 text-xs">
+                            <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                            Uploading
+                          </div>
+                        ) : attachment.status === "failed" ? (
+                          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 rounded-md bg-background/80 text-xs">
+                            <span>Upload failed</span>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="h-6 px-2 text-xs"
+                              onClick={() => resetAttachmentStatus(attachment.id)}
+                            >
+                              Retry
+                            </Button>
+                          </div>
+                        ) : null}
                       </div>
                     ) : (
                       <div
                         key={attachment.id}
                         className="relative inline-flex max-w-full items-center gap-2 rounded-md border bg-muted/40 px-3 py-2 text-sm"
+                        data-testid="pending-attachment"
                       >
                         {attachment.kind === "audio" ? (
                           <FileAudio className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -3147,6 +3318,20 @@ function ChatPage(props: {
                               ? "Audio attachment"
                               : "File attachment")}
                         </span>
+                        {attachment.status === "uploading" ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                        ) : null}
+                        {attachment.status === "failed" ? (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 px-2 text-xs"
+                            onClick={() => resetAttachmentStatus(attachment.id)}
+                          >
+                            Retry
+                          </Button>
+                        ) : null}
                         <button
                           onClick={() => removePendingAttachment(attachment.id)}
                           className="flex h-5 w-5 items-center justify-center rounded-full text-muted-foreground hover:bg-muted"
@@ -3159,16 +3344,28 @@ function ChatPage(props: {
                   )}
                 </div>
               ) : null}
+              {composerError || attachmentSendIssue ? (
+                <Alert variant="destructive" data-testid="composer-error">
+                  <AlertTitle>Attachment Issue</AlertTitle>
+                  <AlertDescription>
+                    {composerError || attachmentSendIssue}
+                  </AlertDescription>
+                </Alert>
+              ) : null}
               <Textarea
                 ref={chatInputRef}
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
+                onChange={(e) => {
+                  setComposerError(null);
+                  setInput(e.target.value);
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
                     onSubmit();
                   }
                 }}
+                data-testid="chat-input"
                 rows={2}
                 placeholder={
                   props.canChat
@@ -3190,6 +3387,7 @@ function ChatPage(props: {
                         type="file"
                         accept="image/*"
                         className="hidden"
+                        data-testid="chat-image-input"
                         onChange={handleImageSelect}
                       />
                       <Button
@@ -3212,6 +3410,7 @@ function ChatPage(props: {
                         type="file"
                         accept="audio/*"
                         className="hidden"
+                        data-testid="chat-audio-input"
                         onChange={handleAudioSelect}
                       />
                       <Button
@@ -3233,6 +3432,7 @@ function ChatPage(props: {
                         ref={fileInputRef}
                         type="file"
                         className="hidden"
+                        data-testid="chat-file-input"
                         onChange={handleFileSelect}
                       />
                       <Button
@@ -3273,6 +3473,7 @@ function ChatPage(props: {
                   <Button
                     onMouseDown={(e) => e.preventDefault()}
                     onClick={onSubmit}
+                    data-testid="chat-send"
                     disabled={
                       !props.canChat ||
                       (!input.trim() && pendingAttachments.length === 0) ||
@@ -4939,7 +5140,10 @@ function ChatBubble({
   const attachments = messageAttachments(message);
 
   return (
-    <div className={cn("flex", isUser ? "justify-end" : "justify-start")}>
+    <div
+      className={cn("flex", isUser ? "justify-end" : "justify-start")}
+      data-testid={isUser ? "chat-bubble-user" : "chat-bubble-assistant"}
+    >
       <div className="w-full min-w-0 max-w-[92%] md:max-w-[82%]">
         <div className="mb-1 flex items-center gap-2 px-1 text-xs text-muted-foreground">
           {isUser ? (

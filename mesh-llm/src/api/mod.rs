@@ -1582,6 +1582,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_api_responses_smoke_for_file_request() {
+        let (upstream_port, upstream_rx, upstream_handle) =
+            spawn_capturing_upstream(r#"{"id":"chatcmpl","object":"chat.completion","created":1,"model":"test-model","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#).await;
+        let state = build_test_mesh_api_with_api_port(upstream_port).await;
+        state.update(true, true).await;
+        let (addr, handle) = spawn_management_test_server(state).await;
+
+        let body = serde_json::json!({
+            "model": "test-model",
+            "input": [{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "read this file"},
+                    {
+                        "type": "input_file",
+                        "input_file": {
+                            "url": "data:text/plain;base64,aGVsbG8=",
+                            "mime_type": "text/plain",
+                            "file_name": "hello.txt"
+                        }
+                    }
+                ]
+            }],
+            "stream": false
+        })
+        .to_string();
+        let request = format!(
+            "POST /api/responses HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        let response_text = String::from_utf8(response).unwrap();
+        let raw = String::from_utf8(upstream_rx.await.unwrap()).unwrap();
+
+        assert!(response_text.starts_with("HTTP/1.1 200 OK"));
+        assert!(raw.starts_with("POST /v1/chat/completions HTTP/1.1"));
+        assert!(raw.contains(r#""type":"input_file""#));
+        assert!(raw.contains(r#""url":"data:text/plain;base64,aGVsbG8=""#));
+        assert!(raw.contains(r#""mime_type":"text/plain""#));
+        assert!(raw.contains(r#""file_name":"hello.txt""#));
+
+        handle.abort();
+        let _ = upstream_handle.await;
+    }
+
+    #[tokio::test]
     async fn test_api_responses_stream_smoke() {
         let (upstream_port, upstream_rx, upstream_handle) = spawn_streaming_upstream(
             "text/event-stream",
