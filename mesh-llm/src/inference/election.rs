@@ -11,10 +11,12 @@ use crate::models;
 use crate::network::tunnel;
 use mesh::NodeRole;
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::thread;
 use tokio::sync::watch;
 
 /// Calculate total model size, summing all split files if present.
@@ -111,6 +113,57 @@ fn stop_requested(stop_rx: &watch::Receiver<bool>) -> bool {
     *stop_rx.borrow()
 }
 
+async fn wait_for_peer_moe_ranking(
+    model_name: &str,
+    model_path: &Path,
+    peer_rx: &mut watch::Receiver<usize>,
+    stop_rx: &mut watch::Receiver<bool>,
+    timeout: std::time::Duration,
+) {
+    if moe::best_shared_ranking_artifact(model_path).is_some() {
+        return;
+    }
+
+    eprintln!(
+        "🧩 [{model_name}] Waiting up to {:.0}s for peer MoE ranking before local analysis",
+        timeout.as_secs_f64()
+    );
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            eprintln!("  No peer MoE ranking arrived in time — continuing with local analysis");
+            return;
+        }
+
+        tokio::select! {
+            _ = tokio::time::sleep(remaining) => {
+                eprintln!("  No peer MoE ranking arrived in time — continuing with local analysis");
+                return;
+            }
+            res = peer_rx.changed() => {
+                if res.is_err() {
+                    return;
+                }
+                if let Some(artifact) = moe::best_shared_ranking_artifact(model_path) {
+                    eprintln!(
+                        "  Using imported peer MoE ranking mode={} origin={}",
+                        artifact.kind.label(),
+                        artifact.origin.label()
+                    );
+                    return;
+                }
+            }
+            res = stop_rx.changed() => {
+                if res.is_err() || stop_requested(stop_rx) {
+                    return;
+                }
+            }
+        }
+    }
+}
+
 impl ModelTargets {
     /// Get target for a specific model. Round-robins across multiple hosts.
     pub fn get(&self, model: &str) -> InferenceTarget {
@@ -199,6 +252,7 @@ pub fn build_moe_targets(
 #[derive(Clone, Debug)]
 struct ResolvedMoeConfig {
     config: crate::models::catalog::MoeConfig,
+    ranking_strategy: moe::MoeRankingStrategy,
     ranking_source: String,
     ranking_origin: String,
     grouping_strategy: moe::MoeGroupingStrategy,
@@ -365,12 +419,42 @@ fn resolve_runtime_moe_config(
 
     Ok(Some(ResolvedMoeConfig {
         config: crate::models::catalog::MoeConfig { ranking, ..base },
+        ranking_strategy: options.ranking_strategy,
         ranking_source,
         ranking_origin,
         grouping_strategy: options.grouping_strategy,
         overlap: options.overlap.max(1),
         replicate: options.replicate.unwrap_or(base.min_experts_per_node),
     }))
+}
+
+fn refresh_auto_moe_config_from_cache(
+    model_name: &str,
+    model_path: &Path,
+    cfg: &mut ResolvedMoeConfig,
+) -> bool {
+    if !matches!(cfg.ranking_strategy, moe::MoeRankingStrategy::Auto) {
+        return false;
+    }
+    let Some(artifact) = moe::best_shared_ranking_artifact(model_path) else {
+        return false;
+    };
+    if cfg.config.ranking == artifact.ranking
+        && cfg.ranking_source == artifact.kind.label()
+        && cfg.ranking_origin == artifact.origin.label()
+    {
+        return false;
+    }
+
+    eprintln!(
+        "🧩 [{model_name}] Switching to better cached MoE ranking mode={} origin={}",
+        artifact.kind.label(),
+        artifact.origin.label()
+    );
+    cfg.config.ranking = artifact.ranking;
+    cfg.ranking_source = artifact.kind.label().to_string();
+    cfg.ranking_origin = artifact.origin.label().to_string();
+    true
 }
 
 fn resolve_heuristic_runtime_ranking(
@@ -413,6 +497,26 @@ fn resolve_analyze_binary(bin_dir: &Path) -> anyhow::Result<std::path::PathBuf> 
     )
 }
 
+fn should_suppress_moe_analyze_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.is_empty() || trimmed.starts_with("print_info:")
+}
+
+fn spawn_moe_analyze_log_relay<R: std::io::Read + Send + 'static>(
+    reader: R,
+    model_name: String,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let reader = BufReader::new(reader);
+        for line in reader.lines().map_while(Result::ok) {
+            if should_suppress_moe_analyze_line(&line) {
+                continue;
+            }
+            eprintln!("  [{model_name}] {line}");
+        }
+    })
+}
+
 fn ensure_full_analyze_ranking(
     bin_dir: &Path,
     model_name: &str,
@@ -443,7 +547,7 @@ fn ensure_full_analyze_ranking(
         "🧩 [{model_name}] MoE analysis mode=full-analyze cache={} (progress from llama-moe-analyze follows)",
         cached_path.display()
     );
-    let status = Command::new(&analyze_bin)
+    let mut child = Command::new(&analyze_bin)
         .args([
             "-m",
             &model_path.to_string_lossy(),
@@ -457,7 +561,24 @@ fn ensure_full_analyze_ranking(
             "-ngl",
             "99",
         ])
-        .status()?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stdout_relay = child
+        .stdout
+        .take()
+        .map(|stdout| spawn_moe_analyze_log_relay(stdout, model_name.to_string()));
+    let stderr_relay = child
+        .stderr
+        .take()
+        .map(|stderr| spawn_moe_analyze_log_relay(stderr, model_name.to_string()));
+    let status = child.wait()?;
+    if let Some(handle) = stdout_relay {
+        let _ = handle.join();
+    }
+    if let Some(handle) = stderr_relay {
+        let _ = handle.join();
+    }
     anyhow::ensure!(status.success(), "llama-moe-analyze exited with {status}");
     let ranking = moe::load_cached_ranking(cached_path).ok_or_else(|| {
         anyhow::anyhow!(
@@ -590,8 +711,29 @@ fn run_micro_analyze_ranking(
         if matches!(options.micro_layer_scope, moe::MoeMicroLayerScope::All) {
             command.arg("--all-layers");
         }
-        let status = command.status()?;
-        anyhow::ensure!(status.success(), "llama-moe-analyze exited with {status}");
+        let output = command.output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut details = stderr
+                .lines()
+                .chain(stdout.lines())
+                .filter(|line| !should_suppress_moe_analyze_line(line))
+                .collect::<Vec<_>>();
+            if details.len() > 20 {
+                details.truncate(20);
+            }
+            let detail_text = if details.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", details.join(" | "))
+            };
+            anyhow::bail!(
+                "llama-moe-analyze exited with {}{}",
+                output.status,
+                detail_text
+            );
+        }
         for row in load_analyze_mass_rows(&output_path)? {
             *mass_by_expert.entry(row.expert_id).or_insert(0.0) += row.gate_mass;
         }
@@ -708,6 +850,20 @@ pub async fn election_loop(
     if moe_config.is_some() {
         let need_moe_split = force_split || !model_fits_locally;
         if need_moe_split {
+            if matches!(
+                moe_runtime_options.ranking_strategy,
+                moe::MoeRankingStrategy::Auto
+            ) && moe::best_shared_ranking_artifact(&model).is_none()
+            {
+                wait_for_peer_moe_ranking(
+                    &model_name,
+                    &model,
+                    &mut peer_rx,
+                    &mut stop_rx,
+                    std::time::Duration::from_secs(8),
+                )
+                .await;
+            }
             let resolved_moe_cfg = match resolve_runtime_moe_config(
                 &model_name,
                 &model,
@@ -1093,7 +1249,7 @@ async fn moe_election_loop(
     bin_dir: std::path::PathBuf,
     model: std::path::PathBuf,
     model_name: String,
-    moe_cfg: ResolvedMoeConfig,
+    mut moe_cfg: ResolvedMoeConfig,
     my_vram: u64,
     model_bytes: u64,
     binary_flavor: Option<launch::BinaryFlavor>,
@@ -1112,6 +1268,11 @@ async fn moe_election_loop(
         if stop_requested(&stop_rx) {
             break;
         }
+
+        if !currently_running {
+            let _ = refresh_auto_moe_config_from_cache(&model_name, &model, &mut moe_cfg);
+        }
+
         // Count how many nodes (including us) are serving this model
         let peers = node.peers().await;
         let model_peers: Vec<mesh::PeerInfo> = peers
