@@ -29,6 +29,7 @@ import {
   Copy,
   Cpu,
   FolderTree,
+  FileAudio,
   Gauge,
   Gpu,
   Hash,
@@ -141,8 +142,12 @@ type MeshModel = {
   context_length?: number;
   quantization?: string;
   description?: string;
+  multimodal?: boolean;
+  multimodal_status?: "supported" | "none" | string;
   vision?: boolean;
   vision_status?: "supported" | "likely" | "none" | string;
+  audio?: boolean;
+  audio_status?: "supported" | "likely" | "none" | string;
   reasoning?: boolean;
   reasoning_status?: "supported" | "likely" | "none" | string;
   tool_use?: boolean;
@@ -184,6 +189,25 @@ function visionBadge(model?: MeshModel | null) {
     return {
       icon: "👁?",
       title: "Vision likely — inferred from model metadata",
+    };
+  }
+  return null;
+}
+
+function multimodalBadge(model?: MeshModel | null) {
+  if (!model) return null;
+  if (model.multimodal)
+    return { icon: "🎛️", title: "Multimodal — supports media inputs" };
+  return null;
+}
+
+function audioBadge(model?: MeshModel | null) {
+  if (!model) return null;
+  if (model.audio) return { icon: "🔊", title: "Audio — understands audio input" };
+  if (model.audio_status === "likely") {
+    return {
+      icon: "🔊?",
+      title: "Audio likely — inferred from model metadata",
     };
   }
   return null;
@@ -260,6 +284,11 @@ type ChatMessage = {
   error?: boolean;
   /** Base64 data URL for attached image (vision) */
   image?: string;
+  audio?: {
+    dataUrl: string;
+    mimeType: string;
+    fileName?: string;
+  };
 };
 
 type ChatConversation = {
@@ -304,6 +333,7 @@ type TopologyNode = {
 type ThemeMode = "auto" | "light" | "dark";
 
 const THEME_STORAGE_KEY = "mesh-llm-theme";
+const CHAT_CLIENT_ID_STORAGE_KEY = "mesh-llm-chat-client-id";
 const DEFAULT_CHAT_TITLE = "New chat";
 const CHAT_DB_NAME = "mesh-llm-chat-db";
 const CHAT_DB_STORE = "state";
@@ -422,6 +452,15 @@ function randomId(): string {
   return `id-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+function readOrCreateChatClientId(): string {
+  if (typeof window === "undefined") return randomId();
+  const stored = window.localStorage.getItem(CHAT_CLIENT_ID_STORAGE_KEY);
+  if (stored && stored.trim()) return stored;
+  const created = randomId();
+  window.localStorage.setItem(CHAT_CLIENT_ID_STORAGE_KEY, created);
+  return created;
+}
+
 function deriveConversationTitle(input: string): string {
   const compact = input.replace(/\s+/g, " ").trim();
   if (!compact) return DEFAULT_CHAT_TITLE;
@@ -454,6 +493,12 @@ function clampText(
   return text.length > maxChars
     ? `${text.slice(0, maxChars).trimEnd()}...`
     : text;
+}
+
+function parseDataUrl(dataUrl: string): { mimeType: string; base64: string } | null {
+  const match = /^data:([^;,]+);base64,(.+)$/s.exec(dataUrl);
+  if (!match) return null;
+  return { mimeType: match[1], base64: match[2] };
 }
 
 function sanitizeMessages(raw: unknown): ChatMessage[] {
@@ -494,6 +539,27 @@ function sanitizeMessages(raw: unknown): ChatMessage[] {
           256,
         ),
         error: Boolean((item as { error?: unknown }).error),
+        image:
+          typeof (item as { image?: unknown }).image === "string"
+            ? (item as { image: string }).image
+            : undefined,
+        audio:
+          typeof (item as { audio?: unknown }).audio === "object" &&
+          (item as { audio?: unknown }).audio &&
+          typeof ((item as { audio: { dataUrl?: unknown } }).audio.dataUrl) ===
+            "string" &&
+          typeof ((item as { audio: { mimeType?: unknown } }).audio.mimeType) ===
+            "string"
+            ? {
+                dataUrl: (item as { audio: { dataUrl: string } }).audio.dataUrl,
+                mimeType: (item as { audio: { mimeType: string } }).audio.mimeType,
+                fileName:
+                  typeof ((item as { audio: { fileName?: unknown } }).audio.fileName) ===
+                  "string"
+                    ? (item as { audio: { fileName: string } }).audio.fileName
+                    : undefined,
+              }
+            : undefined,
       },
     ];
   });
@@ -662,12 +728,18 @@ export function App() {
   const [chatStateHydrated, setChatStateHydrated] = useState(false);
   const [input, setInput] = useState("");
   const [pendingImage, setPendingImage] = useState<string | null>(null);
+  const [pendingAudio, setPendingAudio] = useState<{
+    dataUrl: string;
+    mimeType: string;
+    fileName?: string;
+  } | null>(null);
   const [selectedModel, setSelectedModel] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [reasoningOpen, setReasoningOpen] = useState<Record<string, boolean>>(
     {},
   );
+  const chatClientIdRef = useRef<string>(readOrCreateChatClientId());
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const currentAbortRef = useRef<AbortController | null>(null);
   const activeConversationId = chatState.activeConversationId;
@@ -727,10 +799,21 @@ export function App() {
     }
     return set;
   }, [meshModels]);
+  const audioModels = useMemo(() => {
+    const set = new Set<string>();
+    for (const m of meshModels) {
+      if (m.audio) set.add(m.name);
+    }
+    return set;
+  }, [meshModels]);
   const selectedModelVision = useMemo(() => {
     if (selectedModel) return visionModels.has(selectedModel);
     return meshModels.some((m) => m.status === "warm" && m.vision);
   }, [meshModels, selectedModel, visionModels]);
+  const selectedModelAudio = useMemo(() => {
+    if (selectedModel) return audioModels.has(selectedModel);
+    return meshModels.some((m) => m.status === "warm" && m.audio);
+  }, [audioModels, meshModels, selectedModel]);
   const meshModelByName = useMemo(() => {
     const entries = meshModels.map((model) => [model.name, model] as const);
     return Object.fromEntries(entries) as Record<string, MeshModel>;
@@ -1045,6 +1128,75 @@ export function App() {
     setChatState((prev) => updater(prev));
   }
 
+  async function uploadRequestObject(params: {
+    requestId: string;
+    dataUrl: string;
+    fileName?: string;
+  }) {
+    const parsed = parseDataUrl(params.dataUrl);
+    if (!parsed) throw new Error("Attachment is not a valid base64 data URL");
+    const response = await fetch("/api/objects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        request_id: params.requestId,
+        mime_type: parsed.mimeType,
+        file_name: params.fileName,
+        bytes_base64: parsed.base64,
+      }),
+    });
+    if (!response.ok) {
+      throw new Error(`Attachment upload failed (${response.status})`);
+    }
+    return (await response.json()) as { token: string };
+  }
+
+  async function buildRequestMessages(
+    historyForRequest: ChatMessage[],
+    requestId: string,
+    clientId: string,
+  ) {
+    return Promise.all(
+      historyForRequest.map(async (message) => {
+        const contentBlocks: Array<Record<string, unknown>> = [];
+        const hasImage = !!message.image;
+        const hasAudio = !!message.audio;
+        if (message.content.trim()) {
+          contentBlocks.push({ type: "text", text: message.content });
+        }
+        if (message.image) {
+          const upload = await uploadRequestObject({
+            requestId,
+            dataUrl: message.image,
+            fileName: "image.jpg",
+          });
+          contentBlocks.push({
+            type: "image_url",
+            image_url: { url: `mesh://blob/${clientId}/${upload.token}` },
+          });
+        }
+        if (message.audio) {
+          const upload = await uploadRequestObject({
+            requestId,
+            dataUrl: message.audio.dataUrl,
+            fileName: message.audio.fileName,
+          });
+          contentBlocks.push({
+            type: "input_audio",
+            input_audio: { url: `mesh://blob/${clientId}/${upload.token}` },
+          });
+        }
+        return {
+          role: message.role,
+          content:
+            contentBlocks.length > 0 && (hasImage || hasAudio)
+              ? contentBlocks
+              : message.content,
+        };
+      }),
+    );
+  }
+
   async function streamAssistantReply(params: {
     conversationId: string;
     assistantId: string;
@@ -1057,6 +1209,13 @@ export function App() {
     currentAbortRef.current = controller;
 
     try {
+      const requestId = randomId();
+      const clientId = chatClientIdRef.current;
+      const requestMessages = await buildRequestMessages(
+        historyForRequest,
+        requestId,
+        clientId,
+      );
       const MAX_RETRIES = 3;
       const RETRY_DELAYS = [1000, 2000, 4000];
       const RETRYABLE = new Set([500, 502, 503]);
@@ -1069,15 +1228,9 @@ export function App() {
           signal: controller.signal,
           body: JSON.stringify({
             model,
-            messages: historyForRequest.map((m) => ({
-              role: m.role,
-              content: m.image
-                ? [
-                    { type: "text" as const, text: m.content },
-                    { type: "image_url" as const, image_url: { url: m.image } },
-                  ]
-                : m.content,
-            })),
+            client_id: clientId,
+            request_id: requestId,
+            messages: requestMessages,
             stream: true,
             stream_options: { include_usage: true },
             chat_template_kwargs: { enable_thinking: false },
@@ -1232,14 +1385,26 @@ export function App() {
 
   async function sendMessage(text: string) {
     const trimmed = text.trim();
-    if ((!trimmed && !pendingImage) || !status || isSending) return;
+    if ((!trimmed && !pendingImage && !pendingAudio) || !status || isSending)
+      return;
 
-    // When sending an image with model=auto, route to a vision-capable model
-    // (the server-side router doesn't sniff for images in the request body)
+    // Prefer an explicitly compatible model when sending media with model=auto.
     let model = selectedModel || status.model_name;
-    if (pendingImage && (!model || model === "auto")) {
-      const visionModel = warmModels.find((m) => visionModels.has(m));
-      if (visionModel) model = visionModel;
+    if ((pendingImage || pendingAudio) && (!model || model === "auto")) {
+      const multimodalModel = warmModels.find(
+        (m) =>
+          (!pendingImage || visionModels.has(m)) &&
+          (!pendingAudio || audioModels.has(m)),
+      );
+      if (multimodalModel) {
+        model = multimodalModel;
+      } else if (pendingImage) {
+        const visionModel = warmModels.find((m) => visionModels.has(m));
+        if (visionModel) model = visionModel;
+      } else if (pendingAudio) {
+        const audioModel = warmModels.find((m) => audioModels.has(m));
+        if (audioModel) model = audioModel;
+      }
     }
     const conversationId = activeConversation?.id ?? randomId();
     const userMessage: ChatMessage = {
@@ -1248,6 +1413,7 @@ export function App() {
       content: trimmed,
       model,
       image: pendingImage ?? undefined,
+      audio: pendingAudio ?? undefined,
     };
     const assistantId = randomId();
     const assistantMessage: ChatMessage = {
@@ -1302,6 +1468,7 @@ export function App() {
     pushRoute({ section: "chat", chatId: conversationId });
     setInput("");
     setPendingImage(null);
+    setPendingAudio(null);
     setIsSending(true);
     await streamAssistantReply({
       conversationId,
@@ -1542,9 +1709,11 @@ export function App() {
                   selectedModelNodeCount={selectedModelNodeCount}
                   selectedModelVramGb={selectedModelVramGb}
                   selectedModelVision={selectedModelVision}
-                  visionModels={visionModels}
+                  selectedModelAudio={selectedModelAudio}
                   pendingImage={pendingImage}
                   setPendingImage={setPendingImage}
+                  pendingAudio={pendingAudio}
+                  setPendingAudio={setPendingAudio}
                   conversations={conversations}
                   activeConversationId={activeConversationId}
                   onConversationCreate={createNewConversation}
@@ -2162,9 +2331,17 @@ function ChatPage(props: {
   selectedModelNodeCount: number | null;
   selectedModelVramGb: number | null;
   selectedModelVision: boolean;
-  visionModels: Set<string>;
+  selectedModelAudio: boolean;
   pendingImage: string | null;
   setPendingImage: (v: string | null) => void;
+  pendingAudio: {
+    dataUrl: string;
+    mimeType: string;
+    fileName?: string;
+  } | null;
+  setPendingAudio: (
+    v: { dataUrl: string; mimeType: string; fileName?: string } | null,
+  ) => void;
   conversations: ChatConversation[];
   activeConversationId: string;
   onConversationCreate: () => void;
@@ -2198,9 +2375,11 @@ function ChatPage(props: {
     selectedModelNodeCount,
     selectedModelVramGb,
     selectedModelVision,
-    visionModels,
+    selectedModelAudio,
     pendingImage,
     setPendingImage,
+    pendingAudio,
+    setPendingAudio,
     conversations,
     activeConversationId,
     onConversationCreate,
@@ -2231,6 +2410,7 @@ function ChatPage(props: {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const audioInputRef = useRef<HTMLInputElement | null>(null);
 
   function handleImageSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -2265,6 +2445,22 @@ function ChatPage(props: {
         setPendingImage(src);
       };
       img.src = src;
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  }
+
+  function handleAudioSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      setPendingAudio({
+        dataUrl,
+        mimeType: file.type || parseDataUrl(dataUrl)?.mimeType || "audio/wav",
+        fileName: file.name,
+      });
     };
     reader.readAsDataURL(file);
     e.target.value = "";
@@ -2546,7 +2742,9 @@ function ChatPage(props: {
                   const selectedMeshModel = meshModelByName[model];
                   const displayName =
                     modelDisplayName(selectedMeshModel) || model;
+                  const multimodalInfo = multimodalBadge(selectedMeshModel);
                   const visionInfo = visionBadge(selectedMeshModel);
+                  const audioInfo = audioBadge(selectedMeshModel);
                   const reasoningInfo = reasoningBadge(selectedMeshModel);
                   return (
                     <SelectItem
@@ -2557,9 +2755,19 @@ function ChatPage(props: {
                       <div className="flex min-w-0 flex-col gap-0.5">
                         <span className="truncate leading-5">
                           {shortName(displayName)}
+                          {multimodalInfo && (
+                            <span className="ml-1.5" title={multimodalInfo.title}>
+                              {multimodalInfo.icon}
+                            </span>
+                          )}
                           {visionInfo && (
                             <span className="ml-1.5" title={visionInfo.title}>
                               {visionInfo.icon}
+                            </span>
+                          )}
+                          {audioInfo && (
+                            <span className="ml-1.5" title={audioInfo.title}>
+                              {audioInfo.icon}
                             </span>
                           )}
                           {reasoningInfo && (
@@ -2729,6 +2937,21 @@ function ChatPage(props: {
                   </button>
                 </div>
               )}
+              {pendingAudio && (
+                <div className="relative inline-flex max-w-full items-center gap-2 rounded-md border bg-muted/40 px-3 py-2 text-sm">
+                  <FileAudio className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span className="truncate">
+                    {pendingAudio.fileName || "Audio attachment"}
+                  </span>
+                  <button
+                    onClick={() => setPendingAudio(null)}
+                    className="flex h-5 w-5 items-center justify-center rounded-full text-muted-foreground hover:bg-muted"
+                    aria-label="Remove audio"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              )}
               <Textarea
                 ref={chatInputRef}
                 value={input}
@@ -2775,6 +2998,28 @@ function ChatPage(props: {
                       </Button>
                     </>
                   )}
+                  {selectedModelAudio && (
+                    <>
+                      <input
+                        ref={audioInputRef}
+                        type="file"
+                        accept="audio/*"
+                        className="hidden"
+                        onChange={handleAudioSelect}
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        onClick={() => audioInputRef.current?.click()}
+                        disabled={!props.canChat || isSending}
+                        title="Attach audio"
+                        aria-label="Attach audio"
+                      >
+                        <FileAudio className="h-4 w-4" />
+                      </Button>
+                    </>
+                  )}
                   {isSending ? (
                     <Button
                       type="button"
@@ -2802,7 +3047,7 @@ function ChatPage(props: {
                     onClick={onSubmit}
                     disabled={
                       !props.canChat ||
-                      (!input.trim() && !pendingImage) ||
+                      (!input.trim() && !pendingImage && !pendingAudio) ||
                       isSending
                     }
                   >
@@ -4544,6 +4789,15 @@ function ChatBubble({
             />
           </div>
         ) : null}
+        {isUser && message.audio ? (
+          <div className="mb-2 rounded-lg border bg-muted/40 p-3">
+            <div className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
+              <FileAudio className="h-3.5 w-3.5" />
+              <span>{message.audio.fileName || "Audio attachment"}</span>
+            </div>
+            <audio controls className="w-full" src={message.audio.dataUrl} />
+          </div>
+        ) : null}
 
         {/* Main content */}
         {isUser || message.content ? (
@@ -4759,11 +5013,25 @@ function ModelSidebar({
                 icon={<MessageSquarePlus className="h-3.5 w-3.5" />}
                 tooltip="Supports text input and text generation."
               />
+              {model.multimodal ? (
+                <CapabilityBadge
+                  label="Multimodal"
+                  icon={<Sparkles className="h-3.5 w-3.5" />}
+                  tooltip="Supports one or more media input modalities."
+                />
+              ) : null}
               {model.vision ? (
                 <CapabilityBadge
                   label="Vision"
                   icon={<ImagePlus className="h-3.5 w-3.5" />}
                   tooltip="Can understand image input."
+                />
+              ) : null}
+              {model.audio ? (
+                <CapabilityBadge
+                  label="Audio"
+                  icon={<Sparkles className="h-3.5 w-3.5" />}
+                  tooltip="Can understand audio input."
                 />
               ) : null}
               {model.reasoning ? (

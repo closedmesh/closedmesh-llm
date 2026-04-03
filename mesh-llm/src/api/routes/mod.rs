@@ -1,6 +1,7 @@
 mod blackboard;
 mod chat;
 mod discover;
+mod objects;
 mod plugins;
 mod runtime;
 
@@ -50,6 +51,12 @@ pub(super) async fn dispatch_request(
         | ("GET", "/api/blackboard/search")
         | ("POST", "/api/blackboard/post") => {
             blackboard::handle(stream, state, method, path, body).await?;
+            Ok(true)
+        }
+        ("POST", "/api/objects")
+        | ("POST", "/api/objects/complete")
+        | ("POST", "/api/objects/abort") => {
+            objects::handle(stream, state, method, path_only, body).await?;
             Ok(true)
         }
         (m, p) if m != "POST" && p.starts_with("/api/chat") => {

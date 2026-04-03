@@ -9,6 +9,7 @@ use crate::network::affinity::{
     prepare_remote_targets_for_request, AffinityRouter, PreparedTargets,
 };
 use crate::network::router;
+use crate::plugin;
 use anyhow::{anyhow, bail, Context, Result};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -16,7 +17,9 @@ use tokio::net::TcpStream;
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+const MAX_OBJECT_UPLOAD_BODY_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CHUNKED_WIRE_BYTES: usize = MAX_BODY_BYTES * 6 + 64 * 1024;
+const MAX_OBJECT_UPLOAD_CHUNKED_WIRE_BYTES: usize = MAX_OBJECT_UPLOAD_BODY_BYTES * 6 + 64 * 1024;
 const MAX_HEADERS: usize = 64;
 const MAX_RESPONSE_BODY_PREVIEW_BYTES: usize = 4 * 1024;
 const REQUEST_TOKEN_MARGIN: u32 = 256;
@@ -52,6 +55,7 @@ pub struct BufferedHttpRequest {
     pub body_json: Option<serde_json::Value>,
     pub model_name: Option<String>,
     pub session_hint: Option<String>,
+    pub request_object_request_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,15 +91,24 @@ struct ResponseProbe {
 /// known via `Content-Length` or `Transfer-Encoding: chunked`. The raw request
 /// bytes are preserved so the chosen upstream sees the original payload.
 pub async fn read_http_request(stream: &mut TcpStream) -> Result<BufferedHttpRequest> {
-    read_http_request_with_limits(stream, HTTP_READ_LIMITS).await
+    read_http_request_with_limits(stream, HTTP_READ_LIMITS, None).await
+}
+
+pub async fn read_http_request_with_plugin_manager(
+    stream: &mut TcpStream,
+    plugin_manager: Option<&plugin::PluginManager>,
+) -> Result<BufferedHttpRequest> {
+    read_http_request_with_limits(stream, HTTP_READ_LIMITS, plugin_manager).await
 }
 
 async fn read_http_request_with_limits(
     stream: &mut TcpStream,
     limits: HttpReadLimits,
+    plugin_manager: Option<&plugin::PluginManager>,
 ) -> Result<BufferedHttpRequest> {
     let mut raw = Vec::with_capacity(8192);
     let parsed = read_until_headers_parsed(stream, &mut raw, limits.max_header_bytes).await?;
+    let body_limits = body_limits_for_path(&parsed.path, limits);
 
     let header_end = parsed.header_end;
 
@@ -103,7 +116,7 @@ async fn read_http_request_with_limits(
         let mut sent_continue = false;
         loop {
             if let Some((consumed, decoded)) =
-                try_decode_chunked_body(&raw[header_end..], limits.max_body_bytes)?
+                try_decode_chunked_body(&raw[header_end..], body_limits.max_body_bytes)?
             {
                 raw.truncate(header_end + consumed);
                 break decoded;
@@ -113,16 +126,16 @@ async fn read_http_request_with_limits(
                 sent_continue = true;
             }
             read_more(stream, &mut raw).await?;
-            if raw.len().saturating_sub(header_end) > limits.max_chunked_wire_bytes {
+            if raw.len().saturating_sub(header_end) > body_limits.max_chunked_wire_bytes {
                 bail!(
                     "HTTP chunked wire body exceeds {} bytes",
-                    limits.max_chunked_wire_bytes
+                    body_limits.max_chunked_wire_bytes
                 );
             }
         }
     } else if let Some(content_length) = parsed.content_length {
-        if content_length > limits.max_body_bytes {
-            bail!("HTTP body exceeds {} bytes", limits.max_body_bytes);
+        if content_length > body_limits.max_body_bytes {
+            bail!("HTTP body exceeds {} bytes", body_limits.max_body_bytes);
         }
         let body_end = header_end + content_length;
         let mut sent_continue = false;
@@ -145,8 +158,18 @@ async fn read_http_request_with_limits(
     } else {
         serde_json::from_slice(&body).ok()
     };
+    let mut request_object_request_ids = Vec::new();
     let rewritten_body = if let Some(body_json) = body_json.as_mut() {
-        if normalize_openai_compat_body(body_json) {
+        let mut changed = normalize_openai_compat_body(body_json);
+        if let Some(plugin_manager) = plugin_manager {
+            let resolved_request_ids =
+                resolve_request_object_references(&parsed.path, body_json, plugin_manager).await?;
+            if !resolved_request_ids.is_empty() {
+                request_object_request_ids = resolved_request_ids;
+                changed = true;
+            }
+        }
+        if changed {
             Some(
                 serde_json::to_vec(body_json)
                     .context("serialize normalized OpenAI-compatible request body")?,
@@ -173,7 +196,21 @@ async fn read_http_request_with_limits(
         body_json,
         model_name,
         session_hint,
+        request_object_request_ids,
     })
+}
+
+fn body_limits_for_path(path: &str, default: HttpReadLimits) -> HttpReadLimits {
+    let path_only = path.split('?').next().unwrap_or(path);
+    if path_only == "/api/objects" {
+        HttpReadLimits {
+            max_header_bytes: default.max_header_bytes,
+            max_body_bytes: MAX_OBJECT_UPLOAD_BODY_BYTES,
+            max_chunked_wire_bytes: MAX_OBJECT_UPLOAD_CHUNKED_WIRE_BYTES,
+        }
+    } else {
+        default
+    }
 }
 
 fn finalize_forwarded_request(
@@ -379,6 +416,207 @@ fn normalize_openai_compat_body(body: &mut serde_json::Value) -> bool {
     }
 
     changed
+}
+
+fn request_id_from_body(body: &serde_json::Value) -> Option<String> {
+    body.get("request_id")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn mesh_blob_token_from_url(url: &str) -> Option<String> {
+    let path = url.strip_prefix("mesh://blob/")?;
+    let mut parts = path.split('/').filter(|part| !part.trim().is_empty());
+    let _client_id = parts.next()?;
+    let token = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(token.to_string())
+}
+
+fn blob_token_from_container(container: &serde_json::Value) -> Option<String> {
+    container
+        .get("url")
+        .and_then(|value| value.as_str())
+        .and_then(mesh_blob_token_from_url)
+        .or_else(|| {
+            ["mesh_token", "blob_token", "token"]
+                .into_iter()
+                .find_map(|key| {
+                    container
+                        .get(key)
+                        .and_then(|value| value.as_str())
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToString::to_string)
+                })
+        })
+}
+
+fn data_url(mime_type: &str, bytes_base64: &str) -> String {
+    format!("data:{mime_type};base64,{bytes_base64}")
+}
+
+fn audio_format_from_mime_type(mime_type: &str) -> Option<&'static str> {
+    match mime_type {
+        "audio/wav" | "audio/x-wav" => Some("wav"),
+        "audio/mpeg" | "audio/mp3" => Some("mp3"),
+        "audio/flac" => Some("flac"),
+        "audio/ogg" | "audio/opus" => Some("ogg"),
+        "audio/webm" => Some("webm"),
+        _ => None,
+    }
+}
+
+enum MediaRefAction {
+    DataUrlContainer { container_key: &'static str },
+    InputAudio,
+}
+
+fn block_media_ref_action(block: &serde_json::Value) -> Option<(MediaRefAction, String)> {
+    for key in [
+        "image_url",
+        "audio_url",
+        "image",
+        "audio",
+        "input_image",
+        "file",
+        "input_file",
+    ] {
+        let Some(container) = block.get(key) else {
+            continue;
+        };
+        let Some(token) = blob_token_from_container(container) else {
+            continue;
+        };
+        return Some((
+            MediaRefAction::DataUrlContainer { container_key: key },
+            token,
+        ));
+    }
+
+    let input_audio = block.get("input_audio")?;
+    let token = blob_token_from_container(input_audio)?;
+    Some((MediaRefAction::InputAudio, token))
+}
+
+async fn resolve_request_object_references(
+    path: &str,
+    body: &mut serde_json::Value,
+    plugin_manager: &plugin::PluginManager,
+) -> Result<Vec<String>> {
+    let path_only = path.split('?').next().unwrap_or(path);
+    if path_only != "/v1/chat/completions" {
+        return Ok(Vec::new());
+    }
+    let request_id = request_id_from_body(body);
+    let Some(messages) = body
+        .get_mut("messages")
+        .and_then(|value| value.as_array_mut())
+    else {
+        return Ok(Vec::new());
+    };
+
+    let mut request_ids = Vec::new();
+    for message in messages.iter_mut() {
+        let Some(blocks) = message
+            .get_mut("content")
+            .and_then(|value| value.as_array_mut())
+        else {
+            continue;
+        };
+        for block in blocks.iter_mut() {
+            let Some((action, token)) = block_media_ref_action(block) else {
+                continue;
+            };
+            let blob = plugin::blobstore::get_request_object(
+                plugin_manager,
+                plugin::blobstore::GetRequestObjectRequest {
+                    token,
+                    request_id: request_id.clone(),
+                },
+            )
+            .await?;
+            if !request_ids
+                .iter()
+                .any(|existing| existing == &blob.request_id)
+            {
+                request_ids.push(blob.request_id.clone());
+            }
+            match action {
+                MediaRefAction::DataUrlContainer { container_key } => {
+                    if let Some(container) = block
+                        .get_mut(container_key)
+                        .and_then(|value| value.as_object_mut())
+                    {
+                        container.insert(
+                            "url".into(),
+                            serde_json::Value::String(data_url(
+                                &blob.mime_type,
+                                &blob.bytes_base64,
+                            )),
+                        );
+                        container.remove("mesh_token");
+                        container.remove("blob_token");
+                        container.remove("token");
+                    }
+                }
+                MediaRefAction::InputAudio => {
+                    if let Some(container) = block
+                        .get_mut("input_audio")
+                        .and_then(|value| value.as_object_mut())
+                    {
+                        container.insert(
+                            "data".into(),
+                            serde_json::Value::String(blob.bytes_base64.clone()),
+                        );
+                        if let Some(format) = audio_format_from_mime_type(&blob.mime_type) {
+                            container
+                                .entry("format")
+                                .or_insert_with(|| serde_json::Value::String(format.to_string()));
+                        }
+                        container.insert(
+                            "mime_type".into(),
+                            serde_json::Value::String(blob.mime_type.clone()),
+                        );
+                        container.remove("url");
+                        container.remove("mesh_token");
+                        container.remove("blob_token");
+                        container.remove("token");
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(request_ids)
+}
+
+pub async fn release_request_objects(node: &mesh::Node, request_ids: &[String]) {
+    if request_ids.is_empty() {
+        return;
+    }
+    let Some(plugin_manager) = node.plugin_manager().await else {
+        return;
+    };
+    for request_id in request_ids {
+        if let Err(err) = plugin::blobstore::complete_request(
+            &plugin_manager,
+            plugin::blobstore::FinishRequestRequest {
+                request_id: request_id.clone(),
+            },
+        )
+        .await
+        {
+            tracing::warn!(
+                request_id,
+                error = %err,
+                "blobstore: failed to release request-scoped objects"
+            );
+        }
+    }
 }
 
 fn response_first_byte_timeout() -> Duration {
@@ -791,10 +1029,16 @@ pub async fn handle_mesh_request(
     affinity: AffinityRouter,
 ) {
     let mut tcp_stream = tcp_stream;
-    let request = match read_http_request(&mut tcp_stream).await {
-        Ok(v) => v,
-        Err(_) => return,
-    };
+    let plugin_manager = node.plugin_manager().await;
+    let request =
+        match read_http_request_with_plugin_manager(&mut tcp_stream, plugin_manager.as_ref()).await
+        {
+            Ok(v) => v,
+            Err(err) => {
+                let _ = send_400(tcp_stream, &err.to_string()).await;
+                return;
+            }
+        };
     let body_json = request.body_json.as_ref();
 
     // Handle /v1/models
@@ -813,15 +1057,29 @@ pub async fn handle_mesh_request(
             if let Some(body_json) = request.body_json.as_ref() {
                 let cl = router::classify(&body_json);
                 let served = node.models_being_served().await;
-                let available: Vec<(&str, f64)> =
-                    served.iter().map(|name| (name.as_str(), 0.0)).collect();
+                let media = router::media_requirements(body_json);
+                let available: Vec<(&str, f64)> = served
+                    .iter()
+                    .filter(|name| {
+                        let caps = crate::models::installed_model_capabilities(name);
+                        (!media.needs_vision || caps.vision_label().is_some())
+                            && (!media.needs_audio || caps.audio_label().is_some())
+                    })
+                    .map(|name| (name.as_str(), 0.0))
+                    .collect();
+                let available: Vec<(&str, f64)> = if available.is_empty() {
+                    served.iter().map(|name| (name.as_str(), 0.0)).collect()
+                } else {
+                    available
+                };
                 let picked = router::pick_model_classified(&cl, &available);
                 if let Some(name) = picked {
                     tracing::info!(
-                        "router: {:?}/{:?} tools={} → {name}",
+                        "router: {:?}/{:?} tools={} media={} → {name}",
                         cl.category,
                         cl.complexity,
-                        cl.needs_tools
+                        cl.needs_tools,
+                        cl.has_media_inputs
                     );
                     Some(name.to_string())
                 } else {
@@ -853,6 +1111,7 @@ pub async fn handle_mesh_request(
             Some(p) => vec![p.id],
             None => {
                 let _ = send_503(tcp_stream).await;
+                release_request_objects(&node, &request.request_object_request_ids).await;
                 return;
             }
         }
@@ -926,6 +1185,7 @@ pub async fn handle_mesh_request(
                         affinity.learn_target(name, prefix_hash, &target);
                     }
                 }
+                release_request_objects(&node, &request.request_object_request_ids).await;
                 return;
             }
             RouteAttemptResult::RetryableContextOverflow => {
@@ -977,6 +1237,7 @@ pub async fn handle_mesh_request(
         tracing::warn!("All hosts failed for model {:?}", effective_model);
     }
     let _ = send_503(tcp_stream).await;
+    release_request_objects(&node, &request.request_object_request_ids).await;
 }
 
 async fn route_attempt_for_target(
@@ -1142,10 +1403,18 @@ pub async fn send_models_list(mut stream: TcpStream, models: &[String]) -> std::
         .iter()
         .map(|m| {
             let capabilities = crate::models::installed_model_capabilities(m);
+            let has_multimodal = capabilities.supports_multimodal_runtime();
             let has_vision = capabilities.supports_vision_runtime();
+            let has_audio = capabilities.supports_audio_runtime();
             let mut caps = vec!["text"];
+            if has_multimodal {
+                caps.push("multimodal");
+            }
             if has_vision {
                 caps.push("vision");
+            }
+            if has_audio {
+                caps.push("audio");
             }
             if capabilities.reasoning_label().is_some() {
                 caps.push("reasoning");
@@ -1157,7 +1426,9 @@ pub async fn send_models_list(mut stream: TcpStream, models: &[String]) -> std::
                 "object": "model",
                 "owned_by": "mesh-llm",
                 "capabilities": caps,
+                "multimodal_status": capabilities.multimodal_status(),
                 "vision_status": capabilities.vision_status(),
+                "audio_status": capabilities.audio_status(),
                 "reasoning_status": capabilities.reasoning_status(),
             })
         })
@@ -1391,7 +1662,7 @@ mod tests {
 
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            read_http_request_with_limits(&mut stream, limits)
+            read_http_request_with_limits(&mut stream, limits, None)
                 .await
                 .unwrap()
         });
@@ -1473,6 +1744,19 @@ mod tests {
 
         let budget = request_budget_tokens(&body).unwrap();
         assert!(budget >= 512 + REQUEST_TOKEN_MARGIN);
+    }
+
+    #[test]
+    fn test_mesh_blob_token_from_url_requires_client_id_segment() {
+        assert_eq!(
+            mesh_blob_token_from_url("mesh://blob/client-1/token-123"),
+            Some("token-123".to_string())
+        );
+        assert_eq!(mesh_blob_token_from_url("mesh://blob/token-123"), None);
+        assert_eq!(
+            mesh_blob_token_from_url("mesh://blob/client-1/token-123/extra"),
+            None
+        );
     }
 
     #[test]
@@ -1585,6 +1869,23 @@ mod tests {
         let body_json = request.body_json.unwrap();
         let content = body_json["messages"][0]["content"].as_str().unwrap();
         assert_eq!(content.len(), 48);
+    }
+
+    #[tokio::test]
+    async fn test_read_http_request_allows_large_object_upload_body() {
+        let body = vec![b'x'; MAX_BODY_BYTES + 1];
+        let headers = format!(
+            "POST /api/objects HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+
+        let request = read_request_from_parts(vec![headers, body.clone()]).await;
+
+        assert_eq!(request.path, "/api/objects");
+        assert!(request.raw.ends_with(&body));
+        assert!(request.body_json.is_none());
+        assert!(request.request_object_request_ids.is_empty());
     }
 
     #[tokio::test]

@@ -9,6 +9,7 @@
 //!   GET  /api/events    — SSE stream of status updates
 //!   GET  /api/discover  — browse Nostr-published meshes
 //!   POST /api/chat      — proxy to inference API
+//!   POST /api/objects   — upload a request-scoped media object
 //!   GET  /              — embedded web dashboard
 //!
 //! The dashboard is mostly read-only — shows status, topology, and models.
@@ -91,6 +92,20 @@ fn likely_vision_model(name: &str, description: Option<&str>) -> bool {
     ["vision", "-vl", "llava", "omni", "qwen2.5-vl", "mllama"]
         .iter()
         .any(|needle| haystack.contains(needle))
+}
+
+fn likely_audio_model(name: &str, description: Option<&str>) -> bool {
+    let haystack = format!("{} {}", name, description.unwrap_or_default()).to_ascii_lowercase();
+    [
+        "audio",
+        "speech",
+        "voice",
+        "omni",
+        "ultravox",
+        "qwen2-audio",
+    ]
+    .iter()
+    .any(|needle| haystack.contains(needle))
 }
 
 fn fit_hint_for_machine(size_gb: f64, my_vram_gb: f64) -> (String, String) {
@@ -450,10 +465,35 @@ impl MeshApi {
                     capabilities.vision = capabilities
                         .vision
                         .max(crate::models::capabilities::CapabilityLevel::Likely);
+                    capabilities.multimodal = true;
                 }
+                if local_known
+                    && likely_audio_model(name, catalog_entry.map(|m| m.description.as_str()))
+                {
+                    capabilities.audio = capabilities
+                        .audio
+                        .max(crate::models::capabilities::CapabilityLevel::Likely);
+                    capabilities.multimodal = true;
+                }
+                let multimodal = capabilities.supports_multimodal_runtime();
+                let multimodal_status = if multimodal || capabilities.multimodal_label().is_some() {
+                    Some(capabilities.multimodal_status())
+                } else {
+                    None
+                };
                 let vision = capabilities.supports_vision_runtime();
                 let vision_status = if vision || capabilities.vision_label().is_some() {
                     Some(capabilities.vision_status())
+                } else {
+                    None
+                };
+                let audio = matches!(
+                    capabilities.audio,
+                    crate::models::capabilities::CapabilityLevel::Supported
+                        | crate::models::capabilities::CapabilityLevel::Likely
+                );
+                let audio_status = if audio || capabilities.audio_label().is_some() {
+                    Some(capabilities.audio_status())
                 } else {
                     None
                 };
@@ -581,8 +621,12 @@ impl MeshApi {
                     context_length,
                     quantization,
                     description,
+                    multimodal,
+                    multimodal_status,
                     vision,
                     vision_status,
+                    audio,
+                    audio_status,
                     reasoning,
                     reasoning_status,
                     tool_use,
