@@ -69,7 +69,7 @@ pub(crate) async fn check_for_update() {
             } else {
                 #[cfg(not(windows))]
                 eprintln!(
-                    "✨ New version: v{VERSION} -> v{}. Reinstall with: curl -fsSL {INSTALL_SCRIPT_URL} | sh",
+                    "✨ New version: v{VERSION} -> v{}. Reinstall with: curl -fsSL {INSTALL_SCRIPT_URL} | bash",
                     release.version
                 );
                 #[cfg(windows)]
