@@ -473,7 +473,17 @@ pub fn find_mmproj_path(model_name: &str, model_path: &Path) -> Option<PathBuf> 
         return Some(path);
     }
 
+    // Scan the model's parent directory for a matching mmproj file.
+    // The mmproj filename must contain both "mmproj" AND a prefix that matches
+    // the model name (e.g. "Qwen3.5-0.8B-mmproj-BF16.gguf" matches model
+    // "Qwen3.5-0.8B" but not "Hermes-2-Pro-Mistral-7B"). This prevents
+    // picking up unrelated mmproj files that happen to sit in the same directory
+    // (common in the legacy ~/.models flat dir).
     let parent = model_path.parent()?;
+    let model_stem = model_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())?;
     let mut candidates = std::fs::read_dir(parent)
         .ok()?
         .filter_map(Result::ok)
@@ -483,7 +493,23 @@ pub fn find_mmproj_path(model_name: &str, model_path: &Path) -> Option<PathBuf> 
         .filter(|path| {
             path.file_stem()
                 .and_then(|stem| stem.to_str())
-                .map(|stem| stem.to_ascii_lowercase().contains("mmproj"))
+                .map(|stem| {
+                    let lower = stem.to_ascii_lowercase();
+                    if !lower.contains("mmproj") {
+                        return false;
+                    }
+                    // Extract the base model name from the mmproj filename
+                    // (everything before "-mmproj" or "_mmproj").
+                    let base = lower
+                        .split_once("-mmproj")
+                        .or_else(|| lower.split_once("_mmproj"))
+                        .map(|(prefix, _)| prefix)
+                        .unwrap_or(&lower);
+                    // The model stem must start with the mmproj's base name
+                    // so "hermes-2-pro-mistral-7b-q4_k_m" won't match
+                    // "qwen3.5-0.8b" but "qwen3.5-0.8b-q4_k_m" will.
+                    model_stem.starts_with(base)
+                })
                 .unwrap_or(false)
         });
 

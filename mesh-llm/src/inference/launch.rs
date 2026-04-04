@@ -780,7 +780,7 @@ pub async fn start_llama_server(
         })?;
 
     // Wait for health check
-    let url = format!("http://localhost:{http_port}/health");
+    let url = format!("http://127.0.0.1:{http_port}/health");
     for i in 0..600 {
         if i > 0 && i % 10 == 0 {
             let bytes = crate::network::tunnel::bytes_transferred();
