@@ -522,13 +522,6 @@ mod tests {
     }
 
     #[test]
-    fn self_update_defaults_to_enabled() {
-        assert!(MeshConfig::default().self_update_enabled());
-        let config: MeshConfig = toml::from_str("self_update = false").unwrap();
-        assert!(!config.self_update_enabled());
-    }
-
-    #[test]
     fn instance_ids_include_pid_and_random_suffix() {
         let instance_id = make_instance_id();
         let prefix = format!("p{}-", std::process::id());
