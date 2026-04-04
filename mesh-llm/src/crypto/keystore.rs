@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use argon2::Argon2;
+use argon2::{Argon2, Params};
 use chacha20poly1305::aead::{Aead, AeadCore, OsRng};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,13 @@ use super::error::CryptoError;
 use super::keys::OwnerKeypair;
 
 const KEYSTORE_VERSION: u32 = 1;
+
+// Fixed Argon2id KDF parameters used for new keystores.
+// These match argon2 0.5.x defaults and are stored explicitly in the JSON
+// so that future crate upgrades cannot silently change key derivation.
+const ARGON2_M_COST: u32 = 19456; // 19 MiB
+const ARGON2_T_COST: u32 = 2;
+const ARGON2_P_COST: u32 = 1;
 
 /// On-disk keystore format (JSON).
 #[derive(Serialize, Deserialize)]
@@ -29,6 +36,10 @@ struct KeystoreV1 {
     // Present when encrypted == true
     kdf: Option<String>,
     argon2_salt: Option<String>,
+    // Explicit KDF parameters stored for forward compatibility (new keystores only).
+    argon2_m_cost: Option<u32>,
+    argon2_t_cost: Option<u32>,
+    argon2_p_cost: Option<u32>,
     nonce: Option<String>,
     ciphertext: Option<String>,
 }
@@ -60,11 +71,21 @@ pub fn keystore_exists(path: &Path) -> bool {
 ///
 /// If `passphrase` is `Some`, the secret keys are encrypted with Argon2id + ChaCha20Poly1305.
 /// File permissions are set to 0600 on Unix.
+///
+/// Returns `CryptoError::KeystoreAlreadyExists` if a keystore already exists at `path`
+/// and `overwrite` is `false`.
 pub fn save_keystore(
     path: &Path,
     keypair: &OwnerKeypair,
     passphrase: Option<&str>,
+    overwrite: bool,
 ) -> Result<(), CryptoError> {
+    if path.exists() && !overwrite {
+        return Err(CryptoError::KeystoreAlreadyExists {
+            path: path.display().to_string(),
+        });
+    }
+
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -99,11 +120,16 @@ pub fn load_keystore(path: &Path, passphrase: Option<&str>) -> Result<OwnerKeypa
         });
     }
 
-    if ks.encrypted {
-        decrypt_keystore(&ks, passphrase)
+    let keypair = if ks.encrypted {
+        decrypt_keystore(&ks, passphrase)?
     } else {
-        plaintext_keystore(&ks)
-    }
+        plaintext_keystore(&ks)?
+    };
+
+    // Validate stored metadata against the derived keypair to detect tampering.
+    validate_keystore_metadata(&ks, &keypair)?;
+
+    Ok(keypair)
 }
 
 /// Read keystore metadata without decrypting secret keys.
@@ -115,6 +141,13 @@ pub fn keystore_metadata(path: &Path) -> Result<KeystoreInfo, CryptoError> {
     }
     let raw = std::fs::read_to_string(path)?;
     let ks: KeystoreV1 = serde_json::from_str(&raw)?;
+
+    if ks.version != KEYSTORE_VERSION {
+        return Err(CryptoError::UnsupportedVersion {
+            version: ks.version,
+        });
+    }
+
     let signing_public_key =
         ks.signing_public_key
             .clone()
@@ -140,12 +173,27 @@ pub fn keystore_metadata(path: &Path) -> Result<KeystoreInfo, CryptoError> {
         });
     }
 
+    let encryption_public_key =
+        ks.encryption_public_key
+            .clone()
+            .ok_or_else(|| CryptoError::InvalidKeyMaterial {
+                reason: "missing encryption_public_key in keystore metadata".into(),
+            })?;
+    let encryption_public_key_bytes: [u8; 32] = hex::decode(&encryption_public_key)
+        .map_err(|e| CryptoError::InvalidKeyMaterial {
+            reason: format!("bad encryption public key hex: {e}"),
+        })?
+        .try_into()
+        .map_err(|_| CryptoError::InvalidKeyMaterial {
+            reason: "encryption public key must be 32 bytes".into(),
+        })?;
+
     Ok(KeystoreInfo {
         owner_id: verified_owner_id,
         created_at: ks.created_at,
         encrypted: ks.encrypted,
         signing_public_key: Some(hex::encode(signing_public_key.as_bytes())),
-        encryption_public_key: ks.encryption_public_key,
+        encryption_public_key: Some(hex::encode(encryption_public_key_bytes)),
     })
 }
 
@@ -172,6 +220,9 @@ fn build_plaintext_keystore(keypair: &OwnerKeypair) -> KeystoreV1 {
         encryption_public_key: Some(hex::encode(keypair.encryption_public_key().as_bytes())),
         kdf: None,
         argon2_salt: None,
+        argon2_m_cost: None,
+        argon2_t_cost: None,
+        argon2_p_cost: None,
         nonce: None,
         ciphertext: None,
     }
@@ -183,8 +234,14 @@ fn build_encrypted_keystore(
 ) -> Result<KeystoreV1, CryptoError> {
     let salt: [u8; 16] = rand::random();
 
-    // Derive a 32-byte symmetric key from the passphrase.
-    let sym_key = derive_key(passphrase, &salt)?;
+    // Derive a 32-byte symmetric key from the passphrase using explicit params.
+    let sym_key = derive_key(
+        passphrase,
+        &salt,
+        ARGON2_M_COST,
+        ARGON2_T_COST,
+        ARGON2_P_COST,
+    )?;
 
     // Encrypt the secret keys.
     let payload = SecretPayload {
@@ -210,6 +267,9 @@ fn build_encrypted_keystore(
         encryption_public_key: Some(hex::encode(keypair.encryption_public_key().as_bytes())),
         kdf: Some("argon2id-chacha20poly1305".into()),
         argon2_salt: Some(hex::encode(salt)),
+        argon2_m_cost: Some(ARGON2_M_COST),
+        argon2_t_cost: Some(ARGON2_T_COST),
+        argon2_p_cost: Some(ARGON2_P_COST),
         nonce: Some(hex::encode(nonce)),
         ciphertext: Some(hex::encode(ct)),
     })
@@ -252,7 +312,22 @@ fn write_keystore_atomically(path: &Path, bytes: &[u8]) -> Result<(), CryptoErro
         file.sync_all()?;
         drop(file);
 
+        // On Windows, `rename` fails if the destination already exists.
+        // Remove the destination first for Windows; on Unix the rename is atomic.
+        #[cfg(windows)]
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+
         std::fs::rename(&tmp_path, path)?;
+
+        // fsync the parent directory on Unix so the rename survives a crash.
+        #[cfg(unix)]
+        {
+            let dir = std::fs::File::open(parent)?;
+            dir.sync_all()?;
+        }
+
         Ok(())
     })();
 
@@ -312,7 +387,14 @@ fn decrypt_keystore(
         return Err(CryptoError::DecryptionFailed);
     }
 
-    let sym_key = derive_key(pass, &salt)?;
+    // Use stored KDF parameters for forward compatibility; fall back to the
+    // constants that match argon2 0.5.x defaults for keystores that pre-date
+    // explicit parameter storage.
+    let m_cost = ks.argon2_m_cost.unwrap_or(ARGON2_M_COST);
+    let t_cost = ks.argon2_t_cost.unwrap_or(ARGON2_T_COST);
+    let p_cost = ks.argon2_p_cost.unwrap_or(ARGON2_P_COST);
+
+    let sym_key = derive_key(pass, &salt, m_cost, t_cost, p_cost)?;
     let cipher = ChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(sym_key.as_ref()));
     let nonce = chacha20poly1305::Nonce::from_slice(&nonce_bytes);
     let plaintext = cipher
@@ -330,9 +412,54 @@ fn decrypt_keystore(
     OwnerKeypair::from_bytes(&sign_bytes, &enc_bytes)
 }
 
-fn derive_key(passphrase: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
+/// Validate that stored metadata fields match the loaded keypair.
+///
+/// Detects tampered keystores where the stored `owner_id`, `signing_public_key`,
+/// or `encryption_public_key` don't match what's derived from the secret keys.
+fn validate_keystore_metadata(ks: &KeystoreV1, keypair: &OwnerKeypair) -> Result<(), CryptoError> {
+    let derived_owner_id = keypair.owner_id();
+    if ks.owner_id != derived_owner_id {
+        return Err(CryptoError::VerificationFailed {
+            reason: "owner_id does not match derived signing key".into(),
+        });
+    }
+
+    if let Some(ref stored_spk) = ks.signing_public_key {
+        let expected = hex::encode(keypair.verifying_key().as_bytes());
+        if *stored_spk != expected {
+            return Err(CryptoError::VerificationFailed {
+                reason: "signing_public_key does not match derived signing key".into(),
+            });
+        }
+    }
+
+    if let Some(ref stored_epk) = ks.encryption_public_key {
+        let expected = hex::encode(keypair.encryption_public_key().as_bytes());
+        if *stored_epk != expected {
+            return Err(CryptoError::VerificationFailed {
+                reason: "encryption_public_key does not match derived encryption key".into(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn derive_key(
+    passphrase: &str,
+    salt: &[u8],
+    m_cost: u32,
+    t_cost: u32,
+    p_cost: u32,
+) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
+    let params = Params::new(m_cost, t_cost, p_cost, Some(32)).map_err(|e| {
+        CryptoError::InvalidKeyMaterial {
+            reason: format!("invalid argon2 params: {e}"),
+        }
+    })?;
+    let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let mut key = Zeroizing::new([0u8; 32]);
-    Argon2::default()
+    argon2
         .hash_password_into(passphrase.as_bytes(), salt, key.as_mut())
         .map_err(|e| CryptoError::InvalidKeyMaterial {
             reason: format!("argon2 KDF failed: {e}"),
@@ -357,7 +484,7 @@ mod tests {
         let kp = OwnerKeypair::generate();
         let original_id = kp.owner_id();
 
-        save_keystore(&path, &kp, None).unwrap();
+        save_keystore(&path, &kp, None, false).unwrap();
         let loaded = load_keystore(&path, None).unwrap();
 
         assert_eq!(original_id, loaded.owner_id());
@@ -373,7 +500,7 @@ mod tests {
         let kp = OwnerKeypair::generate();
         let original_id = kp.owner_id();
 
-        save_keystore(&path, &kp, Some("test-passphrase")).unwrap();
+        save_keystore(&path, &kp, Some("test-passphrase"), false).unwrap();
         let loaded = load_keystore(&path, Some("test-passphrase")).unwrap();
 
         assert_eq!(original_id, loaded.owner_id());
@@ -388,7 +515,7 @@ mod tests {
         let path = temp_keystore_path();
         let kp = OwnerKeypair::generate();
 
-        save_keystore(&path, &kp, Some("correct")).unwrap();
+        save_keystore(&path, &kp, Some("correct"), false).unwrap();
 
         let result = load_keystore(&path, Some("wrong"));
         assert!(
@@ -404,7 +531,7 @@ mod tests {
         let path = temp_keystore_path();
         let kp = OwnerKeypair::generate();
 
-        save_keystore(&path, &kp, Some("secret")).unwrap();
+        save_keystore(&path, &kp, Some("secret"), false).unwrap();
 
         let result = load_keystore(&path, None);
         assert!(
@@ -423,12 +550,55 @@ mod tests {
     }
 
     #[test]
+    fn save_refuses_to_overwrite_by_default() {
+        let path = temp_keystore_path();
+        let kp = OwnerKeypair::generate();
+
+        save_keystore(&path, &kp, None, false).unwrap();
+
+        let kp2 = OwnerKeypair::generate();
+        let result = save_keystore(&path, &kp2, None, false);
+        assert!(
+            matches!(result, Err(CryptoError::KeystoreAlreadyExists { .. })),
+            "save without overwrite should fail if file exists"
+        );
+
+        // With overwrite=true it should succeed.
+        save_keystore(&path, &kp2, None, true).unwrap();
+        let loaded = load_keystore(&path, None).unwrap();
+        assert_eq!(loaded.owner_id(), kp2.owner_id());
+
+        fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn load_detects_tampered_owner_id() {
+        let path = temp_keystore_path();
+        let kp = OwnerKeypair::generate();
+        save_keystore(&path, &kp, None, false).unwrap();
+
+        // Tamper the owner_id in the on-disk JSON.
+        let mut raw: KeystoreV1 =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        raw.owner_id = "0000000000000000000000000000000000000000000000000000000000000000".into();
+        fs::write(&path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
+
+        let result = load_keystore(&path, None);
+        assert!(
+            matches!(result, Err(CryptoError::VerificationFailed { .. })),
+            "tampered owner_id should be detected on load"
+        );
+
+        fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
     fn metadata_without_decryption() {
         let path = temp_keystore_path();
         let kp = OwnerKeypair::generate();
         let expected_id = kp.owner_id();
 
-        save_keystore(&path, &kp, Some("secret")).unwrap();
+        save_keystore(&path, &kp, Some("secret"), false).unwrap();
 
         let info = keystore_metadata(&path).unwrap();
         assert_eq!(info.owner_id, expected_id);
@@ -442,7 +612,7 @@ mod tests {
         let path = temp_keystore_path();
         let kp = OwnerKeypair::generate();
 
-        save_keystore(&path, &kp, Some("secret")).unwrap();
+        save_keystore(&path, &kp, Some("secret"), false).unwrap();
 
         let mut raw: KeystoreV1 =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
@@ -463,7 +633,7 @@ mod tests {
         let path = temp_keystore_path();
         let kp = OwnerKeypair::generate();
 
-        save_keystore(&path, &kp, Some("secret")).unwrap();
+        save_keystore(&path, &kp, Some("secret"), false).unwrap();
 
         let mut raw: KeystoreV1 =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();

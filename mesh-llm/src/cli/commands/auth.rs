@@ -50,6 +50,7 @@ pub(crate) fn run_init(owner_key: Option<PathBuf>, force: bool, no_passphrase: b
         &path,
         &keypair,
         passphrase.as_ref().map(|pass| pass.as_str()),
+        force,
     )?;
 
     eprintln!();

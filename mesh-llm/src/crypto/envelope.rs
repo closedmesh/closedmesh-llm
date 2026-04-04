@@ -168,7 +168,18 @@ pub fn open_message(
 
     let sender_box_pk = crypto_box::PublicKey::from(sender_box_pk_bytes);
 
-    // 2. Verify sender_owner_id matches the signing key (prevents identity spoofing).
+    // 2. Verify that the envelope's claimed recipient key matches the actual recipient.
+    // This prevents an attacker from encrypting to the correct recipient while claiming
+    // a different recipient in the signed metadata.
+    let actual_recipient_box_pk_bytes = *recipient.encryption_public_key().as_bytes();
+    if recipient_box_pk_bytes != actual_recipient_box_pk_bytes {
+        return Err(CryptoError::VerificationFailed {
+            reason: "recipient_box_public_key does not match recipient encryption public key"
+                .into(),
+        });
+    }
+
+    // 3. Verify sender_owner_id matches the signing key (prevents identity spoofing).
     let sender_verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&sender_sign_pk_bytes)
         .map_err(|_| CryptoError::InvalidSignature)?;
     let expected_owner_id = super::keys::owner_id_from_verifying_key(&sender_verifying_key);
@@ -178,7 +189,7 @@ pub fn open_message(
         });
     }
 
-    // 3. Decrypt.
+    // 4. Decrypt.
     let nonce_bytes = hex::decode(&envelope.nonce).map_err(|_| CryptoError::DecryptionFailed)?;
     if nonce_bytes.len() != 24 {
         return Err(CryptoError::DecryptionFailed);
@@ -191,11 +202,11 @@ pub fn open_message(
         .decrypt(nonce, ct.as_ref())
         .map_err(|_| CryptoError::DecryptionFailed)?;
 
-    // 4. Parse inner payload.
+    // 5. Parse inner payload.
     let inner: InnerPayload =
         serde_json::from_slice(&inner_bytes).map_err(|_| CryptoError::DecryptionFailed)?;
 
-    // 5. Verify signature.
+    // 6. Verify signature.
     let signed_bytes = canonical_signed_bytes(
         envelope.version,
         &envelope.sender_owner_id,
@@ -343,6 +354,31 @@ mod tests {
         assert!(
             matches!(result, Err(CryptoError::VerificationFailed { .. })),
             "unknown version should be rejected"
+        );
+    }
+
+    #[test]
+    fn mismatched_recipient_key_rejected() {
+        let sender = OwnerKeypair::generate();
+        let recipient = OwnerKeypair::generate();
+
+        let mut envelope = seal_message(
+            &sender,
+            &recipient.encryption_public_key(),
+            "test",
+            b"payload",
+            0,
+        )
+        .unwrap();
+
+        // Claim a different recipient key in the envelope metadata.
+        let other = OwnerKeypair::generate();
+        envelope.recipient_box_public_key = hex::encode(other.encryption_public_key().as_bytes());
+
+        let result = open_message(&recipient, &envelope);
+        assert!(
+            matches!(result, Err(CryptoError::VerificationFailed { .. })),
+            "mismatched recipient key should be rejected"
         );
     }
 
