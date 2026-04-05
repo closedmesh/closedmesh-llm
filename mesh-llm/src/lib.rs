@@ -17,8 +17,7 @@ pub mod proto {
     }
 }
 
-pub use plugins::blackboard;
-pub use plugins::blackboard::mcp as blackboard_mcp;
+pub(crate) use plugins::blackboard;
 
 use anyhow::Result;
 
