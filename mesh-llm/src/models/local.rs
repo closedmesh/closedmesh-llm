@@ -401,6 +401,39 @@ fn strip_quant_suffix(stem: &str) -> &str {
     stem
 }
 
+/// Extract the quantization suffix from a lowercased model stem, if present.
+/// e.g. "qwen3vl-2b-instruct-q4_k_m" → Some("q4_k_m")
+///      "my-model"                    → None
+fn extract_quant_suffix(stem: &str) -> Option<String> {
+    let stripped = strip_quant_suffix(stem);
+    if stripped.len() < stem.len() {
+        // +1 to skip the '-' separator between base and quant
+        Some(stem[stripped.len() + 1..].to_string())
+    } else {
+        None
+    }
+}
+
+/// Return the sole candidate from `candidates` whose lowercased filename
+/// contains `quant`, or `None` if zero or multiple candidates match.
+fn pick_quant_match(candidates: &[PathBuf], quant: &str) -> Option<PathBuf> {
+    let matches: Vec<_> = candidates
+        .iter()
+        .filter(|path| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_ascii_lowercase().contains(quant))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+    if matches.len() == 1 {
+        Some(matches.into_iter().next().unwrap())
+    } else {
+        None
+    }
+}
+
 fn is_named_mmproj_match(lower: &str, model_base: &str, model_stem: &str) -> bool {
     // Try pattern: <model>-mmproj... (model name before mmproj)
     if let Some((prefix, _)) = lower
@@ -487,9 +520,13 @@ pub fn find_mmproj_path(model_name: &str, model_path: &Path) -> Option<PathBuf> 
     // isolated snapshot subdirectory alongside only its companion files.
     //
     // Preferred resolution order within that exact directory:
-    // 1. model-name-aware mmproj matches
-    // 2. if all remaining mmproj siblings are only precision variants of the
-    //    same projector, prefer BF16 over F16 over F32
+    // 1. Model-name-aware matches (single → return immediately).
+    // 2. Among multiple name-matched candidates: quant-aware selection —
+    //    prefer the mmproj whose filename contains the same quantization as
+    //    the model (e.g. Q4_K_M), matching LM Studio's heuristic.
+    // 3. Precision-variant fallback: if all remaining candidates are the same
+    //    projector in different precisions, prefer BF16 over F16 over F32.
+    // 4. Return None when the choice is genuinely ambiguous.
     let parent = model_path.parent()?;
     let model_stem = model_path
         .file_stem()
@@ -498,6 +535,9 @@ pub fn find_mmproj_path(model_name: &str, model_path: &Path) -> Option<PathBuf> 
     // Strip the quant suffix from the model stem to get the base model name
     // e.g. "qwen3vl-2b-instruct-q4_k_m" → "qwen3vl-2b-instruct"
     let model_base = strip_quant_suffix(&model_stem);
+    // Extract the quantization suffix for quant-aware matching below
+    // e.g. "qwen3vl-2b-instruct-q4_k_m" → Some("q4_k_m")
+    let model_quant = extract_quant_suffix(&model_stem);
     let mmproj_siblings: Vec<PathBuf> = std::fs::read_dir(parent)
         .ok()?
         .filter_map(Result::ok)
@@ -528,13 +568,27 @@ pub fn find_mmproj_path(model_name: &str, model_path: &Path) -> Option<PathBuf> 
         .cloned()
         .collect();
 
-    if let Some(candidate) = choose_mmproj_candidate(&named_matches) {
-        return Some(candidate);
-    }
     if !named_matches.is_empty() {
-        return None;
+        // Multiple named matches: try quant-aware selection before precision fallback
+        if named_matches.len() > 1 {
+            if let Some(ref quant) = model_quant {
+                if let Some(candidate) = pick_quant_match(&named_matches, quant) {
+                    return Some(candidate);
+                }
+            }
+        }
+        // Single named match, or quant-match failed: precision-variant pick or None
+        return choose_mmproj_candidate(&named_matches);
     }
 
+    // No named matches: try quant-aware selection among all siblings, then precision fallback
+    if mmproj_siblings.len() > 1 {
+        if let Some(ref quant) = model_quant {
+            if let Some(candidate) = pick_quant_match(&mmproj_siblings, quant) {
+                return Some(candidate);
+            }
+        }
+    }
     choose_mmproj_candidate(&mmproj_siblings)
 }
 
@@ -824,5 +878,57 @@ mod tests {
         } else {
             std::env::remove_var(key);
         }
+    }
+
+    #[test]
+    fn mmproj_path_prefers_quant_matched_named_candidate() {
+        // When multiple named mmproj candidates exist (model-name prefix matches
+        // both), quant-aware selection should pick the one whose filename contains
+        // the same quantization as the model (Q4_K_M in this case).
+        let temp = std::env::temp_dir().join(format!(
+            "mesh-llm-mmproj-quant-named-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp).unwrap();
+        let model = temp.join("Qwen3VL-2B-Instruct-Q4_K_M.gguf");
+        let q4_mmproj = temp.join("mmproj-Qwen3VL-2B-Instruct-Q4_K_M.gguf");
+        let q8_mmproj = temp.join("mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf");
+        std::fs::write(&model, b"model").unwrap();
+        std::fs::write(&q4_mmproj, b"mmproj").unwrap();
+        std::fs::write(&q8_mmproj, b"mmproj").unwrap();
+
+        let found = find_mmproj_path("Qwen3VL-2B-Instruct-Q4_K_M", &model);
+        assert_eq!(found.as_deref(), Some(q4_mmproj.as_path()));
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn mmproj_path_prefers_quant_matched_generic_sibling() {
+        // When there are no model-name-aware matches but the siblings include
+        // a projector with the same quant as the model, select that one.
+        let temp = std::env::temp_dir().join(format!(
+            "mesh-llm-mmproj-quant-sibling-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp).unwrap();
+        let model = temp.join("my-model-Q4_K_M.gguf");
+        // Generic projector names without a matching model prefix
+        let q4_mmproj = temp.join("mmproj-Q4_K_M.gguf");
+        let q8_mmproj = temp.join("mmproj-Q8_0.gguf");
+        std::fs::write(&model, b"model").unwrap();
+        std::fs::write(&q4_mmproj, b"mmproj").unwrap();
+        std::fs::write(&q8_mmproj, b"mmproj").unwrap();
+
+        let found = find_mmproj_path("my-model-Q4_K_M", &model);
+        assert_eq!(found.as_deref(), Some(q4_mmproj.as_path()));
+
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }
