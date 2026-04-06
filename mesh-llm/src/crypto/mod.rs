@@ -8,8 +8,9 @@ pub use self::envelope::{open_message, seal_message, OpenedMessage, SignedEncryp
 pub use self::error::CryptoError;
 pub use self::keychain::{
     delete_secret as keychain_delete, get_secret as keychain_get,
-    is_available as keychain_available, set_secret as keychain_set, DEFAULT_OWNER_ACCOUNT,
-    KEYCHAIN_SERVICE,
+    is_available as keychain_available, load_owner_keypair_from_keychain,
+    owner_account_for_path as owner_keychain_account_for_path, save_keystore_with_keychain,
+    set_secret as keychain_set, OwnerKeychainLoadError, DEFAULT_OWNER_ACCOUNT, KEYCHAIN_SERVICE,
 };
 pub use self::keys::{owner_id_from_verifying_key, OwnerKeypair};
 pub use self::keystore::{

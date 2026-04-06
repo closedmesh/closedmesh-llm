@@ -6,15 +6,28 @@
 //! strings by (service, account) key. Callers decide whether the stored value
 //! is a passphrase, hex-encoded key bytes, or something else.
 
+use std::path::Path;
+
+use base64::Engine as _;
 use keyring::Entry;
+use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use super::error::CryptoError;
+use super::keys::OwnerKeypair;
+use super::keystore::{load_keystore, save_keystore, write_keystore_bytes_atomically};
 
 /// Service name used for all mesh-llm keychain entries.
 pub const KEYCHAIN_SERVICE: &str = "mesh-llm";
 
 /// Default account name for the owner keystore unlock secret.
 pub const DEFAULT_OWNER_ACCOUNT: &str = "owner-keystore";
+
+#[derive(Debug)]
+pub enum OwnerKeychainLoadError {
+    NoEntry,
+    Crypto(CryptoError),
+}
 
 /// Store a secret in the OS keychain under (service, account).
 ///
@@ -72,9 +85,106 @@ pub fn is_available() -> bool {
     }
 }
 
+/// Derive a stable keychain account name from a keystore path.
+///
+/// Form: `owner-keystore:<16 hex chars of sha256(normalized_absolute_path)>`.
+/// The prefix matches `DEFAULT_OWNER_ACCOUNT` so users can identify mesh-llm
+/// entries. The hash bounds the length and avoids leaking full paths into
+/// keychain account fields, while still giving every keystore path its own
+/// slot.
+///
+/// Uses `std::path::absolute` rather than `canonicalize` so the result is
+/// consistent whether the file exists yet (during `auth init`) or already
+/// exists (during status/load). `canonicalize` would resolve symlinks and
+/// only succeed on existing files, producing different account names for
+/// the same logical path at different lifecycle points.
+///
+/// On Windows the path is lowercased before hashing, because the default
+/// filesystem (NTFS) is case-insensitive; without this, `Owner-Keystore.json`
+/// and `owner-keystore.json` would map to different keychain entries despite
+/// being the same file.
+pub fn owner_account_for_path(path: &Path) -> String {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let path_str = absolute.to_string_lossy();
+    #[cfg(windows)]
+    let normalized = path_str.to_lowercase();
+    #[cfg(not(windows))]
+    let normalized = path_str.into_owned();
+    let hash = Sha256::digest(normalized.as_bytes());
+    format!("{}:{}", DEFAULT_OWNER_ACCOUNT, &hex::encode(hash)[..16])
+}
+
+/// Save an owner keystore encrypted with a random passphrase and bind that
+/// passphrase to the OS keychain account derived from `path`.
+///
+/// The keystore is written before the keychain is updated. If the keychain
+/// write fails, the keystore is restored to its previous bytes (or removed if
+/// it did not exist), so ordinary failures do not strand the file and keychain
+/// in different states.
+pub fn save_keystore_with_keychain(
+    path: &Path,
+    keypair: &OwnerKeypair,
+    overwrite: bool,
+) -> Result<String, CryptoError> {
+    let account = owner_account_for_path(path);
+    let previous_keystore = if path.exists() {
+        Some(std::fs::read(path)?)
+    } else {
+        None
+    };
+    let generated = Zeroizing::new(generate_random_passphrase());
+
+    save_keystore(path, keypair, Some(generated.as_str()), overwrite)?;
+
+    if let Err(err) = set_secret(KEYCHAIN_SERVICE, &account, generated.as_str()) {
+        let _ = rollback_keystore(path, previous_keystore.as_deref());
+        return Err(err);
+    }
+
+    Ok(account)
+}
+
+/// Try to load an encrypted keystore using a passphrase stored in the OS
+/// keychain under the account derived from the keystore path.
+pub fn load_owner_keypair_from_keychain(
+    path: &Path,
+) -> Result<OwnerKeypair, OwnerKeychainLoadError> {
+    if !is_available() {
+        return Err(OwnerKeychainLoadError::Crypto(
+            CryptoError::KeychainUnavailable {
+                reason: "no backend reachable on this host".into(),
+            },
+        ));
+    }
+    let account = owner_account_for_path(path);
+    let pass = get_secret(KEYCHAIN_SERVICE, &account).map_err(OwnerKeychainLoadError::Crypto)?;
+    let pass = match pass {
+        Some(p) => Zeroizing::new(p),
+        None => return Err(OwnerKeychainLoadError::NoEntry),
+    };
+    load_keystore(path, Some(pass.as_str())).map_err(OwnerKeychainLoadError::Crypto)
+}
+
 fn map_err(e: keyring::Error) -> CryptoError {
     CryptoError::KeychainUnavailable {
         reason: e.to_string(),
+    }
+}
+
+fn generate_random_passphrase() -> String {
+    let bytes: [u8; 32] = rand::random();
+    base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes)
+}
+
+fn rollback_keystore(path: &Path, previous_keystore: Option<&[u8]>) -> Result<(), CryptoError> {
+    match previous_keystore {
+        Some(previous) => write_keystore_bytes_atomically(path, previous),
+        None => {
+            if path.exists() {
+                std::fs::remove_file(path)?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -152,5 +262,58 @@ mod tests {
         assert_eq!(got.as_deref(), Some("second"));
 
         delete_secret(KEYCHAIN_SERVICE, &account).ok();
+    }
+
+    #[test]
+    fn generated_passphrase_has_expected_entropy() {
+        let p1 = generate_random_passphrase();
+        let p2 = generate_random_passphrase();
+        assert_ne!(p1, p2, "two passphrases should not collide");
+        assert_eq!(p1.len(), 43);
+        assert_eq!(p2.len(), 43);
+    }
+
+    #[test]
+    fn account_name_is_deterministic_for_same_path() {
+        let a1 = owner_account_for_path(Path::new("/tmp/does-not-exist-1.json"));
+        let a2 = owner_account_for_path(Path::new("/tmp/does-not-exist-1.json"));
+        assert_eq!(a1, a2);
+    }
+
+    #[test]
+    fn account_names_differ_for_different_paths() {
+        let a1 = owner_account_for_path(Path::new("/tmp/keystore-a.json"));
+        let a2 = owner_account_for_path(Path::new("/tmp/keystore-b.json"));
+        assert_ne!(a1, a2);
+    }
+
+    #[test]
+    fn account_name_shape() {
+        let account = owner_account_for_path(Path::new("/tmp/x.json"));
+        assert!(account.starts_with(DEFAULT_OWNER_ACCOUNT));
+        assert!(account.contains(':'));
+        assert_eq!(account.len(), DEFAULT_OWNER_ACCOUNT.len() + 1 + 16);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn account_name_is_case_insensitive_on_windows() {
+        let lower = owner_account_for_path(Path::new(r"C:\tmp\Owner\keystore.json"));
+        let upper = owner_account_for_path(Path::new(r"C:\TMP\OWNER\KEYSTORE.JSON"));
+        assert_eq!(
+            lower, upper,
+            "NTFS paths differing only in case must hash the same"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn account_name_is_case_sensitive_on_unix() {
+        let lower = owner_account_for_path(Path::new("/tmp/owner/keystore.json"));
+        let upper = owner_account_for_path(Path::new("/tmp/OWNER/KEYSTORE.JSON"));
+        assert_ne!(
+            lower, upper,
+            "POSIX paths differing in case must not collide"
+        );
     }
 }
