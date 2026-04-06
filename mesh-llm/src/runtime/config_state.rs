@@ -173,9 +173,9 @@ impl ConfigState {
             self.config = new_config;
             self.config_hash = new_hash;
             self.last_write_hash = new_hash;
-            self.revision = read_revision(&sidecar);
+            self.revision = new_revision;
             return ApplyResult::PersistError(format!(
-                "failed to write revision sidecar: {e}; config persisted but revision tracking may be stale"
+                "failed to write revision sidecar: {e}; config persisted and in-memory revision advanced, but on-disk revision tracking may be stale"
             ));
         }
 

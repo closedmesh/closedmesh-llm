@@ -1628,6 +1628,13 @@ impl Node {
             tracing::info!("Detected VRAM: {:.1} GB", vram as f64 / 1e9);
         }
 
+        let config_state_init = {
+            let path = crate::plugin::config_path(None)
+                .unwrap_or_else(|_| std::path::PathBuf::from("config.toml"));
+            crate::runtime::config_state::ConfigState::load(&path)?
+        };
+        let config_revision_init = config_state_init.revision();
+
         let node = Node {
             endpoint,
             public_addr,
@@ -1670,19 +1677,9 @@ impl Node {
             is_soc,
             gpu_vram,
             gpu_bandwidth_gbps: Arc::new(tokio::sync::Mutex::new(None)),
-            config_state: {
-                let path = crate::plugin::config_path(None)
-                    .unwrap_or_else(|_| std::path::PathBuf::from("config.toml"));
-                let state = crate::runtime::config_state::ConfigState::load(&path)?;
-                Arc::new(tokio::sync::Mutex::new(state))
-            },
+            config_state: Arc::new(tokio::sync::Mutex::new(config_state_init)),
             config_revision_tx: {
-                let path = crate::plugin::config_path(None)
-                    .unwrap_or_else(|_| std::path::PathBuf::from("config.toml"));
-                let revision = crate::runtime::config_state::ConfigState::load(&path)
-                    .map(|s| s.revision())
-                    .unwrap_or(0);
-                let (tx, _rx) = tokio::sync::watch::channel(revision);
+                let (tx, _rx) = tokio::sync::watch::channel(config_revision_init);
                 Arc::new(tx)
             },
             cached_owner_id: {
@@ -4035,11 +4032,20 @@ impl Node {
         };
         let mesh_config = proto_config_to_mesh(config_snapshot);
 
-        // 6. Apply via CAS
-        let result = {
-            let mut state = self.config_state.lock().await;
-            state.apply(mesh_config, push.expected_revision)
-        };
+        // 6. Apply via CAS — use spawn_blocking so synchronous disk I/O in apply()
+        //    does not block the Tokio async runtime while the mutex is held.
+        let config_state = Arc::clone(&self.config_state);
+        let expected_revision = push.expected_revision;
+        let (result, current_revision, current_hash) =
+            tokio::task::spawn_blocking(move || {
+                let mut state = config_state.blocking_lock();
+                let result = state.apply(mesh_config, expected_revision);
+                let current_revision = state.revision();
+                let current_hash = *state.config_hash();
+                (result, current_revision, current_hash)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("config apply task panicked: {e}"))?;
 
         // 7. Build + send response
         use crate::runtime::config_state::ApplyResult;
@@ -4079,8 +4085,8 @@ impl Node {
                 crate::proto::node::ConfigPushResponse {
                     gen: NODE_PROTOCOL_GENERATION,
                     success: false,
-                    current_revision: 0,
-                    config_hash: vec![],
+                    current_revision,
+                    config_hash: current_hash.to_vec(),
                     error: Some(msg),
                     saved_to_disk: false,
                     applied_live: false,
@@ -4144,6 +4150,10 @@ impl Node {
                 match read_len_prefixed(&mut recv).await {
                     Ok(buf) => match ConfigUpdateNotification::decode(buf.as_slice()) {
                         Ok(notif) => {
+                            if let Err(e) = notif.validate_frame() {
+                                tracing::warn!("ConfigUpdateNotification validation error: {e}");
+                                break;
+                            }
                             if notif_tx.send(notif).is_err() {
                                 break;
                             }
@@ -8277,18 +8287,6 @@ mod tests {
         assert_eq!(
             gpu.assignment,
             crate::proto::node::GpuAssignment::Auto as i32
-        );
-    }
-
-    #[test]
-    fn config_sync_subscribe_wrong_owner_rejected() {
-        let local_id = "alice-owner-id";
-        let remote_id = "bob-owner-id";
-        assert_ne!(local_id, remote_id, "owner IDs must differ for this test");
-        let mismatch = local_id != remote_id;
-        assert!(
-            mismatch,
-            "subscription from wrong owner must be detected as a mismatch"
         );
     }
 

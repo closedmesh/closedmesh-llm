@@ -265,6 +265,9 @@ impl ValidateControlFrame for crate::proto::node::ConfigSnapshotResponse {
             if self.config.is_none() {
                 return Err(ControlFrameError::MissingConfig);
             }
+            if self.owner_id.is_empty() {
+                return Err(ControlFrameError::MissingOwnerId);
+            }
         }
         Ok(())
     }
@@ -279,6 +282,9 @@ impl ValidateControlFrame for crate::proto::node::ConfigUpdateNotification {
         validate_config_hash_length(self.config_hash.len())?;
         if self.config.is_none() {
             return Err(ControlFrameError::MissingConfig);
+        }
+        if self.owner_id.is_empty() {
+            return Err(ControlFrameError::MissingOwnerId);
         }
         Ok(())
     }
