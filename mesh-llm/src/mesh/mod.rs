@@ -2158,16 +2158,6 @@ impl Node {
         *self.display_name.lock().await = Some(name);
     }
 
-    /// Get the operator-facing display name for this node.
-    /// Falls back to the short endpoint ID if no name is set.
-    pub async fn display_name(&self) -> String {
-        if let Some(ref name) = *self.display_name.lock().await {
-            name.clone()
-        } else {
-            self.endpoint.id().fmt_short().to_string()
-        }
-    }
-
     pub async fn set_plugin_manager(&self, plugin_manager: crate::plugin::PluginManager) {
         let peers = {
             let state = self.state.lock().await;
@@ -4624,6 +4614,10 @@ mod tests {
             tunnel_http_tx,
             plugin_manager: Arc::new(Mutex::new(None)),
             display_name: Arc::new(Mutex::new(None)),
+            owner_attestation: Arc::new(Mutex::new(None)),
+            owner_summary: Arc::new(Mutex::new(OwnershipSummary::default())),
+            trust_store: Arc::new(Mutex::new(TrustStore::default())),
+            trust_policy: TrustPolicy::Off,
             enumerate_host: false,
             gpu_name: None,
             hostname: None,
@@ -5394,6 +5388,8 @@ mod tests {
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
+            owner_attestation: None,
+            owner_summary: OwnershipSummary::default(),
         }
     }
 
@@ -5882,6 +5878,7 @@ mod tests {
                 context_length: Some(32768),
                 ready: true,
             }],
+            owner_attestation: None,
         };
 
         let proto_pa = local_ann_to_proto_ann(&local_ann);
@@ -6098,6 +6095,7 @@ mod tests {
             available_model_sizes: new_sizes,
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
+            owner_attestation: None,
         };
 
         apply_transitive_ann(&mut existing, &addr, &ann);
@@ -6165,6 +6163,7 @@ mod tests {
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
+            owner_attestation: None,
         };
 
         apply_transitive_ann(&mut existing, &weak_addr, &ann);
@@ -6211,6 +6210,7 @@ mod tests {
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
+            owner_attestation: None,
         };
         apply_transitive_ann(&mut existing, &richer_addr, &ann2);
 
@@ -6816,7 +6816,12 @@ mod tests {
 
         // Build PeerInfo as add_peer would, verify passive inventory metadata stays empty.
         let mut peers: HashMap<EndpointId, PeerInfo> = HashMap::new();
-        let peer_info = PeerInfo::from_announcement(peer_id, addr.clone(), &local_ann);
+        let peer_info = PeerInfo::from_announcement(
+            peer_id,
+            addr.clone(),
+            &local_ann,
+            OwnershipSummary::default(),
+        );
         peers.insert(peer_id, peer_info);
 
         let stored = peers.get(&peer_id).unwrap();
@@ -7806,6 +7811,8 @@ mod tests {
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
+            owner_attestation: None,
+            owner_summary: OwnershipSummary::default(),
         }
     }
 

@@ -1627,7 +1627,7 @@ mod tests {
         manifests.insert(
             plugin_name.to_string(),
             mesh_llm_plugin::plugin_manifest![
-                mesh_llm_plugin::capability(plugin::BLACKBOARD_CAPABILITY),
+                mesh_llm_plugin::capability(blackboard::BLACKBOARD_CHANNEL),
                 mesh_llm_plugin::http_get("/feed", "feed"),
                 mesh_llm_plugin::http_get("/search", "search"),
                 mesh_llm_plugin::http_post("/post", "post"),

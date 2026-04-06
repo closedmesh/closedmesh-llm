@@ -377,6 +377,7 @@ pub(crate) fn decode_control_frame<T: ValidateControlFrame>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::OwnershipSummary;
     use crate::mesh::{resolve_peer_down, resolve_peer_leaving, ModelDemand, PeerInfo};
     use crate::proto::node::{GossipFrame, NodeRole, PeerAnnouncement, RouteTableRequest};
     use iroh::{EndpointAddr, EndpointId, SecretKey};
@@ -425,6 +426,8 @@ mod tests {
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
+            owner_attestation: None,
+            owner_summary: OwnershipSummary::default(),
         }
     }
 
@@ -473,6 +476,7 @@ mod tests {
             available_model_sizes: HashMap::from([("Qwen".into(), 1234_u64)]),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
+            owner_attestation: None,
         };
         let json = serde_json::to_vec(&vec![PeerAnnouncementV0::from(&ann)]).unwrap();
 
@@ -880,6 +884,7 @@ mod tests {
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
+            owner_attestation: None,
         };
         let json = serde_json::to_vec(&vec![PeerAnnouncementV0::from(&ann)])
             .expect("JSON serialization must succeed");
