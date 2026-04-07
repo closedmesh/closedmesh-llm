@@ -952,6 +952,8 @@ export function App() {
   const chatClientIdRef = useRef<string>(readOrCreateChatClientId());
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const currentAbortRef = useRef<AbortController | null>(null);
+  const queuedInputRef = useRef<string | null>(null);
+  const [queuedText, setQueuedText] = useState<string | null>(null);
   const activeConversationId = chatState.activeConversationId;
   const conversations = chatState.conversations;
   const activeConversation = useMemo(
@@ -1368,6 +1370,16 @@ export function App() {
 
   useEffect(() => () => currentAbortRef.current?.abort(), []);
 
+  // Drain queued message once streaming finishes and state is fresh.
+  useEffect(() => {
+    if (isSending) return;
+    const queued = queuedInputRef.current;
+    if (!queued) return;
+    queuedInputRef.current = null;
+    setQueuedText(null);
+    void sendMessage(queued);
+  }, [isSending]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const canChat =
     !!status &&
     (status.llama_ready || (status.is_client && warmModels.length > 0));
@@ -1725,8 +1737,14 @@ export function App() {
 
   async function sendMessage(text: string) {
     const trimmed = text.trim();
-    if ((!trimmed && pendingAttachments.length === 0) || !status || isSending)
+    if ((!trimmed && pendingAttachments.length === 0) || !status)
       return;
+    if (isSending) {
+      queuedInputRef.current = trimmed;
+      setQueuedText(trimmed);
+      setInput("");
+      return;
+    }
     if (attachmentSendIssue) {
       setComposerError(attachmentSendIssue);
       return;
@@ -1892,6 +1910,8 @@ export function App() {
   }
 
   function createNewConversation() {
+    queuedInputRef.current = null;
+    setQueuedText(null);
     const conversation = createConversation();
     updateChatState((prev) => ({
       conversations: [conversation, ...prev.conversations],
@@ -2104,6 +2124,7 @@ export function App() {
                   input={input}
                   setInput={setInput}
                   isSending={isSending}
+                  queuedText={queuedText}
                   canChat={canChat}
                   canRegenerate={canRegenerate}
                   onStop={stopStreaming}
@@ -2731,6 +2752,7 @@ export function ChatPage(props: {
   input: string;
   setInput: (v: string) => void;
   isSending: boolean;
+  queuedText: string | null;
   canChat: boolean;
   canRegenerate: boolean;
   onStop: () => void;
@@ -2769,6 +2791,7 @@ export function ChatPage(props: {
     input,
     setInput,
     isSending,
+    queuedText,
     canChat,
     canRegenerate,
     onStop,
@@ -3390,6 +3413,20 @@ export function ChatPage(props: {
                       response...
                     </div>
                   ) : null}
+
+                  {queuedText ? (
+                    <div className="flex justify-end">
+                      <div className="max-w-[92%] md:max-w-[82%] opacity-50">
+                        <div className="mb-1 flex items-center gap-2 px-1 text-xs text-muted-foreground">
+                          <User className="h-3.5 w-3.5" />
+                          <span>Queued</span>
+                        </div>
+                        <div className="rounded-lg border border-dashed bg-muted px-4 py-3 text-sm whitespace-pre-wrap">
+                          {queuedText}
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
                 </>
               )}
             </div>
@@ -3507,7 +3544,7 @@ export function ChatPage(props: {
                     ? "Ask me anything..."
                     : "Waiting for a warm model..."
                 }
-                disabled={!props.canChat || isSending}
+                disabled={!props.canChat}
                 className="min-h-[56px] md:min-h-[80px] resize-none text-base md:text-sm"
               />
               <div className="flex items-center justify-between gap-2">
@@ -3611,16 +3648,15 @@ export function ChatPage(props: {
                     data-testid="chat-send"
                     disabled={
                       !props.canChat ||
-                      (!input.trim() && pendingAttachments.length === 0) ||
-                      isSending
+                      (!input.trim() && pendingAttachments.length === 0)
                     }
                   >
                     {isSending ? (
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      <Send className="mr-2 h-4 w-4 text-muted-foreground" />
                     ) : (
                       <Send className="mr-2 h-4 w-4" />
                     )}
-                    Send
+                    {isSending ? "Queue" : "Send"}
                   </Button>
                 </div>
               </div>

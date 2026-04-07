@@ -62,6 +62,7 @@ function buildProps(
     input: "",
     setInput: vi.fn(),
     isSending: false,
+    queuedText: null,
     canChat: true,
     canRegenerate: false,
     onStop: vi.fn(),
