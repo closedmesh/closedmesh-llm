@@ -1612,20 +1612,20 @@ impl Node {
             let max_bytes = (max_gb * 1e9) as u64;
             if max_bytes < vram {
                 tracing::info!(
-                    "Detected VRAM: {:.1} GB, capped to {:.1} GB (--max-vram)",
+                    "Detected capacity: {:.1} GB, capped to {:.1} GB (--max-vram)",
                     vram as f64 / 1e9,
                     max_gb
                 );
                 vram = max_bytes;
             } else {
                 tracing::info!(
-                    "Detected VRAM: {:.1} GB (--max-vram {:.1} has no effect)",
+                    "Detected capacity: {:.1} GB (--max-vram {:.1} has no effect)",
                     vram as f64 / 1e9,
                     max_gb
                 );
             }
         } else {
-            tracing::info!("Detected VRAM: {:.1} GB", vram as f64 / 1e9);
+            tracing::info!("Detected capacity: {:.1} GB", vram as f64 / 1e9);
         }
 
         let config_state_init = {
