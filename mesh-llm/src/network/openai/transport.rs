@@ -1266,7 +1266,7 @@ async fn route_local_attempt(
             let _ = upstream.set_nodelay(true);
             if let Err(err) = upstream.write_all(prefetched).await {
                 tracing::warn!(
-                    "API proxy: failed to forward buffered request to local llama-server on {port}: {err}"
+                    "API proxy: failed to forward buffered request to local backend proxy on {port}: {err}"
                 );
                 return RouteAttemptResult::RetryableUnavailable;
             }
@@ -1291,14 +1291,14 @@ async fn route_local_attempt(
                 }
                 Err(err) => {
                     tracing::warn!(
-                        "API proxy: failed to read local response from llama-server on {port}: {err}"
+                        "API proxy: failed to read local response from backend proxy on {port}: {err}"
                     );
                     RouteAttemptResult::RetryableUnavailable
                 }
             }
         }
         Err(err) => {
-            tracing::warn!("API proxy: can't reach llama-server on {port}: {err}");
+            tracing::warn!("API proxy: can't reach local backend proxy on {port}: {err}");
             RouteAttemptResult::RetryableUnavailable
         }
     }
@@ -2071,7 +2071,7 @@ pub async fn route_moe_request(
     true
 }
 
-/// Route a request to a known inference target (local llama-server or remote host).
+/// Route a request to a known inference target (local backend proxy or remote host).
 ///
 /// Used by the API proxy after election has determined the target.
 pub async fn route_to_target(
