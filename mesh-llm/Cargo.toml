@@ -49,6 +49,7 @@ unicode-width = "0.2"
 [dev-dependencies]
 axum = "0.8"
 serial_test = "3"
+tempfile = "3"
 
 [build-dependencies]
 prost-build = "0.14"

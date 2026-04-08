@@ -1156,7 +1156,9 @@ fn default_micro_prompts() -> &'static [&'static str] {
 ///
 /// Publishes the current ModelTargets via the watch channel so the
 /// API proxy knows where to forward requests.
+#[allow(clippy::too_many_arguments)]
 pub async fn election_loop(
+    runtime: Arc<crate::runtime::instance::InstanceRuntime>,
     node: mesh::Node,
     tunnel_mgr: tunnel::Manager,
     ingress_http_port: u16,
@@ -1243,6 +1245,7 @@ pub async fn election_loop(
                 }
             };
             moe_election_loop(
+                runtime.clone(),
                 node,
                 tunnel_mgr,
                 ingress_http_port,
@@ -1462,6 +1465,7 @@ pub async fn election_loop(
             // In solo mode, pass empty model_peers so start_llama won't use any workers
             let peers_for_launch = if need_split { &model_peers[..] } else { &[] };
             let (llama_port, process) = match start_llama(
+                &runtime,
                 &node,
                 &tunnel_mgr,
                 rpc_port,
@@ -1606,7 +1610,9 @@ pub async fn election_loop(
 /// - Each node runs moe-split locally to produce its shard (cached)
 /// - Each node starts its own llama-server with its shard GGUF
 /// - The proxy routes sessions to nodes via hash-based affinity
+#[allow(clippy::too_many_arguments)]
 async fn moe_election_loop(
+    runtime: Arc<crate::runtime::instance::InstanceRuntime>,
     node: mesh::Node,
     tunnel_mgr: tunnel::Manager,
     ingress_http_port: u16,
@@ -1855,6 +1861,7 @@ async fn moe_election_loop(
             };
 
             match launch::start_llama_server(
+                &runtime,
                 &bin_dir,
                 binary_flavor,
                 launch::ModelLaunchSpec {
@@ -1938,6 +1945,7 @@ async fn moe_election_loop(
 
                 let mb = total_model_bytes(&model);
                 match launch::start_llama_server(
+                    &runtime,
                     &bin_dir,
                     binary_flavor,
                     launch::ModelLaunchSpec {
@@ -2079,6 +2087,7 @@ async fn moe_election_loop(
 
             let shard_bytes = std::fs::metadata(&shard_path).map(|m| m.len()).unwrap_or(0);
             match launch::start_llama_server(
+                &runtime,
                 &bin_dir,
                 binary_flavor,
                 launch::ModelLaunchSpec {
@@ -2274,7 +2283,9 @@ async fn update_targets(
 
 /// Start llama-server with --rpc pointing at model-group nodes (self + workers).
 /// Returns the ephemeral port and a death notification receiver, or None on failure.
+#[allow(clippy::too_many_arguments)]
 async fn start_llama(
+    runtime: &crate::runtime::instance::InstanceRuntime,
     node: &mesh::Node,
     tunnel_mgr: &tunnel::Manager,
     _my_rpc_port: u16,
@@ -2453,6 +2464,7 @@ async fn start_llama(
     };
 
     match launch::start_llama_server(
+        runtime,
         bin_dir,
         binary_flavor,
         launch::ModelLaunchSpec {

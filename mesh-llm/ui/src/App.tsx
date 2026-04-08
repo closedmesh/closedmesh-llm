@@ -22,6 +22,7 @@ import {
   type ReactFlowInstance,
 } from "@xyflow/react";
 import {
+  AlertTriangle,
   ArrowLeft,
   Bot,
   Braces,
@@ -349,8 +350,18 @@ type Peer = {
   hosted_models_known?: boolean;
   rtt_ms?: number | null;
   hostname?: string;
+  version?: string;
   is_soc?: boolean;
   gpus?: { name: string; vram_bytes: number; bandwidth_gbps?: number }[];
+};
+
+type LocalInstance = {
+  pid: number;
+  api_port: number | null;
+  version: string | null;
+  started_at_unix: number;
+  runtime_dir: string;
+  is_self: boolean;
 };
 
 type StatusPayload = {
@@ -374,6 +385,7 @@ type StatusPayload = {
   model_size_gb: number;
   mesh_name?: string | null;
   peers: Peer[];
+  local_instances?: LocalInstance[];
   inflight_requests: number;
   launch_pi?: string | null;
   launch_goose?: string | null;
@@ -4280,6 +4292,14 @@ function DashboardPage({
       );
   }, [meshModels, modelFilter]);
   const totalMeshVramGb = useMemo(() => meshGpuVram(status), [status]);
+  const distinctMeshVersions = useMemo(() => {
+    const versions = new Set<string>();
+    if (status?.version) versions.add(status.version);
+    status?.peers?.forEach((p) => {
+      if (p.version) versions.add(p.version);
+    });
+    return versions;
+  }, [status]);
   const sortedPeers = useMemo(() => {
     return [...(status?.peers ?? [])].sort((a, b) => {
       const bOverviewVramGb = overviewVramGb(b.role === "Client", b.vram_gb);
@@ -4404,7 +4424,7 @@ function DashboardPage({
       availableModels: topologyNode.self
         ? uniqueModels(status.available_models)
         : uniqueModels(peer?.available_models),
-      version: topologyNode.self ? status.version : undefined,
+      version: topologyNode.self ? status.version : peer?.version,
       latestVersion: topologyNode.self ? status.latest_version : undefined,
       llamaReady: topologyNode.self ? status.llama_ready : undefined,
       apiPort: topologyNode.self ? status.api_port : undefined,
@@ -4539,6 +4559,36 @@ function DashboardPage({
           </a>
         </AlertDescription>
       </Alert>
+      {distinctMeshVersions.size >= 2 && (
+        <Alert
+          data-testid="mixed-version-banner"
+          className="border-amber-500/30 bg-amber-500/5"
+        >
+          <AlertTriangle className="h-4 w-4" />
+          <AlertTitle className="text-sm font-medium">
+            Mesh has mixed versions
+          </AlertTitle>
+          <AlertDescription className="text-xs text-muted-foreground">
+            Detected {distinctMeshVersions.size} distinct mesh-llm versions:{" "}
+            {[...distinctMeshVersions].join(", ")}. Functionality may vary between nodes.
+          </AlertDescription>
+        </Alert>
+      )}
+      {(status?.local_instances?.length ?? 0) >= 2 && (
+        <Alert
+          data-testid="multi-instance-banner"
+          className="border-blue-500/30 bg-blue-500/5"
+        >
+          <Info className="h-4 w-4" />
+          <AlertTitle className="text-sm font-medium">
+            Multiple mesh-llm instances on this host
+          </AlertTitle>
+          <AlertDescription className="text-xs text-muted-foreground">
+            Detected {status!.local_instances!.length} local mesh-llm processes sharing this machine.
+            Each runs in an isolated scope.
+          </AlertDescription>
+        </Alert>
+      )}
       {modelsLoading && meshModels.length === 0 ? (
         <Alert className="border-border/60 bg-card/80">
           <Loader2 className="h-4 w-4 animate-spin" />
@@ -4797,6 +4847,7 @@ function DashboardPage({
                     <TableRow>
                       <TableHead>ID</TableHead>
                       <TableHead>Role</TableHead>
+                      <TableHead>Version</TableHead>
                       <TableHead>Status</TableHead>
                       <TableHead>Model</TableHead>
                       <TableHead className="text-right">Latency</TableHead>
@@ -4840,6 +4891,13 @@ function DashboardPage({
                           </button>
                         </TableCell>
                         <TableCell>{peer.role}</TableCell>
+                        <TableCell className="font-mono text-xs">
+                          {peer.version ?? (
+                            <span className="text-muted-foreground">
+                              unknown
+                            </span>
+                          )}
+                        </TableCell>
                         <TableCell>{peer.statusLabel}</TableCell>
                         <TableCell className="max-w-[180px] truncate">
                           {peer.modelLabel}
@@ -6452,6 +6510,11 @@ function NodeSidebar({
                 icon={<Server className="h-3.5 w-3.5" />}
               />
             ) : null}
+            <ModelMetaItem
+              label="Version"
+              value={node.version ? `v${node.version}` : "unknown"}
+              icon={<Info className="h-3.5 w-3.5" />}
+            />
             {node.gpus.length > 0 ? (
               <div className="grid gap-3">
                 {node.gpus.map((gpu, index) => (

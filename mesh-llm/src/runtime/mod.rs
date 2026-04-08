@@ -1,5 +1,6 @@
 pub(crate) mod config_state;
 mod discovery;
+pub mod instance;
 mod local;
 mod proxy;
 
@@ -139,6 +140,31 @@ fn owner_runtime_config(cli: &Cli) -> Result<mesh::OwnerRuntimeConfig> {
     })
 }
 
+/// Wait for either SIGINT (ctrl-c) or SIGTERM. Without this, an unhandled
+/// SIGTERM aborts the process before destructors run, so PidfileGuard never
+/// removes its file and child llama-server / rpc-server are left orphaned.
+async fn wait_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 pub(crate) async fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -208,12 +234,67 @@ pub(crate) async fn run() -> Result<()> {
     let has_config_models = !config.models.is_empty();
     let has_startup_models = cli_has_explicit_models || has_config_models;
 
-    // Clean up orphan processes from previous runs (skip for client — never runs llama-server).
+    // Acquire the per-instance runtime directory and flock (skip for --client — no local servers).
+    // Wrap in Arc so it can be cheaply shared with election/spawn tasks that
+    // need to write pidfiles for child processes (rpc-server, llama-server).
+    let runtime: Option<std::sync::Arc<crate::runtime::instance::InstanceRuntime>> = if !cli.client
+    {
+        match crate::runtime::instance::InstanceRuntime::acquire(std::process::id()) {
+            Ok(rt) => Some(std::sync::Arc::new(rt)),
+            Err(e) => {
+                tracing::warn!("failed to acquire instance runtime: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Write owner.json into the runtime dir so sibling-instance discovery can find us.
+    if let Some(ref rt) = runtime {
+        let started_at =
+            crate::runtime::instance::validate::current_process_start_time_unix().unwrap_or(0);
+        let owner_meta = serde_json::json!({
+            "pid": std::process::id(),
+            "api_port": cli.console,
+            "version": crate::VERSION,
+            "started_at_unix": started_at,
+            "mesh_llm_binary": std::env::current_exe()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
+        });
+        let owner_path = rt.dir().join("owner.json");
+        if let Ok(json) = serde_json::to_string_pretty(&owner_meta) {
+            let _ = crate::runtime::instance::write_text_file_atomic(&owner_path, &json);
+        }
+    }
+
+    // Reap orphans from dead sibling instances (skip for client — never runs llama-server).
     // This intentionally happens after subcommand dispatch so control commands
     // targeting a live instance don't kill it before sending the request.
+    // Uses scoped reap that only touches runtime dirs whose owner has died (flock-released).
     if !cli.client {
-        launch::kill_llama_server().await;
-        launch::kill_orphan_rpc_servers().await;
+        if let Some(ref rt) = runtime {
+            match crate::runtime::instance::runtime_root() {
+                Ok(root) => {
+                    let my_dir = rt.dir().to_path_buf();
+                    match crate::runtime::instance::reap::reap_cross_runtime_orphans(&root, &my_dir)
+                        .await
+                    {
+                        Ok(summary) => {
+                            if summary.children_killed > 0 || summary.dirs_gc_d > 0 {
+                                eprintln!(
+                                    "🧹 Reaped {} orphan children from {} dead instance(s)",
+                                    summary.children_killed, summary.dirs_gc_d
+                                );
+                            }
+                        }
+                        Err(e) => tracing::warn!("cross-runtime reap failed: {e}"),
+                    }
+                }
+                Err(e) => tracing::warn!("runtime_root resolution failed during reap: {e}"),
+            }
+        }
     }
 
     // Auto-enable publishing when mesh is named
@@ -432,7 +513,15 @@ pub(crate) async fn run() -> Result<()> {
         None => detect_bin_dir()?,
     };
 
-    run_auto(cli, config, startup_models, requested_model_names, bin_dir).await
+    run_auto(
+        cli,
+        config,
+        startup_models,
+        requested_model_names,
+        bin_dir,
+        runtime,
+    )
+    .await
 }
 
 /// Resolve a model path: local file, catalog name, or HuggingFace URL.
@@ -978,6 +1067,7 @@ async fn run_auto(
     startup_models: Vec<StartupModelPlan>,
     requested_model_names: Vec<String>,
     bin_dir: PathBuf,
+    runtime: Option<std::sync::Arc<crate::runtime::instance::InstanceRuntime>>,
 ) -> Result<()> {
     let resolved_plugins = resolve_plugins_from_config(&config, &cli)?;
     let api_port = cli.port;
@@ -1304,21 +1394,36 @@ async fn run_auto(
         }
     }
 
-    // Clean up stale processes from previous runs
-    launch::kill_orphan_rpc_servers().await;
+    // Drain stale pidfiles from our own runtime dir before spawning a new rpc-server
+    if let Some(ref rt) = runtime {
+        let _ = crate::runtime::instance::reap::reap_own_stale_pidfiles(rt.dir()).await;
+    }
 
-    // Start rpc-server
-    let rpc_port = launch::start_rpc_server(
+    // Serve mode (non-client) always has the InstanceRuntime acquired above.
+    // The fallback was only relevant during the T1-T11 staging when acquisition
+    // wasn't yet wired into run() — keep an explicit error here so any future
+    // refactor that drops the acquire surfaces immediately instead of panicking
+    // mid-spawn from a child task.
+    let runtime_arc = runtime
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("serve mode requires an instance runtime"))?
+        .clone();
+    let rpc_handle = launch::start_rpc_server(
+        &runtime_arc,
         &bin_dir,
         cli.llama_flavor,
         cli.device.as_deref(),
         Some(&model),
     )
     .await?;
-    tracing::info!("rpc-server on 127.0.0.1:{rpc_port} serving {model_name}");
+    tracing::info!(
+        "rpc-server on 127.0.0.1:{} (pid {}) serving {model_name}",
+        rpc_handle.port,
+        rpc_handle.pid
+    );
 
     let tunnel_mgr =
-        tunnel::Manager::start(node.clone(), rpc_port, channels.rpc, channels.http).await?;
+        tunnel::Manager::start(node.clone(), rpc_handle.port, channels.rpc, channels.http).await?;
 
     // Election publishes per-model targets
     let (target_tx, target_rx) = tokio::sync::watch::channel(election::ModelTargets::default());
@@ -1412,6 +1517,24 @@ async fn run_auto(
         None
     };
 
+    if !is_client {
+        if let Some(ref cs) = console_state {
+            if let Ok(root) = crate::runtime::instance::runtime_root() {
+                let li_handle = cs.local_instances_handle().await;
+                if let Ok(initial) =
+                    crate::runtime::instance::scan_local_instances(&root, std::process::id()).await
+                {
+                    *li_handle.lock().await = initial;
+                }
+                crate::runtime::instance::spawn_local_instance_scanner(
+                    root,
+                    std::process::id(),
+                    li_handle,
+                );
+            }
+        }
+    }
+
     // Election loop
     tracing::info!("Entering auto-election for model: {model_name}");
     let node2 = node.clone();
@@ -1440,9 +1563,11 @@ async fn run_auto(
         .as_ref()
         .and_then(|model| model.ctx_size);
     let (primary_stop_tx, primary_stop_rx) = tokio::sync::watch::channel(false);
+    let primary_runtime = runtime_arc.clone();
     let primary_task = tokio::spawn(async move {
         election::election_loop(
-            node2, tunnel_mgr2, api_port, rpc_port, bin_dir2, model2, model_name_for_election,
+            primary_runtime,
+            node2, tunnel_mgr2, api_port, rpc_handle.port, bin_dir2, model2, model_name_for_election,
             primary_mmproj,
             draft2, draft_max, force_split, llama_flavor, primary_ctx_size, moe_runtime_options, primary_target_tx,
             primary_stop_rx,
@@ -1578,8 +1703,10 @@ async fn run_auto(
             let managed_model_name = extra_name.clone();
             eprintln!("  + {extra_name}");
             let (extra_stop_tx, extra_stop_rx) = tokio::sync::watch::channel(false);
+            let extra_runtime = runtime_arc.clone();
             let extra_task = tokio::spawn(async move {
                 election::election_loop(
+                    extra_runtime,
                     extra_node, extra_tunnel, api_port_extra, 0, extra_bin, extra_path, extra_model_name.clone(),
                     extra_mmproj,
                     None, 8, false, extra_llama_flavor, extra_ctx_size, extra_moe_runtime_options, extra_target_tx,
@@ -1679,11 +1806,11 @@ async fn run_auto(
         None
     };
 
-    // Wait for ctrl-c or runtime model control commands.
+    // Wait for SIGINT/SIGTERM or runtime model control commands.
     let primary_model_name = model_name.clone();
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
+            _ = wait_shutdown_signal() => {
                 eprintln!("\nShutting down...");
                 break;
             }
@@ -1705,6 +1832,7 @@ async fn run_auto(
                             add_serving_assignment(&node, &primary_model_name, &runtime_model_name)
                                 .await;
                             let (loaded_name, handle, death_rx) = start_runtime_local_model(
+                                &runtime_arc,
                                 &bin_dir,
                                 cli.llama_flavor,
                                 &node,
@@ -1841,15 +1969,40 @@ async fn run_auto(
         handle.process.shutdown().await;
     }
 
+    // Signal each election loop to stop, then give it a short window to drop
+    // its `llama_process` (which sends SIGTERM via the handle's Drop). Abort
+    // only as a fallback so the Drop chain still runs.
     for (_, controller) in managed_models.drain() {
         let _ = controller.stop_tx.send(true);
-        controller.task.abort();
+        let mut task = controller.task;
+        match tokio::time::timeout(std::time::Duration::from_secs(3), &mut task).await {
+            Ok(join_result) => {
+                let _ = join_result;
+            }
+            Err(_) => {
+                tracing::warn!("election task did not stop within 3s during shutdown");
+                task.abort();
+                let _ = task.await;
+            }
+        }
     }
 
     node.set_serving_models(Vec::new()).await;
     node.set_hosted_models(Vec::new()).await;
-    launch::kill_llama_server().await;
-    launch::kill_orphan_rpc_servers().await;
+    rpc_handle.shutdown().await;
+    if let Some(rt) = runtime {
+        let outstanding_refs = std::sync::Arc::strong_count(&rt);
+        if outstanding_refs == 1 {
+            let dir = rt.dir().to_path_buf();
+            drop(rt);
+            let _ = std::fs::remove_dir_all(&dir);
+        } else {
+            tracing::warn!(
+                outstanding_refs,
+                "skipping runtime directory removal during shutdown because runtime references remain"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -2011,7 +2164,7 @@ async fn run_passive(
                 eprintln!("⬆️  Standby promoting to serve: {model_name}");
                 return Ok(Some(model_name));
             }
-            _ = tokio::signal::ctrl_c() => {
+            _ = wait_shutdown_signal() => {
                 eprintln!("\nShutting down...");
                 node.broadcast_leaving().await;
                 return Ok(None);

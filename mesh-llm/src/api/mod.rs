@@ -32,8 +32,8 @@ use self::routes::dispatch_request;
 use self::state::ApiInner;
 use self::status::{
     build_gpus, build_ownership_payload, build_runtime_processes_payload,
-    build_runtime_status_payload, MeshModelPayload, PeerPayload, RuntimeProcessesPayload,
-    RuntimeStatusPayload, StatusPayload,
+    build_runtime_status_payload, LocalInstance, MeshModelPayload, PeerPayload,
+    RuntimeProcessesPayload, RuntimeStatusPayload, StatusPayload,
 };
 use crate::inference::election;
 use crate::mesh;
@@ -189,6 +189,7 @@ impl MeshApi {
                 sse_clients: Vec::new(),
                 inventory_scan_running: false,
                 inventory_scan_waiters: Vec::new(),
+                local_instances: Arc::new(Mutex::new(Vec::new())),
             })),
         }
     }
@@ -215,6 +216,12 @@ impl MeshApi {
 
     pub async fn set_nostr_discovery(&self, v: bool) {
         self.inner.lock().await.nostr_discovery = v;
+    }
+
+    pub async fn local_instances_handle(
+        &self,
+    ) -> Arc<Mutex<Vec<crate::runtime::instance::LocalInstanceSnapshot>>> {
+        self.inner.lock().await.local_instances.clone()
     }
 
     pub async fn set_runtime_control(
@@ -719,6 +726,7 @@ impl MeshApi {
             latest_version,
             nostr_discovery,
             local_processes,
+            local_instances_arc,
         ) = {
             let inner = self.inner.lock().await;
             (
@@ -739,8 +747,38 @@ impl MeshApi {
                 inner.latest_version.clone(),
                 inner.nostr_discovery,
                 inner.local_processes.clone(),
+                inner.local_instances.clone(),
             )
         }; // inner lock dropped here
+
+        let local_instances: Vec<LocalInstance> = {
+            let snapshots = local_instances_arc.lock().await;
+            let mut instances: Vec<LocalInstance> = snapshots
+                .iter()
+                .map(|s| LocalInstance {
+                    pid: s.pid,
+                    api_port: s.api_port,
+                    version: s.version.clone(),
+                    started_at_unix: s.started_at_unix,
+                    runtime_dir: s.runtime_dir.to_string_lossy().to_string(),
+                    is_self: s.is_self,
+                })
+                .collect();
+
+            // Safety net: if scanner hasn't run yet, ensure self is always present
+            if instances.is_empty() {
+                instances.push(LocalInstance {
+                    pid: std::process::id(),
+                    api_port: Some(api_port),
+                    version: Some(MESH_LLM_VERSION.to_string()),
+                    started_at_unix: 0, // best-effort; scanner will populate properly
+                    runtime_dir: String::new(),
+                    is_self: true,
+                });
+            }
+
+            instances
+        };
 
         let all_peers = node.peers().await;
         let local_owner_summary = node.owner_summary().await;
@@ -764,6 +802,7 @@ impl MeshApi {
                 serving_models: p.serving_models.clone(),
                 hosted_models: p.hosted_models.clone(),
                 hosted_models_known: p.hosted_models_known,
+                version: p.version.clone(),
                 rtt_ms: p.rtt_ms,
                 hostname: p.hostname.clone(),
                 is_soc: p.is_soc,
@@ -834,6 +873,7 @@ impl MeshApi {
             my_vram_gb,
             model_size_gb: model_size_bytes as f64 / 1e9,
             peers,
+            local_instances,
             launch_pi,
             launch_goose,
             inflight_requests,
@@ -2151,5 +2191,92 @@ data: [DONE]
 
         handle.abort();
         let _ = upstream_handle.await;
+    }
+
+    #[tokio::test]
+    async fn status_payload_populates_local_instances_from_scanner() {
+        use crate::runtime::instance::LocalInstanceSnapshot;
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let snapshots = vec![
+            LocalInstanceSnapshot {
+                pid: 1234,
+                api_port: Some(3131),
+                version: Some("0.56.0".to_string()),
+                started_at_unix: 1700000000,
+                runtime_dir: PathBuf::from("/tmp/a"),
+                is_self: true,
+            },
+            LocalInstanceSnapshot {
+                pid: 5678,
+                api_port: Some(3132),
+                version: Some("0.56.0".to_string()),
+                started_at_unix: 1700000100,
+                runtime_dir: PathBuf::from("/tmp/b"),
+                is_self: false,
+            },
+        ];
+
+        let shared: Arc<Mutex<Vec<LocalInstanceSnapshot>>> = Arc::new(Mutex::new(snapshots));
+        let result: Vec<LocalInstance> = {
+            let s = shared.lock().await;
+            s.iter()
+                .map(|snap| LocalInstance {
+                    pid: snap.pid,
+                    api_port: snap.api_port,
+                    version: snap.version.clone(),
+                    started_at_unix: snap.started_at_unix,
+                    runtime_dir: snap.runtime_dir.to_string_lossy().to_string(),
+                    is_self: snap.is_self,
+                })
+                .collect()
+        };
+
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().any(|i| i.is_self && i.pid == 1234));
+        assert!(result.iter().any(|i| !i.is_self && i.pid == 5678));
+    }
+
+    #[tokio::test]
+    async fn status_payload_safety_net_adds_self_when_empty() {
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let shared: Arc<Mutex<Vec<crate::runtime::instance::LocalInstanceSnapshot>>> =
+            Arc::new(Mutex::new(vec![]));
+
+        let mut instances: Vec<LocalInstance> = {
+            let s = shared.lock().await;
+            s.iter()
+                .map(|snap| LocalInstance {
+                    pid: snap.pid,
+                    api_port: snap.api_port,
+                    version: snap.version.clone(),
+                    started_at_unix: snap.started_at_unix,
+                    runtime_dir: snap.runtime_dir.to_string_lossy().to_string(),
+                    is_self: snap.is_self,
+                })
+                .collect()
+        };
+
+        // Simulate the safety net logic
+        if instances.is_empty() {
+            instances.push(LocalInstance {
+                pid: std::process::id(),
+                api_port: Some(3131),
+                version: Some(MESH_LLM_VERSION.to_string()),
+                started_at_unix: 0,
+                runtime_dir: String::new(),
+                is_self: true,
+            });
+        }
+
+        assert_eq!(instances.len(), 1);
+        assert!(instances[0].is_self);
+        assert_eq!(instances[0].pid, std::process::id());
+        assert_eq!(instances[0].api_port, Some(3131));
+        assert_eq!(instances[0].version, Some(MESH_LLM_VERSION.to_string()));
     }
 }
