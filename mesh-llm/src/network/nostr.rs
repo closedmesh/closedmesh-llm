@@ -150,7 +150,7 @@ fn ensure_private_nostr_key_file(path: &std::path::Path) -> Result<()> {
 
     let metadata = std::fs::symlink_metadata(path)?;
     if !metadata.file_type().is_file() {
-        anyhow::bail!("Nostr key path {} is not a regular file", path.display());
+        anyhow::bail!("Nostr key path is not a regular file");
     }
     let mut perms = metadata.permissions();
     if perms.mode() & 0o077 != 0 {
