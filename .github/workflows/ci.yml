@@ -359,11 +359,9 @@ jobs:
             cmake \
             ninja-build \
             pkg-config \
-            hipblas \
             libssl-dev \
             libdbus-1-dev \
-            python3 \
-            rocblas-dev
+            python3
           rm -rf /var/lib/apt/lists/*
 
       - uses: actions/checkout@v5
@@ -412,14 +410,16 @@ jobs:
 
   linux_rocm:
     needs: changes
-    if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' }}
+    # GitHub-hosted pull_request runners do not currently provide a reliable ROCm
+    # environment here: the known-good complete image exhausts runner disk during
+    # job container pull, while the smaller image drops required HIP BLAS dev
+    # components. Keep ROCm coverage on main pushes and manual runs without
+    # blocking unrelated pull requests on hosted-runner infrastructure limits.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'push' }}
     name: Linux ROCm
     runs-on: ubuntu-latest
     container:
-      # `7.0-complete` now exceeds the free space available before job steps run
-      # on GitHub-hosted runners. The standard 7.0 dev image is much smaller
-      # and still provides a supported ROCm 7.0 environment for this build.
-      image: rocm/dev-ubuntu-24.04:7.0
+      image: rocm/dev-ubuntu-24.04:7.0-complete
 
     steps:
       - name: Install base packages

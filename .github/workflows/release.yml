@@ -89,11 +89,9 @@ jobs:
             cmake \
             ninja-build \
             pkg-config \
-            hipblas \
             libssl-dev \
             libdbus-1-dev \
-            python3 \
-            rocblas-dev
+            python3
           rm -rf /var/lib/apt/lists/*
 
       - uses: actions/checkout@v5
@@ -139,9 +137,7 @@ jobs:
     name: Build Linux AMD ROCm
     runs-on: ubuntu-latest
     container:
-      # Keep release and PR ROCm jobs on the same smaller image so the release
-      # lane does not hit the same runner disk exhaustion as CI.
-      image: rocm/dev-ubuntu-24.04:7.0
+      image: rocm/dev-ubuntu-24.04:7.0-complete
 
     steps:
       - name: Install base packages
