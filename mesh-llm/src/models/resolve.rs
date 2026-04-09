@@ -57,7 +57,8 @@ pub fn find_catalog_model_exact(query: &str) -> Option<&'static catalog::Catalog
 }
 
 pub async fn download_exact_ref(input: &str) -> Result<PathBuf> {
-    match parse_exact_model_ref(input)? {
+    let input = canonicalize_model_ref_input(input).await?;
+    match parse_exact_model_ref(&input)? {
         ExactModelRef::Catalog(model) => catalog::download_model(model).await,
         ExactModelRef::HuggingFace {
             repo,
@@ -102,6 +103,13 @@ pub async fn resolve_model_spec(input: &Path) -> Result<PathBuf> {
         if let Some(entry) = catalog::find_model(&raw) {
             return catalog::download_model(entry).await;
         }
+        if let Ok(canonical) = canonicalize_model_ref_input(&raw).await {
+            if canonical != raw {
+                return download_exact_ref(&canonical)
+                    .await
+                    .with_context(|| format!("Resolve model spec {raw}"));
+            }
+        }
         bail!(
             "Model not found: {raw}\nNot a local file, not in the Hugging Face cache, not in catalog.\n\
              Use a path, a catalog name (run `mesh-llm download` to list), or a Hugging Face exact ref/URL."
@@ -114,7 +122,8 @@ pub async fn resolve_model_spec(input: &Path) -> Result<PathBuf> {
 }
 
 pub async fn show_exact_model(input: &str) -> Result<ModelDetails> {
-    match parse_exact_model_ref(input)? {
+    let input = canonicalize_model_ref_input(input).await?;
+    match parse_exact_model_ref(&input)? {
         ExactModelRef::Catalog(model) => Ok(ModelDetails {
             display_name: model.name.to_string(),
             exact_ref: model.name.to_string(),
@@ -361,6 +370,22 @@ fn matching_catalog_primary_for_url(url: &str) -> Option<&'static catalog::Catal
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
+    use std::collections::HashMap;
+
+    #[derive(Debug, Deserialize)]
+    struct HfRepoFixture {
+        repo: String,
+        siblings: Vec<String>,
+        size_bytes: HashMap<String, u64>,
+    }
+
+    fn load_gemma_live_fixture() -> HfRepoFixture {
+        serde_json::from_str(include_str!(
+            "testdata/unsloth_gemma_4_31b_it_gguf.live.json"
+        ))
+        .expect("parse live Hugging Face fixture")
+    }
 
     #[test]
     fn primary_hf_ref_maps_to_full_catalog_download() {
@@ -522,16 +547,9 @@ mod tests {
 
     #[test]
     fn quant_selector_resolves_to_first_matching_split_gguf() {
-        let siblings = vec![
-            "UD-Q5_K_XL/gemma-4-31B-it-UD-Q5_K_XL-00001-of-00009.gguf".to_string(),
-            "UD-Q4_K_XL/gemma-4-31B-it-UD-Q4_K_XL-00002-of-00009.gguf".to_string(),
-            "UD-Q4_K_XL/gemma-4-31B-it-UD-Q4_K_XL-00001-of-00009.gguf".to_string(),
-        ];
-        let resolved = resolve_hf_file_from_siblings("UD-Q4_K_XL", &siblings).unwrap();
-        assert_eq!(
-            resolved,
-            "UD-Q4_K_XL/gemma-4-31B-it-UD-Q4_K_XL-00001-of-00009.gguf"
-        );
+        let fixture = load_gemma_live_fixture();
+        let resolved = resolve_hf_file_from_siblings("UD-Q4_K_XL", &fixture.siblings).unwrap();
+        assert_eq!(resolved, "gemma-4-31B-it-UD-Q4_K_XL.gguf");
     }
 
     #[test]
@@ -562,14 +580,25 @@ mod tests {
 
     #[test]
     fn gemma_repo_default_prefers_q4_over_bf16_at_local_fit_budget() {
-        // Mirrors gemma-4-31B-it-GGUF default-pick behavior:
+        // Uses captured live HF artifact sizes from the fixture:
         // at ~19.3GB available, prefer Q4_0 over BF16.
+        let fixture = load_gemma_live_fixture();
+        let q4 = fixture
+            .size_bytes
+            .get("gemma-4-31B-it-Q4_0.gguf")
+            .copied()
+            .expect("fixture Q4_0 size");
+        let bf16 = fixture
+            .size_bytes
+            .get("BF16/gemma-4-31B-it-BF16-00001-of-00002.gguf")
+            .copied()
+            .expect("fixture BF16 size");
         let available = 19_300_000_000u64;
         let ordering = compare_gguf_candidates_by_fit(
             "unsloth/gemma-4-31B-it-GGUF/gemma-4-31B-it-Q4_0.gguf",
-            Some(17_300_000_000),
+            Some(q4),
             "unsloth/gemma-4-31B-it-GGUF/BF16/gemma-4-31B-it-BF16-00001-of-00002.gguf",
-            Some(50_000_000_000),
+            Some(bf16),
             available,
         );
         assert_eq!(ordering, Ordering::Less);
@@ -637,29 +666,22 @@ mod tests {
 
     #[test]
     fn simulated_name_and_repo_quant_inputs_converge_to_same_ref() {
-        // Simulate the two user inputs:
-        // 1) gemma-4-31B-it-GGUF:UD-Q4_K_XL  (requires repo discovery)
-        // 2) unsloth/gemma-4-31B-it-GGUF:UD-Q4_K_XL (repo explicit)
-        //
-        // After discovery chooses the same repo, both should resolve via the
-        // same quant selector to the same final artifact ref.
-        let discovered_repo = "unsloth/gemma-4-31B-it-GGUF";
+        // Replay two user inputs against captured live siblings:
+        // 1) gemma-4-31B-it-GGUF:UD-Q4_K_XL (after repo discovery)
+        // 2) unsloth/gemma-4-31B-it-GGUF:UD-Q4_K_XL
+        let fixture = load_gemma_live_fixture();
+        let discovered_repo = fixture.repo.as_str();
         let selector = "UD-Q4_K_XL";
-        let siblings = vec![
-            "gemma-4-31B-it-Q4_0.gguf".to_string(),
-            "gemma-4-31B-it-UD-Q4_K_XL.gguf".to_string(),
-            "BF16/gemma-4-31B-it-BF16-00001-of-00002.gguf".to_string(),
-        ];
 
         let from_name = format!(
             "{}/{}",
             discovered_repo,
-            resolve_hf_file_from_siblings(selector, &siblings).unwrap()
+            resolve_hf_file_from_siblings(selector, &fixture.siblings).unwrap()
         );
         let from_repo = format!(
             "{}/{}",
             discovered_repo,
-            resolve_hf_file_from_siblings(selector, &siblings).unwrap()
+            resolve_hf_file_from_siblings(selector, &fixture.siblings).unwrap()
         );
 
         assert_eq!(
@@ -686,6 +708,38 @@ mod tests {
             }
             other => panic!("expected HuggingFace repo URL quant selector ref, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn split_bare_name_selector_supports_name_quant_shorthand() {
+        assert_eq!(
+            split_bare_name_selector("gemma-4-31B-it-GGUF:UD-Q4_K_XL"),
+            ("gemma-4-31B-it-GGUF", Some("UD-Q4_K_XL"))
+        );
+        assert_eq!(
+            split_bare_name_selector("unsloth/gemma-4-31B-it-GGUF:UD-Q4_K_XL"),
+            ("unsloth/gemma-4-31B-it-GGUF:UD-Q4_K_XL", None)
+        );
+    }
+
+    #[test]
+    fn select_strong_repo_hit_prefers_exact_leaf_name() {
+        let repos = vec![
+            "ggml-org/gemma-4-31B-it-GGUF".to_string(),
+            "unsloth/gemma-4-31B-it-GGUF".to_string(),
+            "bartowski/google_gemma-4-31B-it-GGUF".to_string(),
+        ];
+        let picked = select_strong_repo_hit("gemma-4-31B-it-GGUF", &repos);
+        assert_eq!(picked, Some("ggml-org/gemma-4-31B-it-GGUF".to_string()));
+    }
+
+    #[test]
+    fn bare_name_quant_can_be_formatted_with_discovered_repo() {
+        let (name, selector) = split_bare_name_selector("gemma-4-31B-it-GGUF:UD-Q4_K_XL");
+        assert_eq!(name, "gemma-4-31B-it-GGUF");
+        let selector = selector.expect("selector");
+        let canonical = format!("{}:{}", "unsloth/gemma-4-31B-it-GGUF", selector);
+        assert_eq!(canonical, "unsloth/gemma-4-31B-it-GGUF:UD-Q4_K_XL");
     }
 }
 
@@ -840,6 +894,93 @@ fn parse_exact_model_ref(input: &str) -> Result<ExactModelRef> {
     bail!(
         "Expected an exact model ref. Use a catalog id, a Hugging Face ref like org/repo, org/repo:QUANT, org/repo/file.gguf, org/repo/file-stem for split GGUFs, org/repo/model.safetensors, or org/repo/model-00001-of-00048.safetensors, or a direct URL."
     )
+}
+
+fn split_bare_name_selector(input: &str) -> (&str, Option<&str>) {
+    match input.split_once(':') {
+        Some((name, selector))
+            if !name.is_empty()
+                && !selector.is_empty()
+                && !name.contains('/')
+                && !name.contains('@')
+                && !name.contains("://") =>
+        {
+            (name, Some(selector))
+        }
+        _ => (input, None),
+    }
+}
+
+fn normalize_repo_leaf_name(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect()
+}
+
+fn select_strong_repo_hit(query: &str, repo_ids: &[String]) -> Option<String> {
+    let query_norm = normalize_repo_leaf_name(query);
+    if query_norm.is_empty() {
+        return None;
+    }
+    let mut exact = Vec::new();
+    for repo_id in repo_ids {
+        let leaf = repo_id.rsplit('/').next().unwrap_or(repo_id);
+        if normalize_repo_leaf_name(leaf) == query_norm {
+            exact.push(repo_id.clone());
+        }
+    }
+    if let Some(first) = exact.into_iter().next() {
+        return Some(first);
+    }
+    None
+}
+
+async fn discover_hf_repo_for_bare_name(name: &str) -> Result<Option<String>> {
+    let endpoint = std::env::var("HF_ENDPOINT").unwrap_or_else(|_| "https://huggingface.co".into());
+    let url = format!("{}/api/models", endpoint.trim_end_matches('/'));
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .user_agent(format!("mesh-llm/{}", crate::VERSION))
+        .build()
+        .context("Build HTTP client for Hugging Face search")?
+        .get(url)
+        .query(&[("search", name), ("filter", "gguf"), ("limit", "20")])
+        .send()
+        .await
+        .with_context(|| format!("Search Hugging Face for '{name}'"))?
+        .error_for_status()
+        .with_context(|| format!("Search Hugging Face for '{name}'"))?;
+
+    let rows: Vec<serde_json::Value> = response
+        .json()
+        .await
+        .with_context(|| format!("Decode Hugging Face search response for '{name}'"))?;
+    let repo_ids: Vec<String> = rows
+        .into_iter()
+        .filter_map(|row| row.get("id").and_then(|id| id.as_str()).map(str::to_string))
+        .collect();
+    Ok(select_strong_repo_hit(name, &repo_ids))
+}
+
+async fn canonicalize_model_ref_input(input: &str) -> Result<String> {
+    if parse_exact_model_ref(input).is_ok() || find_catalog_model_exact(input).is_some() {
+        return Ok(input.to_string());
+    }
+    if input.contains('/') || input.starts_with("http://") || input.starts_with("https://") {
+        return Ok(input.to_string());
+    }
+
+    let (name, selector) = split_bare_name_selector(input);
+    if let Some(repo) = discover_hf_repo_for_bare_name(name).await? {
+        if let Some(selector) = selector {
+            return Ok(format!("{repo}:{selector}"));
+        }
+        return Ok(repo);
+    }
+    Ok(input.to_string())
 }
 
 fn is_split_mlx_first_shard(file: &str) -> bool {
