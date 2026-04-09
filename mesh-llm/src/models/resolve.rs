@@ -1030,30 +1030,16 @@ fn select_strong_repo_hit(query: &str, repo_ids: &[String]) -> Option<String> {
 }
 
 async fn discover_hf_repo_for_bare_name(name: &str) -> Result<Option<String>> {
-    let endpoint = std::env::var("HF_ENDPOINT").unwrap_or_else(|_| "https://huggingface.co".into());
-    let url = format!("{}/api/models", endpoint.trim_end_matches('/'));
-    let response = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .connect_timeout(std::time::Duration::from_secs(15))
-        .user_agent(format!("mesh-llm/{}", crate::VERSION))
-        .build()
-        .context("Build HTTP client for Hugging Face search")?
-        .get(url)
-        .query(&[("search", name), ("filter", "gguf"), ("limit", "20")])
-        .send()
+    let api = super::build_hf_tokio_api(false)?;
+    let rows = api
+        .search(RepoType::Model)
+        .with_query(name)
+        .with_filter("gguf")
+        .with_limit(20)
+        .run()
         .await
-        .with_context(|| format!("Search Hugging Face for '{name}'"))?
-        .error_for_status()
         .with_context(|| format!("Search Hugging Face for '{name}'"))?;
-
-    let rows: Vec<serde_json::Value> = response
-        .json()
-        .await
-        .with_context(|| format!("Decode Hugging Face search response for '{name}'"))?;
-    let repo_ids: Vec<String> = rows
-        .into_iter()
-        .filter_map(|row| row.get("id").and_then(|id| id.as_str()).map(str::to_string))
-        .collect();
+    let repo_ids: Vec<String> = rows.into_iter().map(|repo| repo.id).collect();
     Ok(select_strong_repo_hit(name, &repo_ids))
 }
 
