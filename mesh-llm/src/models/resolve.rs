@@ -149,7 +149,7 @@ pub async fn show_exact_model(input: &str) -> Result<ModelDetails> {
             file,
         } => {
             let file = resolve_huggingface_file(&repo, revision.as_deref(), &file).await?;
-            let exact_ref = format_huggingface_exact_ref(&repo, revision.as_deref(), &file);
+            let exact_ref = format_huggingface_display_ref(&repo, revision.as_deref(), &file);
             let catalog = matching_catalog_model_for_huggingface(&repo, revision.as_deref(), &file);
             let download_url = huggingface_resolve_url(&repo, revision.as_deref(), &file);
             let size_label = match catalog {
@@ -217,6 +217,70 @@ pub async fn show_exact_model(input: &str) -> Result<ModelDetails> {
             })
         }
     }
+}
+
+fn quant_selector_from_gguf_file(file: &str) -> Option<String> {
+    if !file.ends_with(".gguf") {
+        return None;
+    }
+
+    if let Some((prefix, _)) = file.split_once('/') {
+        if is_quant_like_selector(prefix) {
+            return Some(prefix.to_string());
+        }
+    }
+
+    let basename = Path::new(file).file_name()?.to_str()?;
+    let mut stem = basename.strip_suffix(".gguf")?;
+    if let Some((base, shard)) = stem.rsplit_once("-00001-of-") {
+        if shard.len() == 5 && shard.chars().all(|ch| ch.is_ascii_digit()) {
+            stem = base;
+        }
+    }
+
+    if let Some(pos) = stem.rfind("-UD-") {
+        return Some(stem[pos + 1..].to_string());
+    }
+    if let Some(pos) = stem.rfind("-IQ") {
+        return Some(stem[pos + 1..].to_string());
+    }
+    if let Some(pos) = stem.rfind("-Q") {
+        return Some(stem[pos + 1..].to_string());
+    }
+    if let Some(pos) = stem.rfind("-BF16") {
+        return Some(stem[pos + 1..].to_string());
+    }
+    if let Some(pos) = stem.rfind("-F16") {
+        return Some(stem[pos + 1..].to_string());
+    }
+    if let Some(pos) = stem.rfind("-F32") {
+        return Some(stem[pos + 1..].to_string());
+    }
+    None
+}
+
+fn is_quant_like_selector(value: &str) -> bool {
+    let upper = value.to_ascii_uppercase();
+    upper.starts_with("UD-")
+        || upper.starts_with("Q")
+        || upper.starts_with("IQ")
+        || upper == "BF16"
+        || upper == "F16"
+        || upper == "F32"
+}
+
+fn format_repo_selector_ref(repo: &str, revision: Option<&str>, selector: &str) -> String {
+    match revision {
+        Some(revision) => format!("{repo}:{selector}@{revision}"),
+        None => format!("{repo}:{selector}"),
+    }
+}
+
+fn format_huggingface_display_ref(repo: &str, revision: Option<&str>, file: &str) -> String {
+    if let Some(selector) = quant_selector_from_gguf_file(file) {
+        return format_repo_selector_ref(repo, revision, &selector);
+    }
+    format_huggingface_exact_ref(repo, revision, file)
 }
 
 fn artifact_kind_for_file(file: &str) -> &'static str {
@@ -740,6 +804,34 @@ mod tests {
         let selector = selector.expect("selector");
         let canonical = format!("{}:{}", "unsloth/gemma-4-31B-it-GGUF", selector);
         assert_eq!(canonical, "unsloth/gemma-4-31B-it-GGUF:UD-Q4_K_XL");
+    }
+
+    #[test]
+    fn quant_selector_from_gguf_file_extracts_expected_forms() {
+        assert_eq!(
+            quant_selector_from_gguf_file("gemma-4-31B-it-UD-Q4_K_XL.gguf"),
+            Some("UD-Q4_K_XL".to_string())
+        );
+        assert_eq!(
+            quant_selector_from_gguf_file("BF16/gemma-4-31B-it-BF16-00001-of-00002.gguf"),
+            Some("BF16".to_string())
+        );
+        assert_eq!(
+            quant_selector_from_gguf_file("gemma-4-31B-it-Q4_0.gguf"),
+            Some("Q4_0".to_string())
+        );
+    }
+
+    #[test]
+    fn format_huggingface_display_ref_prefers_selector_form_for_gguf() {
+        assert_eq!(
+            format_huggingface_display_ref(
+                "unsloth/gemma-4-31B-it-GGUF",
+                None,
+                "gemma-4-31B-it-UD-Q4_K_XL.gguf"
+            ),
+            "unsloth/gemma-4-31B-it-GGUF:UD-Q4_K_XL"
+        );
     }
 }
 
