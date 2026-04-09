@@ -479,6 +479,30 @@ mod tests {
             ))
         );
     }
+
+    #[test]
+    fn parse_huggingface_repo_url_parses_repo_only() {
+        let parsed =
+            parse_huggingface_repo_url("https://huggingface.co/unsloth/gemma-4-31B-it-GGUF");
+        assert_eq!(
+            parsed,
+            Some(("unsloth/gemma-4-31B-it-GGUF".to_string(), None))
+        );
+    }
+
+    #[test]
+    fn parse_huggingface_repo_url_parses_tree_revision() {
+        let parsed = parse_huggingface_repo_url(
+            "https://huggingface.co/unsloth/gemma-4-31B-it-GGUF/tree/main",
+        );
+        assert_eq!(
+            parsed,
+            Some((
+                "unsloth/gemma-4-31B-it-GGUF".to_string(),
+                Some("main".to_string())
+            ))
+        );
+    }
 }
 
 fn matching_catalog_model_by_basename(repo_file: &str) -> Option<&'static catalog::CatalogModel> {
@@ -553,6 +577,32 @@ fn parse_huggingface_repo_ref(input: &str) -> Option<(String, Option<String>)> {
     Some((format!("{}/{}", parts[0], repo_tail), revision))
 }
 
+fn parse_huggingface_repo_url(input: &str) -> Option<(String, Option<String>)> {
+    let tail = input
+        .strip_prefix("https://huggingface.co/")
+        .or_else(|| input.strip_prefix("http://huggingface.co/"))?;
+    let clean = tail
+        .split_once('?')
+        .map(|(left, _)| left)
+        .unwrap_or(tail)
+        .split_once('#')
+        .map(|(left, _)| left)
+        .unwrap_or(tail)
+        .trim_matches('/');
+    let parts: Vec<&str> = clean.split('/').collect();
+    if parts.len() < 2 || parts[0].is_empty() || parts[1].is_empty() {
+        return None;
+    }
+    let repo = format!("{}/{}", parts[0], parts[1]);
+    if parts.len() >= 4 && parts[2] == "tree" && !parts[3].is_empty() {
+        return Some((repo, Some(parts[3].to_string())));
+    }
+    if parts.len() == 2 {
+        return Some((repo, None));
+    }
+    None
+}
+
 fn parse_exact_model_ref(input: &str) -> Result<ExactModelRef> {
     if let Some(model) = find_catalog_model_exact(input) {
         return Ok(ExactModelRef::Catalog(model));
@@ -565,6 +615,13 @@ fn parse_exact_model_ref(input: &str) -> Result<ExactModelRef> {
         });
     }
     if let Some((repo, revision)) = parse_huggingface_repo_ref(input) {
+        return Ok(ExactModelRef::HuggingFace {
+            repo,
+            revision,
+            file: String::new(),
+        });
+    }
+    if let Some((repo, revision)) = parse_huggingface_repo_url(input) {
         return Ok(ExactModelRef::HuggingFace {
             repo,
             revision,
