@@ -1833,6 +1833,23 @@ export function App() {
 
     // Prefer an explicitly compatible model when sending media with model=auto.
     let model = selectedModel || status.model_name;
+    const isAuto = !model || model === "auto";
+    if (isAuto) {
+      // If this conversation already used a vision model (because images
+      // were sent), stick with that model for continuity — don't let auto
+      // bounce to a text-only model that can't see the earlier images.
+      const existingMessages = activeConversation?.messages ?? [];
+      const priorVisionModel = existingMessages.find(
+        (m) =>
+          m.role === "assistant" &&
+          m.model &&
+          visionModels.has(m.model) &&
+          warmModels.includes(m.model),
+      )?.model;
+      if (priorVisionModel) {
+        model = priorVisionModel;
+      }
+    }
     if (pendingAttachments.length > 0 && (!model || model === "auto")) {
       const multimodalModel = warmModels.find(
         (m) =>
