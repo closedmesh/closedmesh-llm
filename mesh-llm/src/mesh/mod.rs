@@ -4225,14 +4225,15 @@ impl Node {
         .map_err(|e| anyhow::anyhow!("config apply task panicked: {e}"))?;
 
         // 7. Build + send response
-        use crate::runtime::config_state::ApplyResult;
+        use crate::proto::node::ConfigApplyMode as ProtoApplyMode;
+        use crate::runtime::config_state::{ApplyResult, ConfigApplyMode};
         let response = match result {
             ApplyResult::Applied {
                 revision,
                 hash,
-                saved_to_disk,
+                apply_mode,
             } => {
-                if saved_to_disk {
+                if apply_mode == ConfigApplyMode::Staged {
                     let _ = self.config_revision_tx.send(revision);
                 }
                 crate::proto::node::ConfigPushResponse {
@@ -4241,7 +4242,10 @@ impl Node {
                     current_revision: revision,
                     config_hash: hash.to_vec(),
                     error: None,
-                    apply_mode: if saved_to_disk { 1 } else { 3 },
+                    apply_mode: match apply_mode {
+                        ConfigApplyMode::Staged => ProtoApplyMode::Staged as i32,
+                        ConfigApplyMode::Noop => ProtoApplyMode::Noop as i32,
+                    },
                 }
             }
             ApplyResult::RevisionConflict { current_revision } => {
@@ -4253,7 +4257,7 @@ impl Node {
                     error: Some(
                         "revision conflict: expected_revision does not match current".to_string(),
                     ),
-                    apply_mode: 0,
+                    apply_mode: ProtoApplyMode::Unspecified as i32,
                 }
             }
             ApplyResult::PersistedWithRevisionTrackingError {
@@ -4268,7 +4272,7 @@ impl Node {
                     current_revision: revision,
                     config_hash: hash.to_vec(),
                     error: Some(error),
-                    apply_mode: 1,
+                    apply_mode: ProtoApplyMode::Staged as i32,
                 }
             }
             ApplyResult::ValidationError(msg) | ApplyResult::PersistError(msg) => {
@@ -4278,7 +4282,7 @@ impl Node {
                     current_revision,
                     config_hash: current_hash.to_vec(),
                     error: Some(msg),
-                    apply_mode: 0,
+                    apply_mode: ProtoApplyMode::Unspecified as i32,
                 }
             }
         };
@@ -5048,7 +5052,7 @@ async fn send_push_error(send: &mut iroh::endpoint::SendStream, msg: &str) -> an
         current_revision: 0,
         config_hash: vec![],
         error: Some(msg.to_string()),
-        apply_mode: 0,
+        apply_mode: crate::proto::node::ConfigApplyMode::Unspecified as i32,
     };
     write_len_prefixed(send, &response.encode_to_vec()).await?;
     Ok(())
@@ -8591,7 +8595,7 @@ mod tests {
 
     #[test]
     fn config_sync_push_roundtrip_encode_decode() {
-        use crate::proto::node::ConfigPushResponse;
+        use crate::proto::node::{ConfigApplyMode, ConfigPushResponse};
         use prost::Message as _;
 
         let response = ConfigPushResponse {
@@ -8600,7 +8604,7 @@ mod tests {
             current_revision: 42,
             config_hash: vec![0xCC; 32],
             error: None,
-            apply_mode: 1,
+            apply_mode: ConfigApplyMode::Staged as i32,
         };
 
         let encoded = response.encode_to_vec();
@@ -8612,7 +8616,7 @@ mod tests {
         assert_eq!(decoded.current_revision, 42);
         assert_eq!(decoded.config_hash, vec![0xCC; 32]);
         assert!(decoded.error.is_none());
-        assert_eq!(decoded.apply_mode, 1);
+        assert_eq!(decoded.apply_mode, ConfigApplyMode::Staged as i32);
     }
 
     #[test]
@@ -9122,7 +9126,8 @@ mod tests {
             "response config_hash must be 32 bytes"
         );
         assert_eq!(
-            response.apply_mode, 1,
+            response.apply_mode,
+            crate::proto::node::ConfigApplyMode::Staged as i32,
             "config push should report staged apply mode"
         );
 

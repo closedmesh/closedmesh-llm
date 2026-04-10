@@ -4,12 +4,22 @@ use std::path::{Path, PathBuf};
 use crate::plugin::{load_config, validate_config, MeshConfig};
 use crate::protocol::convert::{canonical_config_hash, mesh_config_to_proto};
 
+/// Mirrors the `ConfigApplyMode` proto enum; kept in the domain layer so
+/// `config_state` does not depend on the generated proto crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigApplyMode {
+    /// Config written to disk and revision counter advanced.
+    Staged,
+    /// No-op: the incoming config was identical to the current one.
+    Noop,
+}
+
 #[derive(Debug)]
 pub(crate) enum ApplyResult {
     Applied {
         revision: u64,
         hash: [u8; 32],
-        saved_to_disk: bool,
+        apply_mode: ConfigApplyMode,
     },
     RevisionConflict {
         current_revision: u64,
@@ -161,7 +171,7 @@ impl ConfigState {
             return ApplyResult::Applied {
                 revision: self.revision,
                 hash: self.config_hash,
-                saved_to_disk: false,
+                apply_mode: ConfigApplyMode::Noop,
             };
         }
 
@@ -197,7 +207,7 @@ impl ConfigState {
         ApplyResult::Applied {
             revision: self.revision,
             hash: self.config_hash,
-            saved_to_disk: true,
+            apply_mode: ConfigApplyMode::Staged,
         }
     }
 }
@@ -257,10 +267,10 @@ mod tests {
             ApplyResult::Applied {
                 revision,
                 hash: _,
-                saved_to_disk,
+                apply_mode,
             } => {
                 assert_eq!(revision, 1);
-                assert!(saved_to_disk);
+                assert_eq!(apply_mode, ConfigApplyMode::Staged);
             }
             other => panic!("expected Applied, got {other:?}"),
         }
@@ -418,10 +428,14 @@ mod tests {
         let rev_after_first = match r1 {
             ApplyResult::Applied {
                 revision,
-                saved_to_disk,
+                apply_mode,
                 ..
             } => {
-                assert!(saved_to_disk, "first apply must save to disk");
+                assert_eq!(
+                    apply_mode,
+                    ConfigApplyMode::Staged,
+                    "first apply must save to disk"
+                );
                 revision
             }
             other => panic!("expected Applied, got {other:?}"),
@@ -431,16 +445,20 @@ mod tests {
         match r2 {
             ApplyResult::Applied {
                 revision,
-                saved_to_disk,
+                apply_mode,
                 ..
             } => {
-                assert!(!saved_to_disk, "no-op apply must not save to disk");
+                assert_eq!(
+                    apply_mode,
+                    ConfigApplyMode::Noop,
+                    "no-op apply must not save to disk"
+                );
                 assert_eq!(
                     revision, rev_after_first,
                     "revision must not change on no-op"
                 );
             }
-            other => panic!("expected Applied with saved_to_disk=false, got {other:?}"),
+            other => panic!("expected Applied with Noop apply_mode, got {other:?}"),
         }
 
         std::fs::remove_dir_all(&dir).ok();
