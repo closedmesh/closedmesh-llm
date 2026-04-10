@@ -2,11 +2,12 @@ use crate::cli::models::ModelsCommand;
 use crate::models::{
     capabilities, catalog, download_exact_ref, find_catalog_model_exact, huggingface_hub_cache_dir,
     installed_model_capabilities, scan_installed_models, search_catalog_models, search_huggingface,
-    show_exact_model, show_model_variants_with_progress, SearchArtifactFilter, SearchProgress,
-    ShowVariantsProgress,
+    show_exact_model, show_model_variants_with_progress, ModelCapabilities, SearchArtifactFilter,
+    SearchProgress, ShowVariantsProgress,
 };
 use crate::system::hardware;
 use anyhow::{anyhow, Result};
+use serde_json::{json, Value};
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::time::Instant;
@@ -18,6 +19,7 @@ pub async fn run_model_search(
     prefer_mlx: bool,
     catalog_only: bool,
     limit: usize,
+    json_output: bool,
 ) -> Result<()> {
     let query = query.join(" ");
     let filter = if prefer_mlx {
@@ -41,7 +43,45 @@ pub async fn run_model_search(
             })
             .collect();
         if results.is_empty() {
+            if json_output {
+                print_json(json!({
+                    "query": query,
+                    "filter": filter_name(filter),
+                    "source": "catalog",
+                    "results": [],
+                }))?;
+                return Ok(());
+            }
             eprintln!("🔎 No {filter_label} catalog models matched '{query}'.");
+            return Ok(());
+        }
+        if json_output {
+            let payload_results: Vec<Value> = results
+                .into_iter()
+                .take(limit)
+                .map(|model| {
+                    json!({
+                        "name": model.name,
+                        "repo_id": model.source_repo(),
+                        "type": catalog_model_kind_code(model),
+                        "size": model.size,
+                        "description": model.description,
+                        "fit": fit_code_for_size_label(&model.size),
+                        "ref": model.name,
+                        "show": format!("mesh-llm models show {}", model.name),
+                        "download": format!("mesh-llm models download {}", model.name),
+                        "draft": model.draft,
+                        "capabilities": capabilities_json(capabilities::infer_catalog_capabilities(model)),
+                    })
+                })
+                .collect();
+            print_json(json!({
+                "query": query,
+                "filter": filter_name(filter),
+                "source": "catalog",
+                "machine": local_capacity_json(),
+                "results": payload_results,
+            }))?;
             return Ok(());
         }
         println!("📚 {filter_label} catalog matches for '{query}'");
@@ -59,11 +99,16 @@ pub async fn run_model_search(
         return Ok(());
     }
 
-    eprintln!("🔎 Searching Hugging Face {filter_label} repos for '{query}'...");
+    if !json_output {
+        eprintln!("🔎 Searching Hugging Face {filter_label} repos for '{query}'...");
+    }
     let mut announced_repo_scan = false;
     let results = search_huggingface(&query, limit, filter, |progress| match progress {
         SearchProgress::SearchingHub => {}
         SearchProgress::InspectingRepos { completed, total } => {
+            if json_output {
+                return;
+            }
             if total == 0 {
                 return;
             }
@@ -83,7 +128,53 @@ pub async fn run_model_search(
     })
     .await?;
     if results.is_empty() {
+        if json_output {
+            print_json(json!({
+                "query": query,
+                "filter": filter_name(filter),
+                "source": "huggingface",
+                "results": [],
+            }))?;
+            return Ok(());
+        }
         eprintln!("🔎 No Hugging Face {filter_label} matches for '{query}'.");
+        return Ok(());
+    }
+    if json_output {
+        let payload_results: Vec<Value> = results
+            .iter()
+            .map(|result| {
+                json!({
+                    "repo_id": result.repo_id,
+                    "type": model_kind_code(result.kind),
+                    "size": result.size_label,
+                    "downloads": result.downloads,
+                    "likes": result.likes,
+                    "fit": result
+                        .size_label
+                        .as_deref()
+                        .and_then(fit_code_for_size_label),
+                    "ref": result.exact_ref,
+                    "show": format!("mesh-llm models show {}", result.exact_ref),
+                    "download": format!("mesh-llm models download {}", result.exact_ref),
+                    "capabilities": capabilities_json(result.capabilities),
+                    "catalog": result.catalog.map(|model| {
+                        json!({
+                            "name": model.name,
+                            "size": model.size,
+                            "description": model.description,
+                        })
+                    }),
+                })
+            })
+            .collect();
+        print_json(json!({
+            "query": query,
+            "filter": filter_name(filter),
+            "source": "huggingface",
+            "machine": local_capacity_json(),
+            "results": payload_results,
+        }))?;
         return Ok(());
     }
 
@@ -142,7 +233,31 @@ pub async fn run_model_search(
     Ok(())
 }
 
-pub fn run_model_recommended() {
+pub fn run_model_recommended(json_output: bool) -> Result<()> {
+    if json_output {
+        let models: Vec<Value> = catalog::MODEL_CATALOG
+            .iter()
+            .map(|model| {
+                let model_capabilities = capabilities::infer_catalog_capabilities(model);
+                json!({
+                    "name": model.name,
+                    "size": model.size,
+                    "description": model.description,
+                    "draft": model.draft,
+                    "type": catalog_model_kind_code(model),
+                    "ref": model.name,
+                    "show": format!("mesh-llm models show {}", model.name),
+                    "download": format!("mesh-llm models download {}", model.name),
+                    "capabilities": capabilities_json(model_capabilities),
+                    "moe": moe_json(model.moe.as_ref()),
+                })
+            })
+            .collect();
+        return print_json(json!({
+            "source": "catalog",
+            "results": models,
+        }));
+    }
     println!("📚 Recommended models");
     println!();
     for model in catalog::MODEL_CATALOG.iter() {
@@ -166,14 +281,44 @@ pub fn run_model_recommended() {
         }
         println!();
     }
+    Ok(())
 }
 
-pub fn run_model_installed() {
+pub fn run_model_installed(json_output: bool) -> Result<()> {
     let installed = scan_installed_models();
+    if json_output {
+        let models: Vec<Value> = installed
+            .iter()
+            .map(|name| {
+                let path = crate::models::find_model_path(name);
+                let size = std::fs::metadata(&path).map(|meta| meta.len()).ok();
+                let catalog_model = find_catalog_model_exact(name);
+                let model_capabilities = installed_model_capabilities(name);
+                json!({
+                    "name": name,
+                    "type": installed_model_kind_code(&path),
+                    "size_bytes": size,
+                    "size": size.map(format_installed_size),
+                    "capabilities": capabilities_json(model_capabilities),
+                    "ref": name,
+                    "show": format!("mesh-llm models show {}", name),
+                    "download": format!("mesh-llm models download {}", name),
+                    "path": path,
+                    "about": catalog_model.map(|m| m.description.clone()),
+                    "draft": catalog_model.and_then(|m| m.draft.clone()),
+                    "moe": moe_json(catalog_model.and_then(|m| m.moe.as_ref())),
+                })
+            })
+            .collect();
+        return print_json(json!({
+            "cache_dir": huggingface_hub_cache_dir(),
+            "results": models,
+        }));
+    }
     if installed.is_empty() {
         println!("📦 No installed models found");
         println!("   HF cache: {}", huggingface_hub_cache_dir().display());
-        return;
+        return Ok(());
     }
 
     println!("💾 Installed models");
@@ -222,10 +367,11 @@ pub fn run_model_installed() {
         }
         println!();
     }
+    Ok(())
 }
 
-pub async fn run_model_show(model_ref: &str) -> Result<()> {
-    let interactive = std::io::stdout().is_terminal();
+pub async fn run_model_show(model_ref: &str, json_output: bool) -> Result<()> {
+    let interactive = !json_output && std::io::stdout().is_terminal();
     let detail_started = Instant::now();
     if interactive {
         eprintln!("🔎 Resolving model details from Hugging Face...");
@@ -237,61 +383,63 @@ pub async fn run_model_show(model_ref: &str) -> Result<()> {
             detail_started.elapsed().as_secs_f32()
         );
     }
-    println!("🔎 {}", details.display_name);
-    if let Some(summary) = local_capacity_summary() {
-        println!("{}", summary);
-    }
-    println!();
-    println!("Ref: {}", details.exact_ref);
-    println!("Type: {}", details.kind);
-    println!("Source: {}", format_source_label(details.source));
-    if let Some(size) = details.size_label {
-        println!("Size: {size}");
-        if let Some(fit) = fit_hint_for_size_label(&size) {
-            println!("Fit: {}", fit);
+    if !json_output {
+        println!("🔎 {}", details.display_name);
+        if let Some(summary) = local_capacity_summary() {
+            println!("{}", summary);
         }
-    }
-    if let Some(description) = details.description {
-        println!("About: {description}");
-    }
-    if let Some(draft) = details.draft {
-        println!("🧠 Draft: {draft}");
-    }
-    println!("Capabilities:");
-    println!("  💬 text");
-    if details.capabilities.multimodal_label().is_some() {
-        println!("  🎛️ multimodal");
-    }
-    if let Some(label) = details.capabilities.vision_label() {
-        println!("  👁️ vision ({label})");
-    }
-    if let Some(label) = details.capabilities.audio_label() {
-        println!("  🔊 audio ({label})");
-    }
-    if let Some(label) = details.capabilities.reasoning_label() {
-        println!("  🧠 reasoning ({label})");
-    }
-    if let Some(moe) = details.moe {
-        println!(
-            "🧩 MoE: {} experts, top-{}, min per node {}{}",
-            moe.n_expert,
-            moe.n_expert_used,
-            moe.min_experts_per_node,
-            if moe.ranking.is_empty() {
-                ", no embedded ranking".to_string()
-            } else {
-                format!(", ranking {}", moe.ranking.len())
+        println!();
+        println!("Ref: {}", details.exact_ref);
+        println!("Type: {}", details.kind);
+        println!("Source: {}", format_source_label(details.source));
+        if let Some(size) = details.size_label.as_deref() {
+            println!("Size: {size}");
+            if let Some(fit) = fit_hint_for_size_label(size) {
+                println!("Fit: {}", fit);
             }
-        );
+        }
+        if let Some(description) = details.description.as_deref() {
+            println!("About: {description}");
+        }
+        if let Some(draft) = details.draft.as_deref() {
+            println!("🧠 Draft: {draft}");
+        }
+        println!("Capabilities:");
+        println!("  💬 text");
+        if details.capabilities.multimodal_label().is_some() {
+            println!("  🎛️ multimodal");
+        }
+        if let Some(label) = details.capabilities.vision_label() {
+            println!("  👁️ vision ({label})");
+        }
+        if let Some(label) = details.capabilities.audio_label() {
+            println!("  🔊 audio ({label})");
+        }
+        if let Some(label) = details.capabilities.reasoning_label() {
+            println!("  🧠 reasoning ({label})");
+        }
+        if let Some(moe) = details.moe.clone() {
+            println!(
+                "🧩 MoE: {} experts, top-{}, min per node {}{}",
+                moe.n_expert,
+                moe.n_expert_used,
+                moe.min_experts_per_node,
+                if moe.ranking.is_empty() {
+                    ", no embedded ranking".to_string()
+                } else {
+                    format!(", ranking {}", moe.ranking.len())
+                }
+            );
+        }
+        println!("📥 Download:");
+        println!("   {}", details.download_url);
     }
-    println!("📥 Download:");
-    println!("   {}", details.download_url);
 
     let variants_started = Instant::now();
     if interactive {
         eprintln!("🔎 Fetching GGUF variants from Hugging Face...");
     }
-    if let Some(variants) = show_model_variants_with_progress(model_ref, |progress| {
+    let variants = show_model_variants_with_progress(model_ref, |progress| {
         if !interactive {
             return;
         }
@@ -308,8 +456,8 @@ pub async fn run_model_show(model_ref: &str) -> Result<()> {
             }
         }
     })
-    .await?
-    {
+    .await?;
+    if let Some(variants) = &variants {
         if interactive {
             eprintln!(
                 "✅ Fetched {} GGUF variants ({:.1}s)",
@@ -317,11 +465,11 @@ pub async fn run_model_show(model_ref: &str) -> Result<()> {
                 variants_started.elapsed().as_secs_f32()
             );
         }
-        if !variants.is_empty() {
+        if !variants.is_empty() && !json_output {
             println!();
             println!("Variants:");
             let mut rows = Vec::new();
-            for variant in variants {
+            for variant in variants.iter() {
                 let size = variant.size_label.as_deref().unwrap_or("-");
                 let fit = variant
                     .size_label
@@ -333,7 +481,7 @@ pub async fn run_model_show(model_ref: &str) -> Result<()> {
                     variant_selector_label(&variant.exact_ref),
                     size.to_string(),
                     fit,
-                    variant.exact_ref,
+                    variant.exact_ref.clone(),
                     selected,
                 ));
             }
@@ -387,12 +535,78 @@ pub async fn run_model_show(model_ref: &str) -> Result<()> {
             variants_started.elapsed().as_secs_f32()
         );
     }
+    if json_output {
+        print_json(json!({
+            "display_name": details.exact_ref,
+            "ref": details.exact_ref,
+            "type": model_kind_code(details.kind),
+            "source": details.source,
+            "size": details.size_label,
+            "fit": details
+                .size_label
+                .as_deref()
+                .and_then(fit_code_for_size_label),
+            "description": details.description,
+            "draft": details.draft,
+            "capabilities": capabilities_json(details.capabilities),
+            "moe": moe_json(details.moe.as_ref()),
+            "download_url": details.download_url,
+            "machine": local_capacity_json(),
+            "variants": variants
+                .unwrap_or_default()
+                .into_iter()
+                .map(|variant| {
+                    json!({
+                        "display_name": variant.exact_ref,
+                        "ref": variant.exact_ref,
+                        "type": model_kind_code(variant.kind),
+                        "source": variant.source,
+                        "size": variant.size_label,
+                        "fit": variant
+                            .size_label
+                            .as_deref()
+                            .and_then(fit_code_for_size_label),
+                        "download_url": variant.download_url,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        }))?;
+    }
     Ok(())
 }
 
-pub async fn run_model_download(model_ref: &str, include_draft: bool) -> Result<()> {
+pub async fn run_model_download(
+    model_ref: &str,
+    include_draft: bool,
+    json_output: bool,
+) -> Result<()> {
     let details = show_exact_model(model_ref).await.ok();
     let path = download_exact_ref(model_ref).await?;
+    if json_output {
+        let mut payload = json!({
+            "requested_ref": model_ref,
+            "path": path,
+            "type": details.as_ref().map(|d| model_kind_code(d.kind)),
+            "resolved_ref": details.as_ref().map(|d| d.exact_ref.clone()),
+        });
+        if !include_draft {
+            return print_json(payload);
+        }
+        if let Some(details) = details {
+            if let Some(draft) = details.draft {
+                let draft_model = find_catalog_model_exact(&draft)
+                    .ok_or_else(|| anyhow!("Draft model '{}' not found in catalog", draft))?;
+                let draft_path = catalog::download_model(draft_model).await?;
+                payload["draft"] = json!({
+                    "name": draft,
+                    "path": draft_path,
+                });
+            } else {
+                payload["draft"] = Value::Null;
+            }
+        }
+        return print_json(payload);
+    }
     println!("✅ Downloaded model");
     if let Some(details) = &details {
         println!("   type: {}", details.kind);
@@ -470,6 +684,70 @@ fn local_capacity_summary() -> Option<String> {
     }
 }
 
+fn local_capacity_json() -> Value {
+    let vram_bytes = hardware::survey().vram_bytes;
+    let vram_gb = vram_bytes as f64 / 1e9;
+    json!({
+        "vram_bytes": if vram_bytes > 0 { Some(vram_bytes) } else { None::<u64> },
+        "vram_gb": if vram_gb > 0.0 { Some(vram_gb) } else { None::<f64> },
+    })
+}
+
+fn capabilities_json(caps: ModelCapabilities) -> Value {
+    json!({
+        "text": true,
+        "multimodal": caps.multimodal_status(),
+        "vision": caps.vision_status(),
+        "audio": caps.audio_status(),
+        "reasoning": caps.reasoning_status(),
+        "tool_use": caps.tool_use_status(),
+        "moe": caps.moe,
+    })
+}
+
+fn moe_json(moe: Option<&catalog::MoeConfig>) -> Value {
+    match moe {
+        Some(moe) => json!({
+            "n_expert": moe.n_expert,
+            "n_expert_used": moe.n_expert_used,
+            "min_experts_per_node": moe.min_experts_per_node,
+            "ranking_len": moe.ranking.len(),
+        }),
+        None => Value::Null,
+    }
+}
+
+fn filter_name(filter: SearchArtifactFilter) -> &'static str {
+    match filter {
+        SearchArtifactFilter::Gguf => "gguf",
+        SearchArtifactFilter::Mlx => "mlx",
+    }
+}
+
+fn print_json(value: Value) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
+fn fit_code_for_size_label(size_label: &str) -> Option<&'static str> {
+    let model_gb = catalog::parse_size_gb(size_label);
+    let vram_gb = hardware::survey().vram_bytes as f64 / 1e9;
+    if model_gb <= 0.0 || vram_gb <= 0.0 {
+        return None;
+    }
+
+    let code = if model_gb <= vram_gb * 0.6 {
+        "comfortable"
+    } else if model_gb <= vram_gb * 0.9 {
+        "tight"
+    } else if model_gb <= vram_gb * 1.1 {
+        "tradeoff"
+    } else {
+        "too_large"
+    };
+    Some(code)
+}
+
 fn fit_hint_for_size_label(size_label: &str) -> Option<String> {
     let model_gb = catalog::parse_size_gb(size_label);
     let vram_gb = hardware::survey().vram_bytes as f64 / 1e9;
@@ -520,19 +798,37 @@ fn pad_left_display(value: &str, width: usize) -> String {
 
 pub async fn dispatch_models_command(command: &ModelsCommand) -> Result<()> {
     match command {
-        ModelsCommand::Recommended | ModelsCommand::List => run_model_recommended(),
-        ModelsCommand::Installed => run_model_installed(),
+        ModelsCommand::Recommended { json } | ModelsCommand::List { json } => {
+            run_model_recommended(*json)?
+        }
+        ModelsCommand::Installed { json } => run_model_installed(*json)?,
         ModelsCommand::Search {
             query,
             gguf,
             mlx,
             catalog,
             limit,
-        } => run_model_search(query, *gguf, *mlx, *catalog, *limit).await?,
-        ModelsCommand::Show { model } => run_model_show(model).await?,
-        ModelsCommand::Download { model, draft } => run_model_download(model, *draft).await?,
-        ModelsCommand::Updates { repo, all, check } => {
-            crate::models::run_update(repo.as_deref(), *all, *check)?
+            json,
+        } => run_model_search(query, *gguf, *mlx, *catalog, *limit, *json).await?,
+        ModelsCommand::Show { model, json } => run_model_show(model, *json).await?,
+        ModelsCommand::Download { model, draft, json } => {
+            run_model_download(model, *draft, *json).await?
+        }
+        ModelsCommand::Updates {
+            repo,
+            all,
+            check,
+            json,
+        } => {
+            crate::models::run_update(repo.as_deref(), *all, *check)?;
+            if *json {
+                print_json(json!({
+                    "repo": repo,
+                    "all": all,
+                    "check": check,
+                    "status": "ok",
+                }))?;
+            }
         }
     }
     Ok(())
@@ -546,4 +842,28 @@ fn catalog_model_is_mlx(model: &catalog::CatalogModel) -> bool {
         })
         .unwrap_or(false)
         || model.url.contains("model.safetensors")
+}
+
+fn catalog_model_kind(model: &catalog::CatalogModel) -> &'static str {
+    if catalog_model_is_mlx(model) {
+        "🍎 MLX"
+    } else {
+        "🦙 GGUF"
+    }
+}
+
+fn model_kind_code(kind: &str) -> &'static str {
+    if kind.to_ascii_lowercase().contains("mlx") {
+        "mlx"
+    } else {
+        "gguf"
+    }
+}
+
+fn installed_model_kind_code(path: &Path) -> &'static str {
+    model_kind_code(installed_model_kind(path))
+}
+
+fn catalog_model_kind_code(model: &catalog::CatalogModel) -> &'static str {
+    model_kind_code(catalog_model_kind(model))
 }
