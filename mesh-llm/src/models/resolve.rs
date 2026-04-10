@@ -375,6 +375,12 @@ fn format_huggingface_display_ref(repo: &str, revision: Option<&str>, file: &str
     if let Some(selector) = quant_selector_from_gguf_file(file) {
         return format_repo_selector_ref(repo, revision, &selector);
     }
+    if is_primary_mlx_weight_file(file) {
+        return match revision {
+            Some(revision) => format!("{repo}@{revision}"),
+            None => repo.to_string(),
+        };
+    }
     format_huggingface_exact_ref(repo, revision, file)
 }
 
@@ -930,6 +936,43 @@ mod tests {
     }
 
     #[test]
+    fn format_huggingface_display_ref_prefers_repo_form_for_mlx() {
+        assert_eq!(
+            format_huggingface_display_ref(
+                "mlx-community/SmolLM-135M-8bit",
+                None,
+                "model.safetensors"
+            ),
+            "mlx-community/SmolLM-135M-8bit"
+        );
+        assert_eq!(
+            format_huggingface_display_ref(
+                "avlp12/GLM-5.1-Alis-MLX-Dynamic-2.7bpw",
+                None,
+                "model-00001-of-00010.safetensors"
+            ),
+            "avlp12/GLM-5.1-Alis-MLX-Dynamic-2.7bpw"
+        );
+    }
+
+    #[test]
+    fn parse_exact_model_ref_accepts_legacy_mlx_model_path_shape() {
+        let parsed = parse_exact_model_ref("mlx-community/SmolLM-135M-8bit/model").unwrap();
+        match parsed {
+            ExactModelRef::HuggingFace {
+                repo,
+                revision,
+                file,
+            } => {
+                assert_eq!(repo, "mlx-community/SmolLM-135M-8bit");
+                assert_eq!(revision, None);
+                assert_eq!(file, "model");
+            }
+            _ => panic!("expected HuggingFace ref"),
+        }
+    }
+
+    #[test]
     fn collect_show_gguf_variants_excludes_mmproj_and_nonfirst_split() {
         let siblings = vec![
             ("mmproj-BF16.gguf".to_string(), Some(1_200_000_000)),
@@ -1220,6 +1263,11 @@ fn is_split_mlx_first_shard(file: &str) -> bool {
     left == "00001" && right.len() == 5 && right.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+fn is_primary_mlx_weight_file(file: &str) -> bool {
+    let basename = file.rsplit('/').next().unwrap_or(file);
+    basename.eq_ignore_ascii_case("model.safetensors") || is_split_mlx_first_shard(basename)
+}
+
 fn select_default_hf_file_from_siblings(siblings: &[String]) -> Option<String> {
     siblings
         .iter()
@@ -1487,6 +1535,11 @@ async fn resolve_huggingface_file(
         .iter()
         .map(|sibling| sibling.rfilename.clone())
         .collect();
+    let has_mlx_weights = siblings.iter().any(|entry| {
+        entry == "model.safetensors"
+            || entry == "model.safetensors.index.json"
+            || is_split_mlx_first_shard(entry)
+    });
 
     if file.is_empty() {
         let gguf_only = repo_prefers_gguf_only(repo);
@@ -1502,6 +1555,11 @@ async fn resolve_huggingface_file(
         } else {
             bail!("No GGUF model files found in {repo}@{revision}.");
         }
+    }
+    if file == "model" && has_mlx_weights {
+        bail!(
+            "MLX shorthand '/model' is not supported. Use '{repo}' or a full file ref like '{repo}/model.safetensors'."
+        );
     }
 
     if let Some(resolved) = resolve_hf_file_from_siblings(file, &siblings) {

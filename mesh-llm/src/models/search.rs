@@ -228,7 +228,7 @@ fn display_exact_ref(repo: &str, kind: RepoArtifactKind, file: &str) -> String {
             Some(selector) => format!("{repo}:{selector}"),
             None => format!("{repo}/{}", display_ref_file(file)),
         },
-        RepoArtifactKind::Mlx => format!("{repo}/{}", display_ref_file(file)),
+        RepoArtifactKind::Mlx => repo.to_string(),
     }
 }
 
@@ -459,14 +459,14 @@ mod tests {
     }
 
     #[test]
-    fn display_exact_ref_keeps_model_stem_for_mlx() {
+    fn display_exact_ref_prefers_repo_ref_for_mlx() {
         assert_eq!(
             display_exact_ref(
                 "mlx-community/Llama-3.2-3B-Instruct-4bit",
                 RepoArtifactKind::Mlx,
                 "model.safetensors"
             ),
-            "mlx-community/Llama-3.2-3B-Instruct-4bit/model"
+            "mlx-community/Llama-3.2-3B-Instruct-4bit"
         );
     }
 

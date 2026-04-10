@@ -432,14 +432,18 @@ pub async fn run_model_show(model_ref: &str, json_output: bool) -> Result<()> {
             );
         }
         println!("📥 Download:");
-        println!("   {}", details.download_url);
+        if model_kind_code(details.kind) == "mlx" {
+            println!("   mesh-llm models download {}", details.exact_ref);
+        } else {
+            println!("   {}", details.download_url);
+        }
     }
 
     let variants_started = Instant::now();
     if interactive {
         eprintln!("🔎 Fetching GGUF variants from Hugging Face...");
     }
-    let variants = show_model_variants_with_progress(model_ref, |progress| {
+    let variants = show_model_variants_with_progress(&details.exact_ref, |progress| {
         if !interactive {
             return;
         }
