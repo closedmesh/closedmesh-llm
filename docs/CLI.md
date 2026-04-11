@@ -366,7 +366,7 @@ mesh-llm moe plan unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_S --max-vram 16 --json
 Behavior:
 
 - Checks local mesh-llm ranking cache first.
-- Checks `meshllm/moe-rankings` on Hugging Face and prefers it when the published artifact is fresher.
+- Checks `meshllm/moe-rankings` on Hugging Face and uses it when it provides a stronger ranking than local cache.
 - Keeps Hugging Face dataset files in the normal Hugging Face cache; it does not copy dataset artifacts into `~/.cache/mesh-llm`.
 - Prefers `full-*` rankings over `micro-*` for the same model/distribution.
 - Prints ranking provenance clearly so you can see whether the planner used local cache, Hugging Face, or an explicit override.
@@ -393,7 +393,7 @@ Behavior:
 - Runs `llama-moe-analyze` locally using the full analyzer contract.
 - Shows progress for long-running work.
 - Writes durable logs so failures can be inspected after the command exits.
-- Caches the generated ranking locally for later `moe plan`, `serve`, or `moe submit`.
+- Caches the generated ranking locally for later `moe plan`, `serve`, or `moe share`.
 
 ### `moe analyze micro`
 

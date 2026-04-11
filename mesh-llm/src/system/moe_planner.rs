@@ -105,7 +105,7 @@ pub(crate) async fn plan_moe(args: MoePlanArgs) -> Result<MoePlanReport> {
         }
     }
     let model = resolve_model_context_with_progress(&args.model, args.progress).await?;
-    let ranking = resolve_best_ranking(&model, &args)?;
+    let ranking = resolve_best_ranking(&model, &args).await?;
     let target_vram_bytes = resolve_target_vram_bytes(args.max_vram_gb);
     if target_vram_bytes == 0 {
         bail!(
@@ -321,7 +321,30 @@ pub(crate) fn resolve_runtime_ranking(
     model_path: &Path,
     dataset_repo_name: &str,
 ) -> Result<Option<ResolvedRanking>> {
-    let local_legacy = moe::best_shared_ranking_artifact(model_path).map(|artifact| {
+    let local_legacy = resolve_local_runtime_ranking(model_path);
+
+    let Some(identity) = huggingface_identity_for_path(model_path) else {
+        return Ok(local_legacy);
+    };
+
+    if local_legacy.is_some() {
+        return Ok(local_legacy);
+    }
+
+    let remote = match fetch_remote_ranking(
+        dataset_repo_name,
+        &identity.repo_id,
+        &identity.revision,
+        &normalize_distribution_id(&identity.local_file_name),
+    ) {
+        Ok(remote) => remote,
+        Err(error) => return local_legacy.ok_or_else(|| error).map(Some),
+    };
+    Ok(select_preferred_ranking(local_legacy, remote))
+}
+
+fn resolve_local_runtime_ranking(model_path: &Path) -> Option<ResolvedRanking> {
+    moe::best_shared_ranking_artifact(model_path).map(|artifact| {
         let analyzer_id = match artifact.kind {
             moe::SharedRankingKind::Analyze => "full-v1",
             moe::SharedRankingKind::MicroAnalyze => "micro-v1",
@@ -340,36 +363,13 @@ pub(crate) fn resolve_runtime_ranking(
                 }
             ),
         }
-    });
-
-    let Some(identity) = huggingface_identity_for_path(model_path) else {
-        return Ok(local_legacy);
-    };
-
-    let api = build_hf_api(true).context("Build Hugging Face client for MoE ranking lookup")?;
-    let dataset_repo = api.repo(Repo::with_revision(
-        dataset_repo_name.to_string(),
-        RepoType::Dataset,
-        DEFAULT_DATASET_REVISION.to_string(),
-    ));
-    let info = match dataset_repo.info() {
-        Ok(info) => info,
-        Err(error) => return local_legacy.ok_or_else(|| error.into()).map(Some),
-    };
-
-    let remote = find_remote_ranking(
-        &api,
-        dataset_repo_name,
-        &info.sha,
-        &info.siblings,
-        &identity.repo_id,
-        &identity.revision,
-        &normalize_distribution_id(&identity.local_file_name),
-    )?;
-    Ok(select_preferred_ranking(local_legacy, remote))
+    })
 }
 
-fn resolve_best_ranking(model: &MoeModelContext, args: &MoePlanArgs) -> Result<ResolvedRanking> {
+async fn resolve_best_ranking(
+    model: &MoeModelContext,
+    args: &MoePlanArgs,
+) -> Result<ResolvedRanking> {
     if let Some(path) = args.ranking_file.as_deref() {
         if !path.exists() {
             bail!("Ranking file not found: {}", path.display());
@@ -383,26 +383,7 @@ fn resolve_best_ranking(model: &MoeModelContext, args: &MoePlanArgs) -> Result<R
         });
     }
 
-    let local_legacy = moe::best_shared_ranking_artifact(&model.path).map(|artifact| {
-        let analyzer_id = match artifact.kind {
-            moe::SharedRankingKind::Analyze => "full-v1",
-            moe::SharedRankingKind::MicroAnalyze => "micro-v1",
-        };
-        ResolvedRanking {
-            path: moe::shared_ranking_cache_path(&model.path, &artifact),
-            metadata_path: None,
-            analyzer_id: analyzer_id.to_string(),
-            source: RankingSource::LocalCache,
-            reason: format!(
-                "local {} ranking cache",
-                if artifact.kind == moe::SharedRankingKind::Analyze {
-                    "full"
-                } else {
-                    "micro"
-                }
-            ),
-        }
-    });
+    let local_legacy = resolve_local_runtime_ranking(&model.path);
 
     let Some(source_repo) = model.source_repo.as_ref() else {
         return local_legacy.ok_or_else(|| {
@@ -421,28 +402,39 @@ fn resolve_best_ranking(model: &MoeModelContext, args: &MoePlanArgs) -> Result<R
         });
     };
 
-    let api = build_hf_api(true).context("Build Hugging Face client for MoE ranking lookup")?;
-    let dataset_repo = api.repo(Repo::with_revision(
-        args.dataset_repo.clone(),
-        RepoType::Dataset,
-        DEFAULT_DATASET_REVISION.to_string(),
-    ));
-    let info = match dataset_repo.info() {
-        Ok(info) => info,
+    if local_legacy
+        .as_ref()
+        .is_some_and(|ranking| ranking_method_priority(ranking) >= 2)
+    {
+        return Ok(local_legacy.expect("checked is_some above"));
+    }
+
+    let dataset_repo = args.dataset_repo.clone();
+    let source_repo = source_repo.clone();
+    let source_revision = source_revision.clone();
+    let distribution_id = model.distribution_id.clone();
+    let local_fallback = local_legacy.clone();
+    let remote_dataset_repo = dataset_repo.clone();
+    let remote_source_repo = source_repo.clone();
+    let remote_source_revision = source_revision.clone();
+    let remote_distribution_id = distribution_id.clone();
+    let remote_lookup = tokio::task::spawn_blocking(move || {
+        fetch_remote_ranking(
+            &remote_dataset_repo,
+            &remote_source_repo,
+            &remote_source_revision,
+            &remote_distribution_id,
+        )
+    })
+    .await
+    .context("Join blocking Hugging Face MoE ranking lookup task")?;
+
+    let remote = match remote_lookup {
+        Ok(remote) => remote,
         Err(error) => {
-            return local_legacy.ok_or_else(|| error.into());
+            return local_fallback.ok_or(error);
         }
     };
-
-    let remote = find_remote_ranking(
-        &api,
-        &args.dataset_repo,
-        &info.sha,
-        &info.siblings,
-        source_repo,
-        source_revision,
-        &model.distribution_id,
-    )?;
     select_preferred_ranking(local_legacy, remote).ok_or_else(|| {
         anyhow::anyhow!(
             "No published ranking found in {} for {}@{} {} and no local cache exists.",
@@ -454,19 +446,14 @@ fn resolve_best_ranking(model: &MoeModelContext, args: &MoePlanArgs) -> Result<R
     })
 }
 
-fn ranking_priority(ranking: &ResolvedRanking) -> (u8, u8) {
-    let method = if ranking.analyzer_id.starts_with("full") {
+fn ranking_method_priority(ranking: &ResolvedRanking) -> u8 {
+    if ranking.analyzer_id.starts_with("full") {
         2
     } else if ranking.analyzer_id.starts_with("micro") {
         1
     } else {
         0
-    };
-    let source = match ranking.source {
-        RankingSource::HuggingFaceDataset => 1,
-        _ => 0,
-    };
-    (method, source)
+    }
 }
 
 fn select_preferred_ranking(
@@ -475,7 +462,7 @@ fn select_preferred_ranking(
 ) -> Option<ResolvedRanking> {
     match (local, remote) {
         (Some(local), Some(remote)) => {
-            if ranking_priority(&local) > ranking_priority(&remote) {
+            if ranking_method_priority(&local) >= ranking_method_priority(&remote) {
                 Some(local)
             } else {
                 Some(remote)
@@ -485,6 +472,30 @@ fn select_preferred_ranking(
         (None, Some(remote)) => Some(remote),
         (None, None) => None,
     }
+}
+
+fn fetch_remote_ranking(
+    dataset_repo_name: &str,
+    source_repo: &str,
+    source_revision: &str,
+    distribution_id: &str,
+) -> Result<Option<ResolvedRanking>> {
+    let api = build_hf_api(true).context("Build Hugging Face client for MoE ranking lookup")?;
+    let dataset_repo = api.repo(Repo::with_revision(
+        dataset_repo_name.to_string(),
+        RepoType::Dataset,
+        DEFAULT_DATASET_REVISION.to_string(),
+    ));
+    let info = dataset_repo.info()?;
+    find_remote_ranking(
+        &api,
+        dataset_repo_name,
+        &info.sha,
+        &info.siblings,
+        source_repo,
+        source_revision,
+        distribution_id,
+    )
 }
 
 fn find_remote_ranking(
@@ -631,10 +642,18 @@ fn build_metadata_json(
         .iter()
         .map(|(repo_path, _)| repo_path.clone())
         .collect::<Vec<_>>();
-    let file_hashes = model_files
-        .iter()
-        .map(|(repo_path, path)| Ok((repo_path.clone(), Value::String(sha256_file(path)?))))
-        .collect::<Result<serde_json::Map<String, Value>>>()?;
+    let total_files = model_files.len();
+    if total_files > 0 {
+        eprintln!(
+            "📦 Computing SHA-256 hashes for {} GGUF file(s) while building metadata...",
+            total_files
+        );
+    }
+    let mut file_hashes = serde_json::Map::with_capacity(total_files);
+    for (index, (repo_path, path)) in model_files.iter().enumerate() {
+        eprintln!("   [{}/{}] Hashing {}", index + 1, total_files, repo_path);
+        file_hashes.insert(repo_path.clone(), Value::String(sha256_file(path)?));
+    }
 
     let (prompt_set, prompt_count, token_count, context_size, all_layers) =
         infer_analysis_details(ranking, model)?;
@@ -997,7 +1016,7 @@ mod tests {
     }
 
     #[test]
-    fn select_preferred_ranking_prefers_published_when_methods_match() {
+    fn select_preferred_ranking_prefers_local_when_methods_match() {
         let local = fake_ranking("/tmp/local.csv", "micro-v1", RankingSource::LocalCache);
         let remote = fake_ranking(
             "/tmp/remote.csv",
@@ -1006,7 +1025,7 @@ mod tests {
         );
 
         let selected = select_preferred_ranking(Some(local), Some(remote)).unwrap();
-        assert!(matches!(selected.source, RankingSource::HuggingFaceDataset));
+        assert!(matches!(selected.source, RankingSource::LocalCache));
     }
 
     #[test]

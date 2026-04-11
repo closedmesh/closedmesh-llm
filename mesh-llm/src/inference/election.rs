@@ -585,10 +585,19 @@ fn resolve_runtime_moe_config(
     let started = std::time::Instant::now();
     let (ranking, ranking_source, ranking_origin) = match options.ranking_strategy {
         moe::MoeRankingStrategy::Auto => {
-            if let Some(resolved) = crate::system::moe_planner::resolve_runtime_ranking(
+            let resolved_ranking = match crate::system::moe_planner::resolve_runtime_ranking(
                 model_path,
                 crate::system::moe_planner::DEFAULT_MOE_RANKINGS_DATASET,
-            )? {
+            ) {
+                Ok(resolved) => resolved,
+                Err(err) => {
+                    eprintln!(
+                        "⚠ [{model_name}] Failed to resolve shared MoE ranking ({err}); falling back to local analysis or sequential expert order"
+                    );
+                    None
+                }
+            };
+            if let Some(resolved) = resolved_ranking {
                 eprintln!(
                     "🧩 [{model_name}] Using {} MoE ranking mode={} path={}",
                     resolved.source.label(),
@@ -686,13 +695,19 @@ fn refresh_auto_moe_config_from_cache(
     if !matches!(cfg.ranking_strategy, moe::MoeRankingStrategy::Auto) {
         return false;
     }
-    let Some(resolved) = crate::system::moe_planner::resolve_runtime_ranking(
-        model_path,
-        crate::system::moe_planner::DEFAULT_MOE_RANKINGS_DATASET,
-    )
-    .ok()
-    .flatten() else {
+    let Some(artifact) = moe::best_shared_ranking_artifact(model_path) else {
         return false;
+    };
+    let resolved = crate::system::moe_planner::ResolvedRanking {
+        path: moe::shared_ranking_cache_path(model_path, &artifact),
+        metadata_path: None,
+        analyzer_id: match artifact.kind {
+            moe::SharedRankingKind::Analyze => "full-v1",
+            moe::SharedRankingKind::MicroAnalyze => "micro-v1",
+        }
+        .to_string(),
+        source: crate::system::moe_planner::RankingSource::LocalCache,
+        reason: "local ranking refresh".to_string(),
     };
     let Some(ranking) = moe::load_cached_ranking(&resolved.path) else {
         return false;
