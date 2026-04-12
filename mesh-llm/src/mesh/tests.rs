@@ -1,5 +1,4 @@
 use super::*;
-use super::*;
 use crate::proto::node::{GossipFrame, NodeRole, PeerAnnouncement, RouteTableRequest};
 use tokio::sync::watch;
 

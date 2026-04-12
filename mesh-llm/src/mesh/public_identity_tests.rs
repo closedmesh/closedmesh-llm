@@ -1,5 +1,4 @@
 use super::*;
-use super::*;
 use std::fs;
 
 /// Test that mark_was_public / was_previously_public / clear_public_identity
