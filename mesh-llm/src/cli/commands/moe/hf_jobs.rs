@@ -192,7 +192,7 @@ impl HardwareFlavor {
             return Ok(unit_cost_micro_usd as f64 / 1_000_000.0);
         }
         bail!(
-            "Hugging Face hardware flavor {} is missing both unitCostUsd and unitCostMicroUSD",
+            "Hugging Face hardware flavor {} is missing both unitCostUSD and unitCostMicroUSD",
             self.name
         );
     }
@@ -201,6 +201,7 @@ impl HardwareFlavor {
 #[derive(Clone, Debug)]
 struct PricingEstimate {
     flavor: HardwareFlavor,
+    unit_cost_usd: f64,
     max_cost_usd: f64,
 }
 
@@ -223,7 +224,6 @@ async fn submit_job(spec: JobSubmissionSpec) -> Result<()> {
     );
     let timeout_seconds = parse_timeout_seconds(&spec.timeout)?;
     let pricing = fetch_pricing_estimate(&endpoint, &spec.flavor, timeout_seconds).await?;
-    let unit_cost_usd = pricing.flavor.resolved_unit_cost_usd()?;
     let script = remote_bash_script(&spec);
     let payload = json!({
         "dockerImage": job_image(spec.release_target),
@@ -235,7 +235,7 @@ async fn submit_job(spec: JobSubmissionSpec) -> Result<()> {
             "DATASET_REPO": spec.dataset_repo,
             "HF_JOB_FLAVOR": pricing.flavor.name,
             "HF_JOB_FLAVOR_PRETTY": pricing.flavor.pretty_name(),
-            "HF_JOB_UNIT_COST_USD": format!("{:.6}", unit_cost_usd),
+            "HF_JOB_UNIT_COST_USD": format!("{:.6}", pricing.unit_cost_usd),
             "HF_JOB_UNIT_LABEL": pricing.flavor.unit_label(),
             "HF_JOB_TIMEOUT_SECONDS": timeout_seconds.to_string(),
             "HF_JOB_MAX_COST_USD": format!("{:.2}", pricing.max_cost_usd),
@@ -266,7 +266,7 @@ async fn submit_job(spec: JobSubmissionSpec) -> Result<()> {
     println!(
         "💵 Pricing: {} @ ${:.6}/{}",
         pricing.flavor.pretty_name(),
-        unit_cost_usd,
+        pricing.unit_cost_usd,
         pricing.flavor.unit_label()
     );
     println!("🧮 Max cost: ${:.2} USD", pricing.max_cost_usd);
@@ -328,13 +328,11 @@ async fn fetch_pricing_estimate(
         .into_iter()
         .find(|candidate| candidate.name == flavor)
         .ok_or_else(|| anyhow::anyhow!("Unknown Hugging Face Jobs flavor: {flavor}"))?;
-    let max_cost_usd = estimate_cost_usd(
-        flavor.resolved_unit_cost_usd()?,
-        flavor.unit_label(),
-        timeout_seconds,
-    )?;
+    let unit_cost_usd = flavor.resolved_unit_cost_usd()?;
+    let max_cost_usd = estimate_cost_usd(unit_cost_usd, flavor.unit_label(), timeout_seconds)?;
     Ok(PricingEstimate {
         flavor,
+        unit_cost_usd,
         max_cost_usd,
     })
 }
