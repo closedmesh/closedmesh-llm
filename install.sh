@@ -293,6 +293,7 @@ asset_name() {
 
 latest_prerelease_tag() {
     local api_url="https://api.github.com/repos/${REPO}/releases?per_page=20"
+    local releases_page_url="https://github.com/${REPO}/releases"
     local response
     local -a curl_args=(
         -fsSL
@@ -306,35 +307,58 @@ latest_prerelease_tag() {
         curl_args+=(-H "Authorization: Bearer ${GH_TOKEN}")
     fi
 
-    if ! response="$(curl "${curl_args[@]}" "$api_url")"; then
-        echo "error: could not query GitHub releases for ${REPO}" >&2
-        exit 1
+    local tag
+    if response="$(curl "${curl_args[@]}" "$api_url" 2>/dev/null)"; then
+        local compact
+        compact="$(printf '%s' "$response" | tr -d '\n\r\t ')"
+
+        tag="$(
+            printf '%s' "$compact" |
+                sed 's/},{/}\
+{/g' |
+                awk '
+                    /"prerelease":true/ && !/"draft":true/ {
+                        if (match($0, /"tag_name":"[^"]+"/)) {
+                            value = substr($0, RSTART, RLENGTH)
+                            sub(/^"tag_name":"/, "", value)
+                            sub(/"$/, "", value)
+                            print value
+                            exit
+                        }
+                    }
+                '
+        )"
     fi
 
-    local compact
-    compact="$(printf '%s' "$response" | tr -d '\n\r\t ')"
+    if [[ -z "${tag:-}" ]]; then
+        if ! response="$(curl -fsSL "$releases_page_url" 2>/dev/null)"; then
+            echo "error: could not query GitHub releases for ${REPO}" >&2
+            return 1
+        fi
 
-    local tag
-    tag="$(
-        printf '%s' "$compact" |
-            sed 's/},{/}\
-{/g' |
-            awk '
-                /"prerelease":true/ && !/"draft":true/ {
-                    if (match($0, /"tag_name":"[^"]+"/)) {
-                        value = substr($0, RSTART, RLENGTH)
-                        sub(/^"tag_name":"/, "", value)
-                        sub(/"$/, "", value)
-                        print value
+        tag="$(
+            printf '%s' "$response" |
+                tr '\n' ' ' |
+                sed "s#<a href=\"/${REPO}/releases/tag/#\\
+TAG:#g; s#Pre-release#\\
+PRE-RELEASE#g" |
+                awk '
+                    /TAG:/ {
+                        tag = $0
+                        sub(/^.*TAG:/, "", tag)
+                        sub(/".*$/, "", tag)
+                    }
+                    /PRE-RELEASE/ && tag != "" {
+                        print tag
                         exit
                     }
-                }
-            '
-    )"
+                '
+        )"
+    fi
 
     if [[ -z "$tag" ]]; then
         echo "error: could not find a published prerelease for ${REPO}" >&2
-        exit 1
+        return 1
     fi
 
     printf '%s\n' "$tag"
@@ -634,7 +658,9 @@ main() {
     local asset
     asset="$(asset_name "$flavor")"
     local url
-    url="$(release_url "$asset")"
+    if ! url="$(release_url "$asset")"; then
+        exit 1
+    fi
 
     local tmp_dir
     tmp_dir="$(mktemp -d)"
