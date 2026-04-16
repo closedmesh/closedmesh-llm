@@ -370,6 +370,46 @@ fn mlx_candidate_rank(file: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    fn assert_progress_sequence(events: &[SearchProgress]) {
+        assert!(
+            events
+                .first()
+                .is_some_and(|event| matches!(event, SearchProgress::SearchingHub)),
+            "expected initial SearchingHub event, got {events:?}"
+        );
+
+        let mut last_completed = 0usize;
+        let mut last_total = None;
+        for event in events {
+            if let SearchProgress::InspectingRepos { completed, total } = *event {
+                assert!(
+                    completed <= total,
+                    "completed {completed} exceeded total {total}"
+                );
+                assert!(
+                    completed >= last_completed,
+                    "progress regressed from {last_completed} to {completed}"
+                );
+                if let Some(previous_total) = last_total {
+                    assert_eq!(
+                        total, previous_total,
+                        "repo inspection total changed from {previous_total} to {total}"
+                    );
+                }
+                last_completed = completed;
+                last_total = Some(total);
+            }
+        }
+
+        if let Some(total) = last_total {
+            assert_eq!(
+                last_completed, total,
+                "expected final inspection progress to reach total repos"
+            );
+        }
+    }
 
     #[test]
     fn collect_repo_artifact_candidates_prefers_model_safetensors_over_index() {
@@ -505,5 +545,62 @@ mod tests {
         let candidates = collect_repo_artifact_candidates(&siblings);
         let files: Vec<_> = candidates.into_iter().map(|c| c.file).collect();
         assert_eq!(files, vec!["model.safetensors".to_string()]);
+    }
+
+    #[tokio::test]
+    #[ignore = "live Hugging Face search; run explicitly when validating hub integration"]
+    async fn live_search_huggingface_gguf_returns_results_and_reports_progress() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let results = search_huggingface("llama", 5, SearchArtifactFilter::Gguf, {
+            let events = Arc::clone(&events);
+            move |progress| events.lock().unwrap().push(progress)
+        })
+        .await
+        .expect("live gguf search should succeed");
+
+        assert!(
+            !results.is_empty(),
+            "expected at least one live gguf result"
+        );
+        assert!(
+            results.iter().all(|hit| hit.kind == "🦙 GGUF"),
+            "expected only GGUF hits, got {results:?}"
+        );
+        assert!(
+            results
+                .iter()
+                .all(|hit| !hit.repo_id.is_empty() && !hit.exact_ref.is_empty()),
+            "expected populated repo ids and refs, got {results:?}"
+        );
+
+        let events = events.lock().unwrap().clone();
+        assert_progress_sequence(&events);
+    }
+
+    #[tokio::test]
+    #[ignore = "live Hugging Face search; run explicitly when validating hub integration"]
+    async fn live_search_huggingface_mlx_returns_results_and_reports_progress() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let results = search_huggingface("llama", 5, SearchArtifactFilter::Mlx, {
+            let events = Arc::clone(&events);
+            move |progress| events.lock().unwrap().push(progress)
+        })
+        .await
+        .expect("live mlx search should succeed");
+
+        assert!(!results.is_empty(), "expected at least one live mlx result");
+        assert!(
+            results.iter().all(|hit| hit.kind == "🍎 MLX"),
+            "expected only MLX hits, got {results:?}"
+        );
+        assert!(
+            results
+                .iter()
+                .all(|hit| hit.repo_id == hit.exact_ref || hit.exact_ref.starts_with(&hit.repo_id)),
+            "expected mlx refs to stay repo-shaped, got {results:?}"
+        );
+
+        let events = events.lock().unwrap().clone();
+        assert_progress_sequence(&events);
     }
 }

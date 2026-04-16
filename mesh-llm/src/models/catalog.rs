@@ -1,17 +1,14 @@
 //! Built-in model catalog plus managed acquisition helpers.
 
+use crate::cli::terminal_progress::{start_spinner, SpinnerHandle};
 use anyhow::{Context, Result};
-use hf_hub::RepoDownloadFileParams;
+use hf_hub::{DownloadEvent, Progress, ProgressEvent, ProgressHandler, RepoDownloadFileParams};
 use serde::Deserialize;
 #[cfg(test)]
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
-use std::sync::Arc;
-use std::sync::LazyLock;
-#[cfg(test)]
-use std::sync::Mutex;
+use std::sync::{Arc, LazyLock, Mutex};
 use tokio::io::AsyncWriteExt;
 #[derive(Clone, Debug, Deserialize)]
 pub struct CatalogAsset {
@@ -436,6 +433,169 @@ async fn download_hf_assets(
         .context("Join Hugging Face download task")?
 }
 
+struct MeshDownloadProgressState {
+    filename: String,
+    total: u64,
+    downloaded: u64,
+    bytes_per_sec: Option<f64>,
+    last_draw: Option<std::time::Instant>,
+}
+
+struct MeshDownloadProgress {
+    preflight_spinner: Mutex<Option<SpinnerHandle>>,
+    state: Mutex<MeshDownloadProgressState>,
+}
+
+impl MeshDownloadProgress {
+    fn new(filename: String) -> Self {
+        let spinner_message = format!("Preparing download {}", filename);
+        Self {
+            preflight_spinner: Mutex::new(Some(start_spinner(&spinner_message))),
+            state: Mutex::new(MeshDownloadProgressState {
+                filename,
+                total: 0,
+                downloaded: 0,
+                bytes_per_sec: None,
+                last_draw: None,
+            }),
+        }
+    }
+
+    fn draw(state: &mut MeshDownloadProgressState, force: bool) {
+        if !force && state.downloaded == 0 && state.total == 0 {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if !force
+            && state.last_draw.is_some_and(|last| {
+                now.duration_since(last) < std::time::Duration::from_millis(150)
+            })
+        {
+            return;
+        }
+        state.last_draw = Some(now);
+        let percent = if state.total == 0 {
+            0
+        } else {
+            ((state.downloaded as f64 / state.total as f64) * 1000.0).round() as usize
+        };
+        let percent_major = (percent.min(1000)) / 10;
+        let percent_minor = (percent.min(1000)) % 10;
+        let speed_suffix = state
+            .bytes_per_sec
+            .filter(|bytes_per_sec| *bytes_per_sec > 0.0)
+            .map(|bytes_per_sec| format!(" at {}/s", format_download_bytes(bytes_per_sec as u64)))
+            .unwrap_or_default();
+        eprint!(
+            "\r\x1b[K   ⏬ {} {:>3}.{:01}% ({}/{}){}",
+            state.filename,
+            percent_major,
+            percent_minor,
+            format_download_bytes(state.downloaded),
+            format_download_bytes(state.total),
+            speed_suffix,
+        );
+        let _ = std::io::stderr().flush();
+        if force {
+            eprintln!();
+        }
+    }
+
+    fn apply_download_event(state: &mut MeshDownloadProgressState, event: &DownloadEvent) {
+        match event {
+            DownloadEvent::Start { total_bytes, .. } => {
+                if *total_bytes > 0 {
+                    state.total = state.total.max(*total_bytes);
+                }
+            }
+            DownloadEvent::Progress { files } => {
+                if let Some(first) = files.first() {
+                    if !first.filename.is_empty() {
+                        state.filename = first.filename.clone();
+                    }
+                }
+                if !files.is_empty() {
+                    let reported_downloaded: u64 =
+                        files.iter().map(|file| file.bytes_completed).sum();
+                    state.downloaded = state.downloaded.max(reported_downloaded);
+                    let reported_total: u64 = files.iter().map(|file| file.total_bytes).sum();
+                    if reported_total > 0 {
+                        state.total = state.total.max(reported_total);
+                    }
+                }
+            }
+            DownloadEvent::AggregateProgress {
+                bytes_completed,
+                total_bytes,
+                bytes_per_sec,
+            } => {
+                state.downloaded = state.downloaded.max(*bytes_completed);
+                if *total_bytes > 0 {
+                    state.total = state.total.max(*total_bytes);
+                }
+                state.bytes_per_sec = *bytes_per_sec;
+            }
+            DownloadEvent::Complete => {
+                if state.total > 0 {
+                    state.downloaded = state.total;
+                }
+                state.bytes_per_sec = None;
+            }
+        }
+    }
+
+    fn showed_meaningful_progress(&self) -> bool {
+        self.state
+            .lock()
+            .map(|state| state.downloaded > 0 || state.total > 0)
+            .unwrap_or(false)
+    }
+}
+
+impl ProgressHandler for MeshDownloadProgress {
+    fn on_progress(&self, event: &ProgressEvent) {
+        let ProgressEvent::Download(event) = event else {
+            return;
+        };
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        Self::apply_download_event(&mut state, event);
+        let should_show_progress = state.downloaded > 0 || state.total > 0;
+        let force = matches!(event, DownloadEvent::Complete) && should_show_progress;
+        if should_show_progress {
+            if let Ok(mut spinner) = self.preflight_spinner.lock() {
+                spinner.take();
+            }
+            Self::draw(&mut state, force);
+        } else if matches!(event, DownloadEvent::Complete) {
+            if let Ok(mut spinner) = self.preflight_spinner.lock() {
+                spinner.take();
+            }
+        }
+    }
+}
+
+impl Drop for MeshDownloadProgress {
+    fn drop(&mut self) {
+        if let Ok(mut spinner) = self.preflight_spinner.lock() {
+            spinner.take();
+        }
+    }
+}
+
+fn format_download_bytes(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{:.1}GB", bytes as f64 / 1e9)
+    } else if bytes >= 1_000_000 {
+        format!("{:.0}MB", bytes as f64 / 1e6)
+    } else if bytes >= 1_000 {
+        format!("{:.0}KB", bytes as f64 / 1e3)
+    } else {
+        format!("{bytes}B")
+    }
+}
+
 fn download_hf_assets_blocking(
     label: &str,
     assets: Vec<HfAsset>,
@@ -485,16 +645,40 @@ fn download_hf_assets_blocking(
         if progress && required {
             eprintln!("   📥 Ensuring model {}", asset.file);
         }
+        let progress_tracker = if progress && required {
+            Some(Arc::new(MeshDownloadProgress::new(asset.file.clone())))
+        } else {
+            None
+        };
+        let progress_handler: Progress = if let Some(tracker) = &progress_tracker {
+            Some(tracker.clone())
+        } else {
+            None
+        };
         let path = match api_repo.download_file(
             &RepoDownloadFileParams::builder()
                 .filename(asset.file.clone())
                 .revision(asset.revision.clone())
+                .progress(progress_handler)
                 .build(),
         ) {
             Ok(path) => {
                 if progress {
                     if required {
-                        eprintln!("   ✅ Ready {}", asset.file);
+                        let showed_progress = progress_tracker
+                            .as_ref()
+                            .is_some_and(|tracker| tracker.showed_meaningful_progress());
+                        if showed_progress {
+                            eprintln!("   ✅ Ready {}", asset.file);
+                        } else if let Ok(meta) = std::fs::metadata(&path) {
+                            eprintln!(
+                                "   ✅ Ready {} ({})",
+                                asset.file,
+                                format_download_bytes(meta.len())
+                            );
+                        } else {
+                            eprintln!("   ✅ Ready {}", asset.file);
+                        }
                     } else {
                         eprintln!("   🧾 Downloaded model metadata");
                     }
@@ -983,7 +1167,7 @@ async fn download_with_resume(dest: &Path, url: &str) -> Result<()> {
                     eprintln!();
                     eprintln!(
                         "  ⚠️ {label}: interrupted at {}: {e}",
-                        format_size_bytes(downloaded)
+                        format_download_bytes(downloaded)
                     );
                     // If we got data, reset attempt counter (connection was working)
                     if got_data {
@@ -1049,32 +1233,31 @@ fn print_transfer_status(
     phase: &str,
 ) -> Result<()> {
     let progress = match total {
-        Some(total) if total > 0 => format!(
-            "{:>5.1}%  {}/{}",
-            (downloaded as f64 / total as f64) * 100.0,
-            format_size_bytes(downloaded),
-            format_size_bytes(total)
-        ),
-        _ => format!("      {}", format_size_bytes(downloaded)),
+        Some(total) if total > 0 => {
+            let percent = ((downloaded as f64 / total as f64) * 1000.0).round() as usize;
+            format!(
+                "{:>3}.{:01}% ({}/{})",
+                (percent.min(1000)) / 10,
+                (percent.min(1000)) % 10,
+                format_download_bytes(downloaded),
+                format_download_bytes(total)
+            )
+        }
+        _ => format!("      {}", format_download_bytes(downloaded)),
     };
     let resume = if attempt > 1 {
         format!("  attempt {}", attempt)
     } else {
         String::new()
     };
-    eprint!("\r  📥 {}  {:<11} {}{}", label, phase, progress, resume);
+    eprint!(
+        "\r\x1b[K   ⏬ {} {:<11} {}{}",
+        label, phase, progress, resume
+    );
     std::io::stderr()
         .flush()
         .context("Flush transfer progress")?;
     Ok(())
-}
-
-fn format_size_bytes(bytes: u64) -> String {
-    if bytes >= 1_000_000_000 {
-        format!("{:.1}GB", bytes as f64 / 1e9)
-    } else {
-        format!("{:.0}MB", bytes as f64 / 1e6)
-    }
 }
 
 /// List available models
@@ -1317,6 +1500,105 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(resolved, cached_file);
+    }
+
+    #[test]
+    fn download_progress_state_merges_http_events_consistently() {
+        let mut state = MeshDownloadProgressState {
+            filename: "model.gguf".to_string(),
+            total: 0,
+            downloaded: 0,
+            bytes_per_sec: None,
+            last_draw: None,
+        };
+
+        MeshDownloadProgress::apply_download_event(
+            &mut state,
+            &DownloadEvent::Start {
+                total_files: 1,
+                total_bytes: 1_000,
+            },
+        );
+        MeshDownloadProgress::apply_download_event(
+            &mut state,
+            &DownloadEvent::Progress {
+                files: vec![hf_hub::FileProgress {
+                    filename: "model.gguf".to_string(),
+                    bytes_completed: 250,
+                    total_bytes: 1_000,
+                    status: hf_hub::FileStatus::InProgress,
+                }],
+            },
+        );
+        MeshDownloadProgress::apply_download_event(
+            &mut state,
+            &DownloadEvent::Progress {
+                files: vec![hf_hub::FileProgress {
+                    filename: "model.gguf".to_string(),
+                    bytes_completed: 700,
+                    total_bytes: 1_000,
+                    status: hf_hub::FileStatus::InProgress,
+                }],
+            },
+        );
+
+        assert_eq!(state.filename, "model.gguf");
+        assert_eq!(state.downloaded, 700);
+        assert_eq!(state.total, 1_000);
+        assert_eq!(state.bytes_per_sec, None);
+    }
+
+    #[test]
+    fn download_progress_state_keeps_xet_progress_monotonic_when_per_file_lags() {
+        let mut state = MeshDownloadProgressState {
+            filename: "model.gguf".to_string(),
+            total: 0,
+            downloaded: 0,
+            bytes_per_sec: None,
+            last_draw: None,
+        };
+
+        MeshDownloadProgress::apply_download_event(
+            &mut state,
+            &DownloadEvent::AggregateProgress {
+                bytes_completed: 32_000_000,
+                total_bytes: 17_300_000_000,
+                bytes_per_sec: Some(128_000_000.0),
+            },
+        );
+        MeshDownloadProgress::apply_download_event(
+            &mut state,
+            &DownloadEvent::Progress {
+                files: vec![hf_hub::FileProgress {
+                    filename: "gemma-4-31B-it-Q4_0.gguf".to_string(),
+                    bytes_completed: 4_000_000,
+                    total_bytes: 17_300_000_000,
+                    status: hf_hub::FileStatus::InProgress,
+                }],
+            },
+        );
+
+        assert_eq!(state.filename, "gemma-4-31B-it-Q4_0.gguf");
+        assert_eq!(state.downloaded, 32_000_000);
+        assert_eq!(state.total, 17_300_000_000);
+        assert_eq!(state.bytes_per_sec, Some(128_000_000.0));
+    }
+
+    #[test]
+    fn download_progress_state_clears_speed_and_finishes_at_total() {
+        let mut state = MeshDownloadProgressState {
+            filename: "model.gguf".to_string(),
+            total: 1_000,
+            downloaded: 700,
+            bytes_per_sec: Some(42_000_000.0),
+            last_draw: None,
+        };
+
+        MeshDownloadProgress::apply_download_event(&mut state, &DownloadEvent::Complete);
+
+        assert_eq!(state.downloaded, 1_000);
+        assert_eq!(state.total, 1_000);
+        assert_eq!(state.bytes_per_sec, None);
     }
 
     #[tokio::test]

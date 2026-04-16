@@ -1,9 +1,9 @@
 use super::local::huggingface_snapshot_path;
 use super::{build_hf_api, huggingface_hub_cache_dir, short_revision};
+use crate::cli::terminal_progress::{clear_stderr_line, DeterminateProgressLine};
 use anyhow::{Context, Result};
 use hf_hub::{RepoDownloadFileParams, RepoInfo, RepoInfoParams, RepoType};
 use std::collections::BTreeSet;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 struct CachedRepo {
@@ -153,25 +153,16 @@ pub fn warn_about_updates_for_paths(paths: &[PathBuf]) {
 }
 
 fn print_update_check_progress(current: usize, total: usize, repo_id: &str) -> Result<()> {
-    let pct = if total > 0 {
-        (current as f64 / total as f64) * 100.0
-    } else {
-        100.0
-    };
-    eprint!(
-        "\r🔄 Checking updates {:>5.1}%  [{}/{}] {}",
-        pct, current, total, repo_id
-    );
-    std::io::stderr()
-        .flush()
-        .context("Flush update check progress")?;
-    Ok(())
+    DeterminateProgressLine::new("🔄").draw_counts(
+        "Checking updates",
+        current,
+        total,
+        Some(&format!(" {repo_id}")),
+    )
 }
 
 fn clear_progress_line() -> Result<()> {
-    eprint!("\r{: <140}\r", "");
-    std::io::stderr().flush().context("Flush progress clear")?;
-    Ok(())
+    clear_stderr_line()
 }
 
 fn cached_repos() -> Result<Vec<CachedRepo>> {

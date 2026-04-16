@@ -3,13 +3,14 @@ mod formatters_console;
 mod formatters_json;
 
 use crate::cli::models::ModelsCommand;
+use crate::cli::terminal_progress::{clear_stderr_line, start_spinner, DeterminateProgressLine};
 use crate::models::{
     catalog, download_exact_ref, find_catalog_model_exact, installed_model_capabilities,
     scan_installed_models, search_catalog_models, search_huggingface, show_exact_model,
     show_model_variants_with_progress, SearchArtifactFilter, SearchProgress, ShowVariantsProgress,
 };
 use anyhow::{anyhow, Result};
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 use std::time::Instant;
 
 use formatters::{
@@ -54,6 +55,8 @@ pub async fn run_model_search(
         );
     }
     let mut announced_repo_scan = false;
+    let mut last_reported_completed = 0usize;
+    let repo_progress = DeterminateProgressLine::new("🔎");
     let results = search_huggingface(&query, limit, filter, |progress| match progress {
         SearchProgress::SearchingHub => {}
         SearchProgress::InspectingRepos { completed, total } => {
@@ -70,10 +73,19 @@ pub async fn run_model_search(
             if completed == 0 {
                 return;
             }
-            eprint!("\r   Inspected {completed}/{total} candidate repos...");
-            let _ = std::io::stderr().flush();
+            if completed < total && completed < last_reported_completed.saturating_add(5) {
+                return;
+            }
+            last_reported_completed = completed;
+            let _ = repo_progress.draw_counts(
+                "Inspecting repos",
+                completed,
+                total,
+                Some(" candidate repos"),
+            );
             if completed == total {
-                eprintln!();
+                let _ = clear_stderr_line();
+                eprintln!("   Inspected {completed}/{total} candidate repos...");
             }
         }
     })
@@ -131,6 +143,7 @@ pub async fn run_model_show(model_ref: &str, json_output: bool) -> Result<()> {
         if interactive {
             eprintln!("🔎 Fetching GGUF variants from Hugging Face...");
         }
+        let variants_progress = DeterminateProgressLine::new("🔎");
         let variants = show_model_variants_with_progress(&details.exact_ref, |progress| {
             if !interactive {
                 return;
@@ -140,10 +153,14 @@ pub async fn run_model_show(model_ref: &str, json_output: bool) -> Result<()> {
                     if total == 0 {
                         return;
                     }
-                    eprint!("\r   Inspecting variant sizes {completed}/{total}...");
-                    let _ = std::io::stderr().flush();
+                    let _ = variants_progress.draw_counts(
+                        "Inspecting variant sizes",
+                        completed,
+                        total,
+                        None,
+                    );
                     if completed == total {
-                        eprintln!();
+                        let _ = clear_stderr_line();
                     }
                 }
             }
@@ -176,10 +193,17 @@ pub async fn run_model_download(
     json_output: bool,
 ) -> Result<()> {
     let formatter = models_formatter(json_output);
-    let details = show_exact_model(model_ref).await.ok();
+    let details = if json_output {
+        show_exact_model(model_ref).await.ok()
+    } else {
+        let mut spinner = start_spinner(&format!("Resolving {model_ref}"));
+        let details = show_exact_model(model_ref).await.ok();
+        spinner.finish();
+        details
+    };
     let download_ref = details
         .as_ref()
-        .map(|d| d.exact_ref.as_str())
+        .map(|d| d.download_url.as_str())
         .unwrap_or(model_ref);
     let path = download_exact_ref(download_ref).await?;
     if !include_draft {
