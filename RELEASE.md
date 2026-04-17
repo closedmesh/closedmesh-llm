@@ -116,8 +116,7 @@ Running `.github/workflows/release.yml` via `workflow_dispatch` triggers the rel
 - keeps the legacy macOS `mesh-bundle.tar.gz` asset available for direct archive installs
 - creates the GitHub release automatically with generated notes
 - marks hyphenated tags such as `v0.X.0-rc.1` as GitHub prereleases
-- publishes `mesh-llm-client` and `mesh-api` to crates.io after the release succeeds on stable tags such as `v0.X.0`
-- skips crates.io publishing for prerelease tags such as `v0.X.0-rc.1`
+- publishes `mesh-llm-client` and `mesh-api` to crates.io after the release succeeds, including prerelease tags such as `v0.X.0-rc.1`
 - resets the target branch back to the placeholder Swift `Package.swift` after the release finishes, so day-to-day branch builds do not keep pointing at the most recent published XCFramework
 
 ### 6a. Autoupdater behavior and compatibility
