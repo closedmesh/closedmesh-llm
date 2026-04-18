@@ -92,6 +92,9 @@ impl SearchFormatter for ConsoleFormatter {
         for (index, result) in results.iter().enumerate() {
             println!("{}. 📦 {}", index + 1, result.repo_id);
             println!("   type: {}", result.kind);
+            if let Some(variant_count) = result.variant_count {
+                println!("   🧬 variants: {} available", variant_count);
+            }
             let mut stats = Vec::new();
             if let Some(size) = &result.size_label {
                 stats.push(format!("size: {} 📏", size));

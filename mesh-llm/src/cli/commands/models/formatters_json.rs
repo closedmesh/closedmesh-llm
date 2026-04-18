@@ -9,6 +9,44 @@ use anyhow::Result;
 use serde_json::{json, Value};
 use std::path::Path;
 
+fn show_payload(details: &ModelDetails, variants: Option<&[ModelDetails]>) -> Value {
+    json!({
+        "display_name": details.exact_ref,
+        "ref": details.exact_ref,
+        "type": model_kind_code(details.kind),
+        "source": details.source,
+        "size": details.size_label,
+        "fit": details
+            .size_label
+            .as_deref()
+            .and_then(fit_code_for_size_label),
+        "description": details.description,
+        "draft": details.draft,
+        "capabilities": capabilities_json(details.capabilities),
+        "moe": moe_json(details.moe.as_ref()),
+        "download_url": details.download_url,
+        "machine": local_capacity_json(),
+        "variants": variants
+            .unwrap_or_default()
+            .iter()
+            .map(|variant| {
+                json!({
+                    "display_name": variant.exact_ref,
+                    "ref": variant.exact_ref,
+                    "type": model_kind_code(variant.kind),
+                    "source": variant.source,
+                    "size": variant.size_label,
+                    "fit": variant
+                        .size_label
+                        .as_deref()
+                        .and_then(fit_code_for_size_label),
+                    "download_url": variant.download_url,
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
 impl SearchFormatter for JsonFormatter {
     fn is_json(&self) -> bool {
         true
@@ -97,6 +135,7 @@ impl SearchFormatter for JsonFormatter {
                     "repo_id": result.repo_id,
                     "repo_url": huggingface_repo_url(&result.repo_id),
                     "type": model_kind_code(result.kind),
+                    "variant_count": result.variant_count,
                     "size": result.size_label,
                     "downloads": result.downloads,
                     "likes": result.likes,
@@ -184,41 +223,7 @@ impl ModelsFormatter for JsonFormatter {
     }
 
     fn render_show(&self, details: &ModelDetails, variants: Option<&[ModelDetails]>) -> Result<()> {
-        print_json(json!({
-            "display_name": details.exact_ref,
-            "ref": details.exact_ref,
-            "type": model_kind_code(details.kind),
-            "source": details.source,
-            "size": details.size_label,
-            "fit": details
-                .size_label
-                .as_deref()
-                .and_then(fit_code_for_size_label),
-            "description": details.description,
-            "draft": details.draft,
-            "capabilities": capabilities_json(details.capabilities),
-            "moe": moe_json(details.moe.as_ref()),
-            "download_url": details.download_url,
-            "machine": local_capacity_json(),
-            "variants": variants
-                .unwrap_or_default()
-                .iter()
-                .map(|variant| {
-                    json!({
-                        "display_name": variant.exact_ref,
-                        "ref": variant.exact_ref,
-                        "type": model_kind_code(variant.kind),
-                        "source": variant.source,
-                        "size": variant.size_label,
-                        "fit": variant
-                            .size_label
-                            .as_deref()
-                            .and_then(fit_code_for_size_label),
-                        "download_url": variant.download_url,
-                    })
-                })
-                .collect::<Vec<_>>(),
-        }))
+        print_json(show_payload(details, variants))
     }
 
     fn render_download(
@@ -256,5 +261,67 @@ impl ModelsFormatter for JsonFormatter {
                 "all": all,
             },
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::ModelCapabilities;
+
+    #[test]
+    fn show_payload_includes_variants_for_selected_gguf_ref() {
+        let details = ModelDetails {
+            display_name: "Qwen3.6-35B-A3B-BF16.gguf".to_string(),
+            exact_ref: "unsloth/Qwen3.6-35B-A3B-GGUF:BF16".to_string(),
+            source: "huggingface",
+            kind: "🦙 GGUF",
+            download_url: "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/BF16/Qwen3.6-35B-A3B-BF16-00001-of-00002.gguf".to_string(),
+            size_label: Some("49.9GB".to_string()),
+            description: None,
+            draft: None,
+            capabilities: ModelCapabilities::default(),
+            moe: None,
+        };
+        let variants = vec![
+            ModelDetails {
+                display_name: "Qwen3.6-35B-A3B-BF16.gguf".to_string(),
+                exact_ref: "unsloth/Qwen3.6-35B-A3B-GGUF:BF16".to_string(),
+                source: "huggingface",
+                kind: "🦙 GGUF",
+                download_url: "https://example.invalid/bf16.gguf".to_string(),
+                size_label: Some("49.9GB".to_string()),
+                description: None,
+                draft: None,
+                capabilities: ModelCapabilities::default(),
+                moe: None,
+            },
+            ModelDetails {
+                display_name: "Qwen3.6-35B-A3B-Q4_K_M.gguf".to_string(),
+                exact_ref: "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M".to_string(),
+                source: "huggingface",
+                kind: "🦙 GGUF",
+                download_url: "https://example.invalid/q4_k_m.gguf".to_string(),
+                size_label: Some("21.3GB".to_string()),
+                description: None,
+                draft: None,
+                capabilities: ModelCapabilities::default(),
+                moe: None,
+            },
+        ];
+
+        let payload = show_payload(&details, Some(&variants));
+        let emitted_variants = payload["variants"].as_array().expect("variants array");
+
+        assert_eq!(payload["ref"], "unsloth/Qwen3.6-35B-A3B-GGUF:BF16");
+        assert_eq!(emitted_variants.len(), 2);
+        assert_eq!(
+            emitted_variants[0]["ref"],
+            "unsloth/Qwen3.6-35B-A3B-GGUF:BF16"
+        );
+        assert_eq!(
+            emitted_variants[1]["ref"],
+            "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M"
+        );
     }
 }

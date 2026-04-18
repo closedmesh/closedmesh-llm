@@ -7,6 +7,7 @@ use super::{build_hf_tokio_api, capabilities, catalog};
 use anyhow::{Context, Result};
 use hf_hub::{ListModelsParams, ModelInfo};
 use regex_lite::Regex;
+use std::collections::HashSet;
 use std::sync::LazyLock;
 use tokio::task::JoinSet;
 use tokio_stream::StreamExt;
@@ -16,6 +17,7 @@ pub struct SearchHit {
     pub repo_id: String,
     pub kind: &'static str,
     pub exact_ref: String,
+    pub variant_count: Option<usize>,
     pub size_label: Option<String>,
     pub downloads: Option<u64>,
     pub likes: Option<u64>,
@@ -197,6 +199,7 @@ async fn build_search_hit(
     }
 
     let candidate = &matching_candidates[0];
+    let variant_count = search_hit_variant_count(filter, &repo_id, &matching_candidates);
     let remote_metadata = capabilities::fetch_remote_hf_metadata_jsons(&repo_id, None).await;
     let catalog = matching_catalog_model_for_huggingface(&repo_id, None, &candidate.file);
     let size_label = match catalog {
@@ -223,6 +226,7 @@ async fn build_search_hit(
         repo_id: repo_id.clone(),
         kind: repo_artifact_kind_label(candidate.kind),
         exact_ref: display_exact_ref(&repo_id, candidate.kind, &candidate.file),
+        variant_count,
         size_label,
         downloads: detail.downloads.or(repo_downloads),
         likes: detail.likes.or(repo_likes),
@@ -415,6 +419,29 @@ fn collect_repo_artifact_candidates(siblings: &[String]) -> Vec<RepoArtifactCand
     gguf
 }
 
+fn gguf_variant_count_from_candidates(repo: &str, candidates: &[RepoArtifactCandidate]) -> usize {
+    candidates
+        .iter()
+        .filter(|candidate| candidate.kind == RepoArtifactKind::Gguf)
+        .filter_map(|candidate| {
+            quant_selector_from_gguf_file(&candidate.file)
+                .map(|_| display_exact_ref(repo, RepoArtifactKind::Gguf, &candidate.file))
+        })
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+fn search_hit_variant_count(
+    filter: SearchArtifactFilter,
+    repo: &str,
+    candidates: &[RepoArtifactCandidate],
+) -> Option<usize> {
+    match filter {
+        SearchArtifactFilter::Gguf => Some(gguf_variant_count_from_candidates(repo, candidates)),
+        SearchArtifactFilter::Mlx => None,
+    }
+}
+
 fn is_split_mlx_weight_file(file: &str) -> bool {
     let Some(rest) = file.strip_prefix("model-") else {
         return false;
@@ -535,6 +562,52 @@ mod tests {
         let candidates = collect_repo_artifact_candidates(&siblings);
         let files: Vec<_> = candidates.into_iter().map(|c| c.file).collect();
         assert_eq!(files, vec!["gemma-4-26B-A4B-it-UD-Q3_K_S.gguf".to_string()]);
+    }
+
+    #[test]
+    fn gguf_variant_count_from_candidates_counts_selectable_variants() {
+        let siblings = vec![
+            "mmproj-BF16.gguf".to_string(),
+            "BF16/Qwen3.6-35B-A3B-BF16-00001-of-00002.gguf".to_string(),
+            "BF16/Qwen3.6-35B-A3B-BF16-00002-of-00002.gguf".to_string(),
+            "Qwen3.6-35B-A3B-Q8_0.gguf".to_string(),
+            "Qwen3.6-35B-A3B-Q4_K_M.gguf".to_string(),
+        ];
+        let candidates = collect_repo_artifact_candidates(&siblings);
+        assert_eq!(
+            gguf_variant_count_from_candidates("unsloth/Qwen3.6-35B-A3B-GGUF", &candidates),
+            3
+        );
+    }
+
+    #[test]
+    fn search_hit_variant_count_only_applies_to_gguf_results() {
+        let gguf_candidates = collect_repo_artifact_candidates(&[
+            "BF16/Qwen3.6-35B-A3B-BF16-00001-of-00002.gguf".to_string(),
+            "BF16/Qwen3.6-35B-A3B-BF16-00002-of-00002.gguf".to_string(),
+            "Qwen3.6-35B-A3B-Q4_K_M.gguf".to_string(),
+        ]);
+        assert_eq!(
+            search_hit_variant_count(
+                SearchArtifactFilter::Gguf,
+                "unsloth/Qwen3.6-35B-A3B-GGUF",
+                &gguf_candidates
+            ),
+            Some(2)
+        );
+
+        let mlx_candidates = collect_repo_artifact_candidates(&[
+            "model.safetensors".to_string(),
+            "model.safetensors.index.json".to_string(),
+        ]);
+        assert_eq!(
+            search_hit_variant_count(
+                SearchArtifactFilter::Mlx,
+                "mlx-community/Foo-4bit",
+                &mlx_candidates
+            ),
+            None
+        );
     }
 
     #[test]

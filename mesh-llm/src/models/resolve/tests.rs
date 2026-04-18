@@ -485,6 +485,39 @@ async fn download_exact_ref_bf16_shorthand_downloads_full_split_model() {
     );
 }
 
+#[tokio::test]
+async fn show_model_variants_accepts_selected_quant_ref() {
+    let fixture = load_gemma_live_fixture();
+    let _siblings_guard = RepoSiblingEntriesOverrideGuard::set(Arc::new({
+        let repo = fixture.repo.clone();
+        let siblings = fixture
+            .siblings
+            .iter()
+            .map(|file| (file.clone(), fixture.size_bytes.get(file).copied()))
+            .collect::<Vec<_>>();
+        move |requested_repo, requested_revision| {
+            if requested_repo == repo && requested_revision == "main" {
+                Some(siblings.clone())
+            } else {
+                None
+            }
+        }
+    }));
+
+    let variants = show_model_variants_with_progress("unsloth/gemma-4-31B-it-GGUF:BF16", |_| {})
+        .await
+        .unwrap()
+        .expect("repo-backed GGUF refs should enumerate variants");
+
+    assert!(!variants.is_empty());
+    assert!(variants
+        .iter()
+        .any(|variant| { variant.exact_ref == "unsloth/gemma-4-31B-it-GGUF:BF16" }));
+    assert!(variants
+        .iter()
+        .any(|variant| { variant.exact_ref == "unsloth/gemma-4-31B-it-GGUF:UD-Q4_K_XL" }));
+}
+
 #[test]
 fn format_huggingface_display_ref_prefers_repo_form_for_mlx() {
     assert_eq!(

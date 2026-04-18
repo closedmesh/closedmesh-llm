@@ -407,36 +407,11 @@ where
 {
     let input = canonicalize_model_ref_input(input).await?;
     let parsed = parse_huggingface_repo_ref(&input).or_else(|| parse_huggingface_repo_url(&input));
-    let Some((repo, revision, selector)) = parsed else {
+    let Some((repo, revision, _selector)) = parsed else {
         return Ok(None);
     };
-    if selector.is_some() {
-        return Ok(None);
-    }
-
-    let api = super::build_hf_tokio_api(false)?;
     let revision_ref = revision.as_deref().unwrap_or("main");
-    let (owner, name) = repo.split_once('/').unwrap_or(("", repo.as_str()));
-    let detail = api
-        .model(owner, name)
-        .info(
-            &RepoInfoParams::builder()
-                .revision(revision_ref.to_string())
-                .build(),
-        )
-        .await
-        .with_context(|| format!("Fetch Hugging Face repo {repo}"))?;
-    let RepoInfo::Model(detail) = detail else {
-        return Ok(Some(Vec::new()));
-    };
-
-    let sibling_entries: Vec<(String, Option<u64>)> = detail
-        .siblings
-        .clone()
-        .unwrap_or_default()
-        .iter()
-        .map(|sibling| (sibling.rfilename.clone(), sibling.size))
-        .collect();
+    let sibling_entries = fetch_repo_sibling_entries(&repo, revision_ref).await?;
     let available_bytes = crate::system::hardware::survey().vram_bytes;
     let variants = collect_show_gguf_variants_from_siblings(&sibling_entries, available_bytes);
     if variants.is_empty() {
@@ -466,7 +441,9 @@ where
         }
         let size_label = match size_bytes {
             Some(bytes) => Some(format_size_bytes(bytes)),
-            None => remote_hf_size_label_with_api(&api, &repo, revision.as_deref(), &file).await,
+            None => {
+                remote_size_label(&huggingface_resolve_url(&repo, revision.as_deref(), &file)).await
+            }
         };
         out.push(ModelDetails {
             display_name: Path::new(&file)
