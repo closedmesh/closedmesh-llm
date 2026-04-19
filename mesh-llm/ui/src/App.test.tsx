@@ -600,18 +600,21 @@ describe("describeRenderedPagesAsText", () => {
           combinedText: string;
           description: string;
           ocrText: string;
+          objects: string[];
         }>
       >()
       .mockResolvedValueOnce({
         combinedText: "First page OCR",
         description: "First page OCR",
         ocrText: "First page OCR",
+        objects: [],
       })
       .mockRejectedValueOnce(new Error("boom"))
       .mockResolvedValueOnce({
         combinedText: "",
         description: "",
         ocrText: "",
+        objects: [],
       });
 
     const text = await describeRenderedPagesAsText(
@@ -647,6 +650,7 @@ describe("describeImageAttachmentForPrompt", () => {
       combinedText: "A cat on a chair",
       description: "A cat on a chair",
       ocrText: "",
+      objects: [],
     });
 
     const result = await describeImageAttachmentForPrompt(
