@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
+    inputs:
+      upstream_sha:
+        description: "Optional llama.cpp upstream SHA to validate instead of origin/master"
+        required: false
+        default: ""
 
 concurrency:
   group: llama-upstream-canary
@@ -32,8 +37,10 @@ jobs:
       - name: Install just
         uses: extractions/setup-just@v2
 
-      - name: Prepare latest llama upstream
-        run: just llama-prepare-latest
+      - name: Prepare requested llama upstream
+        env:
+          UPSTREAM_SHA: ${{ github.event.inputs.upstream_sha || 'latest' }}
+        run: scripts/prepare-llama.sh "$UPSTREAM_SHA"
 
       - name: Capture upstream SHAs
         id: sha
@@ -173,6 +180,7 @@ jobs:
       mesh_binary_target: target/debug/mesh-llm
       cache_key_prefix: llama-canary-
       workflow_cache_file: .github/workflows/llama-upstream-canary.yml
+      runs_on: '"ubuntu-latest"'
 
   update_main_pin:
     needs: [latest_upstream, linux_build, inference_smoke_tests]
