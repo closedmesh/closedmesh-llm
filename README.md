@@ -423,9 +423,40 @@ mesh-llm client --auto --port 9337
 curl -s http://localhost:9337/v1/models | jq '.data[].id'
 ```
 
-### Lemonade
+### External OpenAI-compatible backends (vLLM, TGI, Ollama, Lemonade, etc.)
 
-mesh-llm ships a built-in `lemonade` plugin that registers a local [Lemonade Server](https://lemonade-server.ai) as another OpenAI-compatible backend. For setup and verification steps, see [docs/USAGE.md](docs/USAGE.md#lemonade-integration).
+The `openai-endpoint` plugin routes inference to any server that speaks the OpenAI `/v1/chat/completions` API. The server does all the inference work — mesh-llm just discovers its models and routes requests to it.
+
+Enable the plugin in `~/.mesh-llm/config.toml` with the URL:
+
+```toml
+# vLLM
+[[plugin]]
+name = "openai-endpoint"
+url = "http://gpu-box:8000/v1"
+
+# Ollama
+[[plugin]]
+name = "openai-endpoint"
+url = "http://localhost:11434/v1"
+
+# Lemonade
+[[plugin]]
+name = "openai-endpoint"
+url = "http://localhost:8000/api/v1"
+```
+
+```bash
+mesh-llm serve
+```
+
+The URL can also be set via `MESH_LLM_OPENAI_ENDPOINT_URL` env var (config takes precedence). Default: `http://localhost:8000/v1`. The plugin health-checks the backend by probing `GET /v1/models` — models appear and disappear automatically as the backend starts and stops.
+
+To use an external backend without loading any llama.cpp models:
+
+```bash
+mesh-llm client
+```
 
 If you want the mesh to be discoverable via `--auto`, publish it:
 
