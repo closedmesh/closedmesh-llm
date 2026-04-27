@@ -25,7 +25,7 @@ RUN cd mesh-llm && cargo build --release
 RUN cd mesh-llm && cargo test
 
 # Verify all binaries
-RUN ls -lh mesh-llm/target/release/mesh-llm llama.cpp/build/bin/llama-server llama.cpp/build/bin/rpc-server
-RUN mesh-llm/target/release/mesh-llm --version
-RUN mesh-llm/target/release/mesh-llm --help | head -5
+RUN ls -lh mesh-llm/target/release/closedmesh llama.cpp/build/bin/llama-server llama.cpp/build/bin/rpc-server
+RUN mesh-llm/target/release/closedmesh --version
+RUN mesh-llm/target/release/closedmesh --help | head -5
 RUN llama.cpp/build/bin/llama-server --version

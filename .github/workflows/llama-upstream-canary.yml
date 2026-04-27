@@ -115,7 +115,7 @@ jobs:
           echo "PASS: No forbidden dependencies found"
 
       - name: Build mesh-llm binary (debug)
-        run: cargo build -p mesh-llm --bin mesh-llm
+        run: cargo build -p mesh-llm --bin closedmesh
 
       - name: Unit tests
         run: cargo test --lib --tests
@@ -149,18 +149,18 @@ jobs:
 
       - name: CLI smoke test
         run: |
-          target/debug/mesh-llm --version
-          target/debug/mesh-llm --help | head -5
+          target/debug/closedmesh --version
+          target/debug/closedmesh --help | head -5
 
       - name: Client-auto boot test
-        run: scripts/ci-client-auto-test.sh target/debug/mesh-llm
+        run: scripts/ci-client-auto-test.sh target/debug/closedmesh
 
       - name: Upload Linux inference binaries
         uses: actions/upload-artifact@v6
         with:
           name: llama-canary-linux-inference-binaries
           path: |
-            target/debug/mesh-llm
+            target/debug/closedmesh
             llama.cpp/build/bin/rpc-server
             llama.cpp/build/bin/llama-server
             llama.cpp/build/bin/llama-moe-analyze
@@ -177,7 +177,7 @@ jobs:
     uses: ./.github/workflows/smoke.yml
     with:
       artifact_name: llama-canary-linux-inference-binaries
-      mesh_binary_target: target/debug/mesh-llm
+      mesh_binary_target: target/debug/closedmesh
       cache_key_prefix: llama-canary-
       workflow_cache_file: .github/workflows/llama-upstream-canary.yml
       runs_on: '"ubuntu-latest"'

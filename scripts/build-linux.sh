@@ -369,11 +369,11 @@ if [[ -d "$MESH_DIR" ]]; then
     # Default stays release so local `just build` is unchanged.
     if [[ "${MESH_LLM_BUILD_PROFILE:-release}" == "dev" || "${MESH_LLM_BUILD_PROFILE:-release}" == "debug" ]]; then
         echo "Building mesh-llm (profile: dev, bin only)..."
-        (cd "$REPO_ROOT" && cargo build -p mesh-llm --bin mesh-llm)
-        echo "Mesh binary: target/debug/mesh-llm"
+        (cd "$REPO_ROOT" && cargo build -p mesh-llm --bin closedmesh)
+        echo "Mesh binary: target/debug/closedmesh"
     else
         echo "Building mesh-llm (profile: release)..."
         (cd "$MESH_DIR" && cargo build --release)
-        echo "Mesh binary: target/release/mesh-llm"
+        echo "Mesh binary: target/release/closedmesh"
     fi
 fi

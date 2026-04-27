@@ -144,7 +144,7 @@ local: build download-model
 
 # ── QUIC Mesh ──────────────────────────────────────────────────
 
-mesh_bin := "target/release/mesh-llm"
+mesh_bin := "target/release/closedmesh"
 
 # Start a mesh worker (no llama-server, just rpc-server + mesh)
 
@@ -356,7 +356,7 @@ test port="9337":
 
 # Optional SDK compatibility smoke: 2 mesh nodes + 1 lite client.
 compat-smoke model mmproj="":
-    scripts/ci-compat-smoke.sh "target/release/mesh-llm" "{{ build_dir }}/bin" "{{ model }}" "{{ mmproj }}"
+    scripts/ci-compat-smoke.sh "target/release/closedmesh" "{{ build_dir }}/bin" "{{ model }}" "{{ mmproj }}"
 
 # Direct splitter smoke for the MoE families we actively use.
 moe-split-smoke families="all":

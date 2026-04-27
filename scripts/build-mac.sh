@@ -87,5 +87,5 @@ if [[ -d "$MESH_DIR" ]]; then
         )
     fi
 
-    echo "Mesh binary: target/release/mesh-llm"
+    echo "Mesh binary: target/release/closedmesh"
 fi

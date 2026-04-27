@@ -39,13 +39,13 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked -p mesh-llm && \
-    cp target/release/mesh-llm /usr/local/bin/mesh-llm
+    cp target/release/closedmesh /usr/local/bin/closedmesh
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates libgomp1 libdbus-1-3 \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /usr/local/bin/mesh-llm /usr/local/bin/mesh-llm
+COPY --from=builder /usr/local/bin/closedmesh /usr/local/bin/closedmesh
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 ENV APP_MODE=console

@@ -483,32 +483,19 @@ fn windows_asset_name(flavor: &str, version_prefix: &str) -> String {
 }
 
 fn check_docs_and_workflow_invariants(repo_root: &Path) -> DynResult<()> {
-    let readme = fs::read_to_string(repo_root.join("README.md"))?;
     let contributing = fs::read_to_string(repo_root.join("CONTRIBUTING.md"))?;
     let release = fs::read_to_string(repo_root.join("RELEASE.md"))?;
     let justfile = fs::read_to_string(repo_root.join("Justfile"))?;
     let release_workflow = fs::read_to_string(repo_root.join(".github/workflows/release.yml"))?;
     let ci_workflow = fs::read_to_string(repo_root.join(".github/workflows/ci.yml"))?;
 
-    ensure_contains(
-        &readme,
-        "mesh-llm-aarch64-unknown-linux-gnu.tar.gz",
-        "README Linux ARM64 asset note",
-    )?;
+    // README references the upstream `mesh-llm-*.tar.gz` bundle names indirectly
+    // through `RELEASE.md` and `install.sh`. The README itself was rewritten
+    // for the ClosedMesh fork and no longer carries asset filenames inline.
     ensure_contains(
         &release,
         "mesh-llm-aarch64-unknown-linux-gnu.tar.gz",
         "RELEASE Linux ARM64 asset note",
-    )?;
-    ensure_contains(
-        &readme,
-        "Windows publish jobs are currently commented out in `.github/workflows/release.yml`",
-        "README Windows publish note",
-    )?;
-    ensure_contains(
-        &release,
-        "Windows release bundles are not expected from the current GitHub Actions workflow while the publish block stays commented out",
-        "RELEASE Windows publish note",
     )?;
     ensure_contains(
         &release_workflow,
@@ -520,15 +507,14 @@ fn check_docs_and_workflow_invariants(repo_root: &Path) -> DynResult<()> {
         "name: release-linux-arm64",
         "release workflow ARM64 artifact",
     )?;
+    // Windows release publishing is active in the ClosedMesh fork
+    // (`build_windows:` job at top level of release.yml). The previous
+    // "publish block stays commented out" invariants are intentionally
+    // removed.
     ensure_contains(
         &release_workflow,
-        "# build_windows:",
-        "release workflow commented Windows build",
-    )?;
-    ensure_contains(
-        &release_workflow,
-        "# - build_windows  # disabled until llama.cpp CUDA fix",
-        "release workflow commented Windows publish need",
+        "build_windows:",
+        "release workflow Windows build job",
     )?;
     ensure_contains(
         &justfile,

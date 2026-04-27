@@ -10,7 +10,7 @@ set -euo pipefail
 # that keeps the scaffold constant while varying the first user turn.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MESH_BIN="${MESH_BIN:-$ROOT/target/release/mesh-llm}"
+MESH_BIN="${MESH_BIN:-$ROOT/target/release/closedmesh}"
 BIN_DIR="${BIN_DIR:-$ROOT/.deps/llama.cpp/build/bin}"
 HF_CACHE_DIR="${HF_HUB_CACHE:-${HF_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/huggingface}/hub}"
 MODEL_PATH="${MODEL_PATH:-$HF_CACHE_DIR/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf}"

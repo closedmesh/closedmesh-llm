@@ -279,7 +279,7 @@ jobs:
         with:
           name: ci-linux-release-inference-binaries
           path: |
-            target/release/mesh-llm
+            target/release/closedmesh
             llama.cpp/build/bin/rpc-server
             llama.cpp/build/bin/llama-server
             llama.cpp/build/bin/llama-moe-analyze
@@ -297,7 +297,7 @@ jobs:
     uses: ./.github/workflows/smoke.yml
     with:
       artifact_name: ci-linux-release-inference-binaries
-      mesh_binary_target: target/release/mesh-llm
+      mesh_binary_target: target/release/closedmesh
       cache_key_prefix: 'release-'
       workflow_cache_file: .github/workflows/release.yml
 

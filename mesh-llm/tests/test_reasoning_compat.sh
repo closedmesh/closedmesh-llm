@@ -27,8 +27,8 @@ total_fail() { FAIL=$((FAIL + 1)); echo "  ❌ $1: $2"; }
 if [ -z "$MODEL" ] || [ ! -f "$MODEL" ]; then
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-    MESH_BIN="$WORKSPACE_ROOT/target/release/mesh-llm"
-    [ -x "$MESH_BIN" ] || MESH_BIN="mesh-llm"
+    MESH_BIN="$WORKSPACE_ROOT/target/release/closedmesh"
+    [ -x "$MESH_BIN" ] || MESH_BIN="closedmesh"
     echo "Downloading $MODEL_STEM via mesh-llm..."
     set +e
     MODEL=$("$MESH_BIN" models download "$MODEL_STEM" | grep "\.gguf$" | head -1 | xargs)

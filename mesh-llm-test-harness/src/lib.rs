@@ -62,7 +62,7 @@ impl Drop for FixtureMesh {
 }
 
 fn find_mesh_llm_binary() -> Result<PathBuf, FixtureError> {
-    // Check $MESH_LLM_BIN env var first, then target/release/mesh-llm
+    // Check $MESH_LLM_BIN env var first, then target/release/closedmesh
     if let Ok(bin) = std::env::var("MESH_LLM_BIN") {
         let path = PathBuf::from(bin);
         if path.exists() {
@@ -72,7 +72,7 @@ fn find_mesh_llm_binary() -> Result<PathBuf, FixtureError> {
     // Walk up from current dir to find workspace root
     let mut dir = std::env::current_dir().unwrap_or_default();
     for _ in 0..5 {
-        let candidate = dir.join("target/release/mesh-llm");
+        let candidate = dir.join("target/release/closedmesh");
         if candidate.exists() {
             return Ok(candidate);
         }
@@ -81,7 +81,7 @@ fn find_mesh_llm_binary() -> Result<PathBuf, FixtureError> {
         }
     }
     Err(FixtureError::BinaryNotFound(PathBuf::from(
-        "target/release/mesh-llm",
+        "target/release/closedmesh",
     )))
 }
 

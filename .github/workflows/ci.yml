@@ -167,7 +167,7 @@ jobs:
       # inside llama-server C++, so debug vs release binary perf is
       # negligible for smoke tests. Integration steps below use target/debug.
       - name: Build mesh-llm binary (debug)
-        run: cargo build -p mesh-llm --bin mesh-llm
+        run: cargo build -p mesh-llm --bin closedmesh
 
       - name: Unit tests
         run: cargo test --lib --tests
@@ -207,18 +207,18 @@ jobs:
 
       - name: CLI smoke test
         run: |
-          target/debug/mesh-llm --version
-          target/debug/mesh-llm --help | head -5
+          target/debug/closedmesh --version
+          target/debug/closedmesh --help | head -5
 
       - name: Client-auto boot test
-        run: scripts/ci-client-auto-test.sh target/debug/mesh-llm
+        run: scripts/ci-client-auto-test.sh target/debug/closedmesh
 
       - name: Upload Linux inference binaries
         uses: actions/upload-artifact@v6
         with:
           name: ci-linux-inference-binaries
           path: |
-            target/debug/mesh-llm
+            target/debug/closedmesh
             llama.cpp/build/bin/rpc-server
             llama.cpp/build/bin/llama-server
             llama.cpp/build/bin/llama-moe-analyze
@@ -235,7 +235,7 @@ jobs:
     uses: ./.github/workflows/smoke.yml
     with:
       artifact_name: ci-linux-inference-binaries
-      mesh_binary_target: target/debug/mesh-llm
+      mesh_binary_target: target/debug/closedmesh
       cache_key_prefix: ''
       workflow_cache_file: .github/workflows/ci.yml
 
@@ -262,10 +262,10 @@ jobs:
       - name: Stage binaries for native SDK smoke
         run: |
           mkdir -p target/debug llama.cpp/build/bin
-          cp ci-artifacts/linux/target/debug/mesh-llm target/debug/mesh-llm
+          cp ci-artifacts/linux/target/debug/closedmesh target/debug/closedmesh
           cp ci-artifacts/linux/llama.cpp/build/bin/rpc-server llama.cpp/build/bin/rpc-server
           cp ci-artifacts/linux/llama.cpp/build/bin/llama-server llama.cpp/build/bin/llama-server
-          chmod +x target/debug/mesh-llm llama.cpp/build/bin/rpc-server llama.cpp/build/bin/llama-server
+          chmod +x target/debug/closedmesh llama.cpp/build/bin/rpc-server llama.cpp/build/bin/llama-server
 
       - name: Cache integration model
         id: cache-model-native-sdk
@@ -284,7 +284,7 @@ jobs:
       - name: Native SDK smoke test
         run: |
           scripts/ci-native-sdk-smoke.sh \
-            target/debug/mesh-llm \
+            target/debug/closedmesh \
             llama.cpp/build/bin \
             ~/.models/$MODEL_FILE
 
@@ -316,10 +316,10 @@ jobs:
       - name: Stage binaries for Kotlin SDK smoke
         run: |
           mkdir -p target/debug llama.cpp/build/bin
-          cp ci-artifacts/linux/target/debug/mesh-llm target/debug/mesh-llm
+          cp ci-artifacts/linux/target/debug/closedmesh target/debug/closedmesh
           cp ci-artifacts/linux/llama.cpp/build/bin/rpc-server llama.cpp/build/bin/rpc-server
           cp ci-artifacts/linux/llama.cpp/build/bin/llama-server llama.cpp/build/bin/llama-server
-          chmod +x target/debug/mesh-llm llama.cpp/build/bin/rpc-server llama.cpp/build/bin/llama-server
+          chmod +x target/debug/closedmesh llama.cpp/build/bin/rpc-server llama.cpp/build/bin/llama-server
 
       - name: Cache integration model
         id: cache-model-kotlin-sdk
@@ -338,7 +338,7 @@ jobs:
       - name: Kotlin SDK smoke test
         run: |
           scripts/ci-kotlin-sdk-smoke.sh \
-            target/debug/mesh-llm \
+            target/debug/closedmesh \
             llama.cpp/build/bin \
             ~/.models/$MODEL_FILE
 
@@ -359,7 +359,7 @@ jobs:
           prefix-key: ${{ env.CACHE_NAMESPACE }}-rust-${{ hashFiles('.github/cache-version.txt') }}
 
       - name: Build mesh-llm binary (debug)
-        run: cargo build -p mesh-llm --bin mesh-llm
+        run: cargo build -p mesh-llm --bin closedmesh
 
       - name: Prepare patched llama.cpp
         run: |
@@ -400,7 +400,7 @@ jobs:
       - name: Swift SDK smoke test
         run: |
           scripts/ci-swift-sdk-smoke.sh \
-            target/debug/mesh-llm \
+            target/debug/closedmesh \
             llama.cpp/build/bin \
             ~/.models/$MODEL_FILE
 
@@ -465,7 +465,7 @@ jobs:
       # See linux job for rationale on building in dev/debug, not release.
       - name: Build mesh-llm binary (debug)
         if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ui == 'true' }}
-        run: cargo build -p mesh-llm --bin mesh-llm
+        run: cargo build -p mesh-llm --bin closedmesh
 
       - name: Unit tests
         if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ui == 'true' }}
@@ -524,7 +524,7 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ui == 'true' }}
         run: |
           scripts/ci-smoke-test.sh \
-            target/debug/mesh-llm \
+            target/debug/closedmesh \
             llama.cpp/build/bin \
             ~/.models/$MODEL_FILE
 
@@ -532,7 +532,7 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ui == 'true' }}
         run: |
           scripts/ci-split-test.sh \
-            target/debug/mesh-llm \
+            target/debug/closedmesh \
             llama.cpp/build/bin \
             ~/.models/$MODEL_FILE
 
@@ -570,7 +570,7 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ui == 'true' }}
         run: |
           scripts/ci-moe-mesh-test.sh \
-            target/debug/mesh-llm \
+            target/debug/closedmesh \
             llama.cpp/build/bin \
             ~/.models/$MOE_MODEL_FILE
 
@@ -582,12 +582,12 @@ jobs:
       - name: CLI smoke test
         if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ui == 'true' }}
         run: |
-          target/debug/mesh-llm --version
-          target/debug/mesh-llm --help | head -5
+          target/debug/closedmesh --version
+          target/debug/closedmesh --help | head -5
 
       - name: Client-auto boot test
         if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ui == 'true' }}
-        run: scripts/ci-client-auto-test.sh target/debug/mesh-llm
+        run: scripts/ci-client-auto-test.sh target/debug/closedmesh
 
       - name: Build Swift benchmark binary
         if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.benchmarks == 'true' }}
@@ -781,15 +781,15 @@ jobs:
             exit 1
           fi
           ls -lh llama.cpp/build/bin/ | head -20
-          cargo build -p mesh-llm --bin mesh-llm
-          ls -lh target/debug/mesh-llm
+          cargo build -p mesh-llm --bin closedmesh
+          ls -lh target/debug/closedmesh
 
       - name: CLI smoke test
         if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' }}
         shell: bash
         run: |
-          target/debug/mesh-llm --version
-          target/debug/mesh-llm --help | head -5
+          target/debug/closedmesh --version
+          target/debug/closedmesh --help | head -5
 
       - name: Build CUDA benchmark binary
         if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.benchmarks == 'true' }}
@@ -919,15 +919,15 @@ jobs:
             exit 1
           fi
           ls -lh llama.cpp/build/bin/ | head -20
-          cargo build --release --locked -p mesh-llm --bin mesh-llm
-          ls -lh target/release/mesh-llm
+          cargo build --release --locked -p mesh-llm --bin closedmesh
+          ls -lh target/release/closedmesh
 
       - name: CLI smoke test
         if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' }}
         shell: bash
         run: |
-          target/release/mesh-llm --version
-          target/release/mesh-llm --help | head -5
+          target/release/closedmesh --version
+          target/release/closedmesh --help | head -5
 
       - name: Build ROCm benchmark binary
         if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.benchmarks == 'true' }}
@@ -1048,8 +1048,8 @@ jobs:
       - name: CLI smoke test
         shell: bash
         run: |
-          target/release/mesh-llm --version
-          target/release/mesh-llm --help | head -5
+          target/release/closedmesh --version
+          target/release/closedmesh --help | head -5
 
       - name: Show sccache stats
         if: always()

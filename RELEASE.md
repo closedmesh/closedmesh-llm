@@ -33,7 +33,7 @@ just release-build-vulkan-windows
 ```bash
 otool -L .deps/llama.cpp/build/bin/llama-server | grep -v /System | grep -v /usr/lib
 otool -L .deps/llama.cpp/build/bin/rpc-server | grep -v /System | grep -v /usr/lib
-otool -L target/release/mesh-llm | grep -v /System | grep -v /usr/lib
+otool -L target/release/closedmesh | grep -v /System | grep -v /usr/lib
 ```
 
 Each should only show the binary name — no `/opt/homebrew/` paths.

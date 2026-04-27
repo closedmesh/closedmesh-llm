@@ -27,7 +27,7 @@ fi
 case "$APP_MODE" in
   console)
     # shellcheck disable=SC2086
-    exec mesh-llm --client --auto --port 9337 --console 3131 --listen-all $HEADLESS_FLAG
+    exec closedmesh --client --auto --port 9337 --console 3131 --listen-all $HEADLESS_FLAG
     ;;
   worker)
     BIN_DIR=/usr/local/lib/mesh-llm/bin
@@ -40,9 +40,9 @@ case "$APP_MODE" in
       exit 1
     fi
     # shellcheck disable=SC2086
-    exec mesh-llm --auto --port 9337 --console 3131 --bin-dir "$BIN_DIR" --listen-all $HEADLESS_FLAG
+    exec closedmesh --auto --port 9337 --console 3131 --bin-dir "$BIN_DIR" --listen-all $HEADLESS_FLAG
     ;;
   *)
-    exec mesh-llm "$@"
+    exec closedmesh "$@"
     ;;
 esac

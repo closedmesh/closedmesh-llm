@@ -96,16 +96,16 @@ just bundle
 
 Use this two-terminal flow for UI development.
 
-Terminal A (run `mesh-llm` yourself):
+Terminal A (run `closedmesh` yourself):
 
 ```bash
-mesh-llm --port 9337 --console 3131
+closedmesh --port 9337 --console 3131
 ```
 
-If `mesh-llm` is not on your `PATH`:
+If `closedmesh` is not on your `PATH`:
 
 ```bash
-./target/release/mesh-llm --port 9337 --console 3131
+./target/release/closedmesh --port 9337 --console 3131
 ```
 
 Terminal B (run Vite with HMR):

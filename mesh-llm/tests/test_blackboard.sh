@@ -4,9 +4,9 @@
 # then cleans up. No external mesh/Nostr involvement.
 set -e
 
-BINARY="$(dirname "$0")/../target/release/mesh-llm"
+BINARY="$(dirname "$0")/../target/release/closedmesh"
 if [ ! -f "$BINARY" ]; then
-    echo "ERROR: Build first — mesh-llm binary not found at $BINARY"
+    echo "ERROR: Build first — closedmesh binary not found at $BINARY"
     exit 1
 fi
 BINARY="$(cd "$(dirname "$BINARY")" && pwd)/$(basename "$BINARY")"

@@ -80,5 +80,5 @@ if [[ -d "$MESH_DIR" ]]; then
     fi
     echo "Building mesh-llm..."
     (cd "$REPO_ROOT" && cargo build --release --locked -p mesh-llm)
-    echo "Mesh binary: target/release/mesh-llm"
+    echo "Mesh binary: target/release/closedmesh"
 fi
