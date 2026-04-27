@@ -51,7 +51,7 @@ struct SecretPayload {
     encryption_secret_key: String,
 }
 
-/// Return the default keystore path: `~/.mesh-llm/owner-keystore.json`.
+/// Return the default keystore path: `~/.closedmesh/owner-keystore.json`.
 pub fn default_keystore_path() -> Result<PathBuf, CryptoError> {
     let home = dirs::home_dir().ok_or_else(|| {
         CryptoError::Io(std::io::Error::new(
@@ -59,7 +59,7 @@ pub fn default_keystore_path() -> Result<PathBuf, CryptoError> {
             "cannot determine home directory",
         ))
     })?;
-    Ok(home.join(".mesh-llm").join("owner-keystore.json"))
+    Ok(home.join(".closedmesh").join("owner-keystore.json"))
 }
 
 /// Check if a keystore file exists at the given path.

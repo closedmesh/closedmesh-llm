@@ -697,6 +697,10 @@ pub(crate) struct PeerAnnouncement {
     pub(crate) served_model_descriptors: Vec<ServedModelDescriptor>,
     pub(crate) served_model_runtime: Vec<ModelRuntimeDescriptor>,
     pub(crate) owner_attestation: Option<SignedNodeOwnership>,
+    /// Normalized capability advertisement used for capability-aware routing.
+    /// Older peers that don't set this get back-filled from `gpu_*` / `hardware`
+    /// when they're upgraded to a `PeerInfo`.
+    pub(crate) capability: Option<NodeCapability>,
 }
 
 #[derive(Debug, Clone)]
@@ -752,6 +756,9 @@ pub struct PeerInfo {
     pub served_model_runtime: Vec<ModelRuntimeDescriptor>,
     pub owner_attestation: Option<SignedNodeOwnership>,
     pub owner_summary: OwnershipSummary,
+    /// Normalized capability for routing. Always populated — back-filled from
+    /// the legacy GPU fields when the announcement didn't include it.
+    pub capability: NodeCapability,
 }
 
 #[derive(Debug)]
@@ -808,6 +815,14 @@ impl PeerInfo {
             served_model_runtime: ann.served_model_runtime.clone(),
             owner_attestation: ann.owner_attestation.clone(),
             owner_summary,
+            capability: ann.capability.clone().unwrap_or_else(|| {
+                capability::backfill_from_legacy(
+                    ann.gpu_name.as_deref(),
+                    ann.gpu_vram.as_deref(),
+                    ann.is_soc,
+                    &ann.serving_models,
+                )
+            }),
         }
     }
 
@@ -1264,6 +1279,40 @@ impl Drop for InflightRequestGuard {
 }
 
 impl Node {
+    /// Synthesize this node's capability advertisement for gossip.
+    ///
+    /// Pulls VRAM / GPU vendor / SoC hints from the same fields populated at
+    /// startup, picks a backend from the build target, and includes the list
+    /// of models this node currently intends to serve. Cheap — no I/O.
+    pub async fn local_node_capability(&self) -> Option<NodeCapability> {
+        // Suppress capability when the host inventory is intentionally hidden.
+        if !self.enumerate_host
+            && self.gpu_name.is_none()
+            && self.gpu_vram.is_none()
+            && self.is_soc.is_none()
+        {
+            return None;
+        }
+        let serving = self.serving_models.lock().await.clone();
+        Some(detect_local_node_capability(
+            self.gpu_name.as_deref(),
+            self.gpu_vram.as_deref(),
+            self.is_soc,
+            &serving,
+            None,
+        ))
+    }
+
+    /// Resolved acceleration backend for this node, used by the pipeline-parallel
+    /// host election to keep all participants on the same backend in v1.
+    /// See `closedmesh-llm/ROADMAP.md` "Mixed-backend pipeline-parallel".
+    pub async fn local_backend(&self) -> Backend {
+        self.local_node_capability()
+            .await
+            .map(|c| c.backend)
+            .unwrap_or(Backend::Cpu)
+    }
+
     pub fn begin_inflight_request(&self) -> InflightRequestGuard {
         self.local_request_metrics.record_request_accepted();
         self.inflight_requests
@@ -4124,7 +4173,7 @@ async fn send_push_error(send: &mut iroh::endpoint::SendStream, msg: &str) -> an
 
 /// Generate a mesh ID for a new mesh.
 /// Named meshes: `sha256("mesh-llm:" + name + ":" + nostr_pubkey)` — deterministic, unique per creator.
-/// Unnamed meshes: random UUID, persisted to `~/.mesh-llm/mesh-id`.
+/// Unnamed meshes: random UUID, persisted to `~/.closedmesh/mesh-id`.
 pub fn generate_mesh_id(name: Option<&str>, nostr_pubkey: Option<&str>) -> String {
     if let Some(name) = name {
         use std::hash::{Hash, Hasher};
@@ -4161,7 +4210,7 @@ pub fn generate_mesh_id(name: Option<&str>, nostr_pubkey: Option<&str>) -> Strin
 fn mesh_id_path() -> std::path::PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".mesh-llm")
+        .join(".closedmesh")
         .join("mesh-id")
 }
 
@@ -4169,7 +4218,7 @@ fn mesh_id_path() -> std::path::PathBuf {
 pub fn save_last_mesh_id(mesh_id: &str) {
     let path = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".mesh-llm")
+        .join(".closedmesh")
         .join("last-mesh");
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -4181,7 +4230,7 @@ pub fn save_last_mesh_id(mesh_id: &str) {
 pub fn load_last_mesh_id() -> Option<String> {
     let path = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".mesh-llm")
+        .join(".closedmesh")
         .join("last-mesh");
     std::fs::read_to_string(&path)
         .ok()
@@ -4196,7 +4245,7 @@ pub fn load_last_mesh_id() -> Option<String> {
 fn was_public_path() -> std::path::PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".mesh-llm")
+        .join(".closedmesh")
         .join("was-public")
 }
 
@@ -4220,7 +4269,7 @@ pub fn was_previously_public() -> bool {
 /// public → private to avoid reusing a publicly-known identity in a private mesh.
 pub fn clear_public_identity() {
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    let dir = home.join(".mesh-llm");
+    let dir = home.join(".closedmesh");
     let mut ok = true;
     for name in &["key", "nostr.nsec", "mesh-id", "last-mesh"] {
         let p = dir.join(name);
@@ -4243,7 +4292,7 @@ pub fn clear_public_identity() {
     }
 }
 
-/// Load secret key from ~/.mesh-llm/key, or create a new one and save it.
+/// Load secret key from ~/.closedmesh/key, or create a new one and save it.
 async fn load_or_create_key() -> Result<SecretKey> {
     let key_path = default_node_key_path()?;
     let dir = key_path
@@ -4272,7 +4321,7 @@ async fn load_or_create_key() -> Result<SecretKey> {
 pub fn default_node_key_path() -> Result<std::path::PathBuf> {
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
-    Ok(home.join(".mesh-llm").join("key"))
+    Ok(home.join(".closedmesh").join("key"))
 }
 
 pub fn load_node_key_from_path(path: &std::path::Path) -> Result<SecretKey> {
@@ -4342,8 +4391,15 @@ fn ensure_private_node_key_file(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+mod capability;
 mod gossip;
 mod heartbeat;
+#[allow(unused_imports)]
+pub use capability::{
+    backfill_from_legacy as backfill_capability_from_legacy,
+    detect_local_capability as detect_local_node_capability, Backend, CapabilityRequirements,
+    ComputeClass, GpuVendor, NodeCapability,
+};
 pub use gossip::backfill_legacy_descriptors;
 #[allow(unused_imports)]
 use gossip::{apply_transitive_ann, peer_meaningfully_changed};

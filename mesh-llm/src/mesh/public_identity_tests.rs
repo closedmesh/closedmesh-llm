@@ -2,11 +2,11 @@ use super::*;
 use std::fs;
 
 /// Test that mark_was_public / was_previously_public / clear_public_identity
-/// work correctly.  Uses the real ~/.mesh-llm/ directory (same approach as
+/// work correctly.  Uses the real ~/.closedmesh/ directory (same approach as
 /// the rotate_keys tests) and restores originals afterward.
 #[test]
 fn public_to_private_transition_clears_identity() {
-    let dir = dirs::home_dir().unwrap().join(".mesh-llm");
+    let dir = dirs::home_dir().unwrap().join(".closedmesh");
     fs::create_dir_all(&dir).ok();
 
     // Files we may touch:

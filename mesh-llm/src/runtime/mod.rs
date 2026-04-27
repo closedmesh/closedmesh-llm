@@ -824,6 +824,13 @@ pub(crate) async fn run() -> Result<()> {
         initial_console_session_mode(normalized_args.explicit_surface),
     );
 
+    if cli.private_only {
+        let _ = emit_event(OutputEvent::Info {
+            message: "private-only mode: Nostr publish and public-mesh discovery are disabled for this process".to_string(),
+            context: Some("private-only".to_string()),
+        });
+    }
+
     if let Some(warning) = crate::cli::legacy_runtime_surface_warning(
         &cli,
         &normalized_args.original,
@@ -1143,7 +1150,7 @@ pub(crate) async fn run() -> Result<()> {
         let config_path = plugin::config_path(cli.config.as_deref()).unwrap_or_else(|_| {
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("~"))
-                .join(".mesh-llm")
+                .join(".closedmesh")
                 .join("config.toml")
         });
         let _ = emit_event(OutputEvent::Warning {

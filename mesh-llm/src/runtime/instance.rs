@@ -1,7 +1,7 @@
 //! Per-instance runtime directory management with scoped child-process cleanup.
 //!
 //! Each non-client mesh-llm invocation acquires an `InstanceRuntime` under
-//! `~/.mesh-llm/runtime/{pid}/` (overridable via env vars). The directory
+//! `~/.closedmesh/runtime/{pid}/` (overridable via env vars). The directory
 //! holds an advisory `flock(2)` lock for the instance's lifetime, plus
 //! pidfiles for every child process that mesh-llm spawns. On startup,
 //! other mesh-llm instances scan the root for runtime dirs whose locks
@@ -17,9 +17,9 @@
 //! - `logs/` — stdout/stderr logs for each child (`llama-server-{port}.log`, `rpc-server-{port}.log`)
 //!
 //! **FORBIDDEN** under `runtime_dir/`:
-//! - Application state, configuration, or catalog caches (live elsewhere under `~/.mesh-llm/`)
+//! - Application state, configuration, or catalog caches (live elsewhere under `~/.closedmesh/`)
 //! - Unix domain sockets (out of scope — use the API port)
-//! - Downloaded model files (live under `~/.mesh-llm/models/`)
+//! - Downloaded model files (live under `~/.closedmesh/models/`)
 //! - Any new file type not explicitly listed above — update this list first
 //!
 //! # Runtime root resolution
@@ -47,7 +47,7 @@
 //!
 //! - **NFS-mounted `$HOME`**: advisory `flock` is unreliable on NFS. Override
 //!   `MESH_LLM_RUNTIME_ROOT` to a local path in NFS environments.
-//! - **Symlinked `~/.mesh-llm`**: two mesh-llm instances started via different
+//! - **Symlinked `~/.closedmesh`**: two mesh-llm instances started via different
 //!   symlink paths to the same physical directory will still see each other
 //!   correctly via `flock`, but may appear as "different" dirs when listed.
 //! - **Windows**: orphan detection is best-effort. `flock` is a no-op.
@@ -247,7 +247,7 @@ fn runtime_root_with_home(home: Option<PathBuf>) -> Result<PathBuf> {
     // 3. Platform home directory. On Windows this can be available even when
     // HOME is unset in the launching shell.
     if let Some(home) = home {
-        return Ok(home.join(".mesh-llm").join("runtime"));
+        return Ok(home.join(".closedmesh").join("runtime"));
     }
 
     // 4. Nothing usable - fail fast with a clear message.
@@ -1648,7 +1648,7 @@ mod tests {
         let _g_home = EnvGuard::save_and_set("HOME", dir.path().to_str().unwrap());
 
         let root = runtime_root().expect("runtime_root should succeed with HOME");
-        assert_eq!(root, dir.path().join(".mesh-llm").join("runtime"));
+        assert_eq!(root, dir.path().join(".closedmesh").join("runtime"));
     }
 
     #[cfg(windows)]
@@ -1661,7 +1661,7 @@ mod tests {
 
         let home = dirs::home_dir().expect("Windows profile directory should be available");
         let root = runtime_root().expect("runtime_root should succeed without HOME on Windows");
-        assert_eq!(root, home.join(".mesh-llm").join("runtime"));
+        assert_eq!(root, home.join(".closedmesh").join("runtime"));
     }
 
     #[test]

@@ -2322,6 +2322,31 @@ async fn route_attempt_for_target(
     }
 }
 
+/// Derive [`mesh::CapabilityRequirements`] for `model` from the local node's
+/// announced model catalog. Returns `None` when the node has no recorded size
+/// for that model (e.g. the model lives on a remote peer the local node
+/// hasn't pulled metadata for) — the caller treats `None` as "trust the
+/// peer's self-advertisement, no defensive filter".
+async fn local_capability_requirement(
+    node: &mesh::Node,
+    model: &str,
+) -> Option<mesh::CapabilityRequirements> {
+    let local_id = node.id();
+    for p in node.peers().await {
+        if p.id != local_id {
+            continue;
+        }
+        if let Some(size_bytes) = p.available_model_sizes.get(model) {
+            if *size_bytes == 0 {
+                return None;
+            }
+            let size_gb = (*size_bytes / (1024 * 1024 * 1024)).max(1);
+            return Some(mesh::CapabilityRequirements::for_model_size_gb(size_gb));
+        }
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn route_model_request(
     node: mesh::Node,
@@ -2342,7 +2367,47 @@ pub async fn route_model_request(
             0,
             crate::network::metrics::RequestOutcome::Unavailable,
         );
-        return false;
+        // Distinguish "no host serves this model" from "hosts exist but none
+        // are capability-matched". We rederive the capability requirements
+        // from the local model catalog (`available_model_sizes`); if we have
+        // a size hint and at least one advertising host fails it, the chat UI
+        // gets a `no_capable_node` reason it can render distinctly from a
+        // generic "model unavailable" 503.
+        let req_for_model = local_capability_requirement(&node, model).await;
+        let mut had_any_advertisers = false;
+        let mut had_capable_advertisers = false;
+        for p in node.peers().await {
+            if !matches!(p.role, mesh::NodeRole::Host { .. }) {
+                continue;
+            }
+            if !p.routable_models().iter().any(|m| m == model) {
+                continue;
+            }
+            had_any_advertisers = true;
+            match req_for_model.as_ref() {
+                Some(req) if !p.capability.matches(req) => {}
+                _ => had_capable_advertisers = true,
+            }
+        }
+        if had_any_advertisers && !had_capable_advertisers && req_for_model.is_some() {
+            let _ = send_503_structured(
+                tcp_stream,
+                &format!(
+                    "no node in the mesh has the capability to serve model '{model}' \
+                     (insufficient VRAM/backend on every advertising peer)"
+                ),
+                "no_capable_node",
+            )
+            .await;
+        } else {
+            let _ = send_503_structured(
+                tcp_stream,
+                &format!("no host is currently serving model '{model}'"),
+                "no_host_for_model",
+            )
+            .await;
+        }
+        return true;
     }
 
     let selection = crate::network::affinity::select_model_target_from_candidates(
@@ -3064,11 +3129,29 @@ pub async fn send_error(mut stream: TcpStream, code: u16, msg: &str) -> std::io:
 
 pub async fn send_503(stream: TcpStream, reason: &str) -> std::io::Result<()> {
     tracing::warn!("503 → client: {reason}");
-    send_503_inner(stream, reason).await
+    send_503_inner(stream, reason, None).await
 }
 
-async fn send_503_inner(mut stream: TcpStream, reason: &str) -> std::io::Result<()> {
-    let body = serde_json::json!({"error": reason}).to_string();
+/// Structured 503 with a stable `reason_code` field the chat UI can branch on
+/// (e.g. `no_capable_node`) without parsing the human-readable error message.
+pub async fn send_503_structured(
+    stream: TcpStream,
+    reason: &str,
+    reason_code: &str,
+) -> std::io::Result<()> {
+    tracing::warn!("503 ({reason_code}) → client: {reason}");
+    send_503_inner(stream, reason, Some(reason_code)).await
+}
+
+async fn send_503_inner(
+    mut stream: TcpStream,
+    reason: &str,
+    reason_code: Option<&str>,
+) -> std::io::Result<()> {
+    let body = match reason_code {
+        Some(code) => serde_json::json!({ "error": reason, "reason_code": code }).to_string(),
+        None => serde_json::json!({ "error": reason }).to_string(),
+    };
     let resp = format!(
         "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
         body.len(), body
@@ -3792,6 +3875,87 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 429 Too Many Requests\r\n"));
         assert!(response.contains("Retry-After: 5\r\n"));
         assert!(response.contains("model not available"));
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_send_503_structured_emits_reason_code_field() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            super::send_503_structured(
+                stream,
+                "no node has the VRAM to serve Llama-3-70B",
+                "no_capable_node",
+            )
+            .await
+            .unwrap();
+        });
+
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut buf = vec![0u8; 4096];
+        let mut total = 0;
+        loop {
+            let n = client.read(&mut buf[total..]).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            total += n;
+        }
+        let response = String::from_utf8_lossy(&buf[..total]);
+
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+        assert!(
+            response.contains("\"reason_code\":\"no_capable_node\""),
+            "expected structured reason_code; got: {response}"
+        );
+        assert!(
+            response.contains("\"error\":\"no node has the VRAM to serve Llama-3-70B\""),
+            "expected human-readable error in body; got: {response}"
+        );
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_send_503_unstructured_omits_reason_code_field() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            super::send_503(stream, "transient routing failure")
+                .await
+                .unwrap();
+        });
+
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut buf = vec![0u8; 4096];
+        let mut total = 0;
+        loop {
+            let n = client.read(&mut buf[total..]).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            total += n;
+        }
+        let response = String::from_utf8_lossy(&buf[..total]);
+
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+        assert!(
+            !response.contains("\"reason_code\""),
+            "plain send_503 must not emit a reason_code; got: {response}"
+        );
+        assert!(response.contains("\"error\":\"transient routing failure\""));
 
         server.await.unwrap();
     }

@@ -139,7 +139,7 @@ fn mesh_dir() -> Result<PathBuf, CryptoError> {
             "cannot determine home directory",
         ))
     })?;
-    Ok(home.join(".mesh-llm"))
+    Ok(home.join(".closedmesh"))
 }
 
 pub fn default_node_ownership_path() -> Result<PathBuf, CryptoError> {

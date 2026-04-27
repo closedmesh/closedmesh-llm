@@ -43,6 +43,53 @@ message PeerAnnouncement {
   optional string gpu_reserved_bytes = 32;          // Deprecated in v0.60.0: prefer hardware.gpus[].reserved_bytes
   optional HardwareInfo hardware = 33;              // Introduced in v0.60.0; preferred structured hardware inventory
   optional uint64 first_joined_mesh_ts = 34;
+  optional NodeCapability capability = 35;          // Introduced for capability-aware routing; back-fillable from `hardware` for older peers
+}
+
+// NodeCapability is the canonical, normalized advertisement used by the mesh
+// router to decide whether a peer can serve a given model. Older peers omit
+// this and the router back-fills a best-effort approximation from the legacy
+// `hardware` / GPU fields. New peers should always populate it.
+//
+// Keep the enums coarse on purpose — capability-aware routing is filter-then-
+// score, and over-fine-grained classes just shift the brittleness from
+// model-arch checks to compute-class checks.
+message NodeCapability {
+  Backend backend = 1;
+  GpuVendor vendor = 2;
+  uint64 vram_total_mb = 3;
+  uint64 vram_free_mb = 4;
+  ComputeClass compute_class = 5;
+  repeated string supported_archs = 6;     // qwen2, llama3, mixtral, ...
+  repeated string supported_quants = 7;    // q4_k_m, q5_k_m, q8_0, ...
+  repeated string loaded_models = 8;
+  uint64 can_serve_max_gb = 9;             // largest model this node could realistically serve solo
+}
+
+enum Backend {
+  BACKEND_UNSPECIFIED = 0;
+  BACKEND_METAL = 1;
+  BACKEND_CUDA = 2;
+  BACKEND_ROCM = 3;
+  BACKEND_VULKAN = 4;
+  BACKEND_CPU = 5;
+}
+
+enum GpuVendor {
+  GPU_VENDOR_UNSPECIFIED = 0;
+  GPU_VENDOR_NONE = 1;
+  GPU_VENDOR_APPLE = 2;
+  GPU_VENDOR_NVIDIA = 3;
+  GPU_VENDOR_AMD = 4;
+  GPU_VENDOR_INTEL = 5;
+}
+
+enum ComputeClass {
+  COMPUTE_CLASS_UNSPECIFIED = 0;
+  COMPUTE_CLASS_LO = 1;
+  COMPUTE_CLASS_MID = 2;
+  COMPUTE_CLASS_HI = 3;
+  COMPUTE_CLASS_PRO = 4;
 }
 
 message HardwareInfo {

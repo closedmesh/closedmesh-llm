@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# release-closedmesh.sh — package the closedmesh binary for the closedmesh.com installer.
+#
+# Produces dist-release/closedmesh-<platform-suffix>.tar.gz, where <platform-suffix>
+# matches what closedmesh/public/install.sh asks for. Runs alongside the existing
+# scripts/package-release.sh (which produces the upstream mesh-llm bundle) — this
+# script just trims the bundle down to the closedmesh-installer contract:
+#
+#   <archive>/closedmesh
+#   <archive>/dev.closedmesh.closedmesh.plist  (macOS only, reference)
+#   <archive>/closedmesh.service               (Linux only, systemd reference)
+#   <archive>/LICENSE
+#
+# Usage:
+#   scripts/release-closedmesh.sh [--flavor cpu|cuda|rocm|vulkan|metal] [output_dir]
+#
+# Backend flavor defaults to:
+#   - macOS arm64: metal
+#   - Linux x86_64 / aarch64: cpu
+#   - Override via --flavor or MESH_RELEASE_FLAVOR (matches package-release.sh).
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+RELEASE_BIN_DIR="$REPO_ROOT/target/release"
+DIST_DIR_DEFAULT="$REPO_ROOT/dist-release"
+
+FLAVOR="${MESH_RELEASE_FLAVOR:-}"
+OUTPUT_DIR=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --flavor)
+            FLAVOR="${2:-}"
+            shift 2
+            ;;
+        --flavor=*)
+            FLAVOR="${1#--flavor=}"
+            shift
+            ;;
+        -h|--help)
+            sed -n '1,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *)
+            if [[ -z "$OUTPUT_DIR" ]]; then
+                OUTPUT_DIR="$1"
+                shift
+            else
+                echo "release-closedmesh: unexpected argument: $1" >&2
+                exit 1
+            fi
+            ;;
+    esac
+done
+
+OUTPUT_DIR="${OUTPUT_DIR:-$DIST_DIR_DEFAULT}"
+
+os="$(uname -s)"
+arch="$(uname -m)"
+
+case "$arch" in
+    x86_64|amd64) arch_canon="x86_64" ;;
+    arm64|aarch64) arch_canon="aarch64" ;;
+    *) arch_canon="$arch" ;;
+esac
+
+# Default flavor by platform.
+if [[ -z "$FLAVOR" ]]; then
+    case "$os/$arch_canon" in
+        Darwin/aarch64) FLAVOR="metal" ;;
+        Linux/x86_64|Linux/aarch64) FLAVOR="cpu" ;;
+        *)
+            echo "release-closedmesh: unsupported platform $os/$arch_canon" >&2
+            exit 1
+            ;;
+    esac
+fi
+
+# Compose platform-suffix used in the archive name. This must stay in lockstep
+# with the detect_target() function in closedmesh/public/install.sh.
+case "$os/$arch_canon/$FLAVOR" in
+    Darwin/aarch64/metal) platform_suffix="darwin-aarch64" ;;
+    Linux/x86_64/cpu)     platform_suffix="linux-x86_64-cpu" ;;
+    Linux/x86_64/cuda)    platform_suffix="linux-x86_64-cuda" ;;
+    Linux/x86_64/rocm)    platform_suffix="linux-x86_64-rocm" ;;
+    Linux/x86_64/vulkan)  platform_suffix="linux-x86_64-vulkan" ;;
+    Linux/aarch64/cpu)    platform_suffix="linux-aarch64-cpu" ;;
+    Linux/aarch64/vulkan) platform_suffix="linux-aarch64-vulkan" ;;
+    *)
+        echo "release-closedmesh: unsupported os/arch/flavor combo: $os/$arch_canon/$FLAVOR" >&2
+        exit 1
+        ;;
+esac
+
+asset="closedmesh-${platform_suffix}.tar.gz"
+tarball="$OUTPUT_DIR/$asset"
+sha_file="$tarball.sha256"
+
+bin="$RELEASE_BIN_DIR/closedmesh"
+if [[ ! -x "$bin" ]]; then
+    echo "release-closedmesh: built binary not found at $bin" >&2
+    echo "                    run 'just release-build' (or the platform-specific recipe) first." >&2
+    exit 1
+fi
+
+mkdir -p "$OUTPUT_DIR"
+stage="$(mktemp -d)"
+trap 'rm -rf "$stage"' EXIT
+
+cp "$bin" "$stage/closedmesh"
+chmod +x "$stage/closedmesh"
+
+# Reference service definitions: ship per-platform so the tarball is
+# self-documenting, but install.sh / install.ps1 generate the live unit
+# at install time with the correct paths.
+case "$os" in
+    Darwin)
+        if [[ -f "$REPO_ROOT/dist/dev.closedmesh.closedmesh.plist" ]]; then
+            cp "$REPO_ROOT/dist/dev.closedmesh.closedmesh.plist" "$stage/dev.closedmesh.closedmesh.plist"
+        fi
+        ;;
+    Linux)
+        if [[ -f "$REPO_ROOT/dist/closedmesh.service" ]]; then
+            cp "$REPO_ROOT/dist/closedmesh.service" "$stage/closedmesh.service"
+        fi
+        ;;
+esac
+
+[[ -f "$REPO_ROOT/LICENSE" ]] && cp "$REPO_ROOT/LICENSE" "$stage/LICENSE"
+
+(cd "$stage" && tar -czf "$tarball" ./*)
+
+if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$tarball" | awk '{print $1}' > "$sha_file"
+elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$tarball" | awk '{print $1}' > "$sha_file"
+fi
+
+echo
+echo "  Tarball: $tarball"
+[[ -f "$sha_file" ]] && echo "  SHA256:  $(cat "$sha_file")"
+echo

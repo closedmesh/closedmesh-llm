@@ -95,6 +95,18 @@ pub(super) fn apply_transitive_ann(
     if ann.gpu_compute_tflops_fp16.is_some() {
         existing.gpu_compute_tflops_fp16 = ann.gpu_compute_tflops_fp16.clone();
     }
+    if let Some(cap) = ann.capability.clone() {
+        existing.capability = cap;
+    } else {
+        // Older peer didn't advertise capability — re-derive from whatever
+        // legacy GPU fields we have so the router still has something useful.
+        existing.capability = backfill_capability_from_legacy(
+            existing.gpu_name.as_deref(),
+            existing.gpu_vram.as_deref(),
+            existing.is_soc,
+            &existing.serving_models,
+        );
+    }
     existing.models = ann.models.clone();
     existing.available_models.clear();
     existing.requested_models = ann.requested_models.clone();
@@ -689,6 +701,7 @@ impl Node {
                     served_model_descriptors: p.served_model_descriptors.clone(),
                     served_model_runtime: p.served_model_runtime.clone(),
                     owner_attestation: p.owner_attestation.clone(),
+                    capability: Some(p.capability.clone()),
                 })
                 .collect()
         };
@@ -752,6 +765,7 @@ impl Node {
             served_model_descriptors: my_served_model_descriptors,
             served_model_runtime: my_model_runtime_descriptors,
             owner_attestation: my_owner_attestation,
+            capability: self.local_node_capability().await,
         });
         announcements
     }
@@ -804,6 +818,7 @@ mod tests {
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
             owner_attestation: None,
+            capability: None,
         }
     }
 

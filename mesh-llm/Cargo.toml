@@ -3,6 +3,10 @@ name = "mesh-llm"
 version = "0.65.0-rc2"
 edition = "2021"
 
+[[bin]]
+name = "closedmesh"
+path = "src/main.rs"
+
 [dependencies]
 ansi-to-tui = "8"
 mesh-llm-plugin = { path = "plugin" }

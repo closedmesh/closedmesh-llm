@@ -61,7 +61,7 @@ pub(crate) enum AuthCommand {
         /// Path to the owner keystore.
         #[arg(long)]
         owner_key: Option<PathBuf>,
-        /// Path to the node identity file (default: ~/.mesh-llm/key).
+        /// Path to the node identity file (default: ~/.closedmesh/key).
         #[arg(long)]
         node_key: Option<PathBuf>,
         /// Path to the node ownership certificate.
@@ -76,7 +76,7 @@ pub(crate) enum AuthCommand {
         /// Path to the owner keystore.
         #[arg(long)]
         owner_key: Option<PathBuf>,
-        /// Path to the node identity file (default: ~/.mesh-llm/key).
+        /// Path to the node identity file (default: ~/.closedmesh/key).
         #[arg(long)]
         node_key: Option<PathBuf>,
         /// Output path for the signed node certificate.
@@ -97,7 +97,7 @@ pub(crate) enum AuthCommand {
         /// Path to the owner keystore.
         #[arg(long)]
         owner_key: Option<PathBuf>,
-        /// Path to the node identity file (default: ~/.mesh-llm/key).
+        /// Path to the node identity file (default: ~/.closedmesh/key).
         #[arg(long)]
         node_key: Option<PathBuf>,
         /// Output path for the signed node certificate.
@@ -133,7 +133,7 @@ pub(crate) enum AuthCommand {
         /// Path to the owner keystore.
         #[arg(long)]
         owner_key: Option<PathBuf>,
-        /// Path to the node identity file (default: ~/.mesh-llm/key).
+        /// Path to the node identity file (default: ~/.closedmesh/key).
         #[arg(long)]
         node_key: Option<PathBuf>,
         /// Output path for the signed node certificate.
@@ -231,10 +231,10 @@ pub enum LogFormat {
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "mesh-llm",
+    name = "closedmesh",
     version = crate::VERSION,
-    about = "Pool GPUs over the internet for LLM inference",
-    after_help = "Preferred runtime entrypoints:\n  mesh-llm serve\n  mesh-llm serve --model Qwen3-8B-Q4_K_M\n  mesh-llm client --auto\n  mesh-llm gpus\n\n`mesh-llm serve` loads startup models from ~/.mesh-llm/config.toml.\nRun with --help-advanced for all options.\n\nExternal backends (vLLM, TGI, Ollama):\n  Add to ~/.mesh-llm/config.toml:\n    [[plugin]]\n    name = \"openai-endpoint\"\n    url = \"http://gpu-box:8000/v1\"\n  Then: mesh-llm serve     (or: mesh-llm client  to skip llama.cpp)"
+    about = "ClosedMesh — private, single-tenant LLM inference across the compute you already own",
+    after_help = "Preferred runtime entrypoints:\n  closedmesh serve\n  closedmesh serve --model Qwen3-8B-Q4_K_M\n  closedmesh client --auto\n  closedmesh gpus\n\n`closedmesh serve` loads startup models from ~/.closedmesh/config.toml.\nRun with --help-advanced for all options.\n\nExternal backends (vLLM, TGI, Ollama):\n  Add to ~/.closedmesh/config.toml:\n    [[plugin]]\n    name = \"openai-endpoint\"\n    url = \"http://gpu-box:8000/v1\"\n  Then: closedmesh serve     (or: closedmesh client  to skip llama.cpp)"
 )]
 pub(crate) struct Cli {
     #[command(subcommand)]
@@ -259,6 +259,21 @@ pub(crate) struct Cli {
     /// Auto-join the best mesh found via Nostr.
     #[arg(long)]
     pub(crate) auto: bool,
+
+    /// Refuse to publish or discover this mesh on any public network.
+    ///
+    /// Intended for single-tenant / company-fleet deployments where the
+    /// operator wants to assert "this binary will never publish to Nostr
+    /// or auto-join a public mesh by accident." Hard-conflicts with
+    /// `--auto`, `--publish`, `--discover`, `--mesh-name`, and `--region`
+    /// at parse time, so a misconfigured invocation fails fast with a
+    /// clear error instead of silently joining the wrong mesh.
+    /// Joining via an explicit `--join <token>` is unaffected.
+    #[arg(
+        long,
+        conflicts_with_all = ["auto", "publish", "discover", "mesh_name", "region"]
+    )]
+    pub(crate) private_only: bool,
 
     /// Model to serve (path, catalog name, HF exact ref, or HuggingFace URL).
     #[arg(long)]
@@ -314,7 +329,7 @@ pub(crate) struct Cli {
     #[arg(long, hide = true)]
     pub(crate) plugin: Option<String>,
 
-    /// Update mesh-llm before continuing for release-bundle installs if a newer bundled release is available.
+    /// Update closedmesh before continuing for release-bundle installs if a newer bundled release is available.
     #[arg(long, global = true)]
     pub(crate) auto_update: bool,
 
@@ -387,7 +402,7 @@ pub(crate) struct Cli {
     #[arg(long, hide = true)]
     pub(crate) no_console: bool,
 
-    /// Optional path to the mesh-llm config file.
+    /// Optional path to the closedmesh config file.
     #[arg(long)]
     pub(crate) config: Option<PathBuf>,
 
@@ -431,7 +446,7 @@ pub(crate) enum Command {
         #[arg(long)]
         draft: bool,
     },
-    /// Update mesh-llm to a bundled release and exit.
+    /// Update closedmesh to a bundled release and exit.
     Update {
         /// Install this specific release tag or version (e.g. v0.60.0 or 0.60.0-rc.1).
         #[arg(long)]
@@ -457,26 +472,26 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: Option<RuntimeCommand>,
     },
-    /// Load a local model into a running mesh-llm instance.
+    /// Load a local model into a running closedmesh instance.
     Load {
         /// Model name/path/url to load
         name: String,
-        /// Console/API port of the running mesh-llm instance (default: 3131)
+        /// Console/API port of the running closedmesh instance (default: 3131)
         #[arg(long, default_value = "3131")]
         port: u16,
     },
-    /// Unload a local model from a running mesh-llm instance.
+    /// Unload a local model from a running closedmesh instance.
     #[command(alias = "drop")]
     Unload {
         /// Model name to unload
         name: String,
-        /// Console/API port of the running mesh-llm instance (default: 3131)
+        /// Console/API port of the running closedmesh instance (default: 3131)
         #[arg(long, default_value = "3131")]
         port: u16,
     },
-    /// Show local model status on a running mesh-llm instance.
+    /// Show local model status on a running closedmesh instance.
     Status {
-        /// Console/API port of the running mesh-llm instance (default: 3131)
+        /// Console/API port of the running closedmesh instance (default: 3131)
         #[arg(long, default_value = "3131")]
         port: u16,
     },
@@ -501,7 +516,7 @@ pub(crate) enum Command {
     /// Rotate all identity keys (node + Nostr).
     #[command(hide = true)]
     RotateKey,
-    /// Launch Goose with mesh-llm as the inference provider.
+    /// Launch Goose with closedmesh as the inference provider.
     ///
     /// If no mesh is running on --port, this auto-joins the mesh as a client.
     #[command(name = "goose")]
@@ -509,11 +524,11 @@ pub(crate) enum Command {
         /// Model id to use from /v1/models (default: auto = mesh picks best)
         #[arg(long)]
         model: Option<String>,
-        /// API port for mesh-llm (default: 9337)
+        /// API port for closedmesh (default: 9337)
         #[arg(long, default_value = "9337")]
         port: u16,
     },
-    /// Launch Claude Code with mesh-llm as the inference provider.
+    /// Launch Claude Code with closedmesh as the inference provider.
     ///
     /// If no mesh is running on --port, this auto-joins the mesh as a client.
     #[command(name = "claude")]
@@ -521,11 +536,11 @@ pub(crate) enum Command {
         /// Model id to use from /v1/models (default: auto = mesh picks best)
         #[arg(long)]
         model: Option<String>,
-        /// API port for mesh-llm (default: 9337)
+        /// API port for closedmesh (default: 9337)
         #[arg(long, default_value = "9337")]
         port: u16,
     },
-    /// Launch OpenCode with mesh-llm as the inference provider.
+    /// Launch OpenCode with closedmesh as the inference provider.
     ///
     /// If no mesh is running on a loopback/localhost target, this auto-joins the mesh as a client.
     #[command(name = "opencode")]
@@ -533,23 +548,23 @@ pub(crate) enum Command {
         /// Model id to use from /v1/models (default: auto = mesh picks best)
         #[arg(long)]
         model: Option<String>,
-        /// mesh-llm host or URL for OpenCode (default: 127.0.0.1:9337)
+        /// closedmesh host or URL for OpenCode (default: 127.0.0.1:9337)
         #[arg(long, default_value = "127.0.0.1:9337")]
         host: String,
         /// Write the mesh provider config to opencode's config file instead of launching.
         #[arg(long)]
         write: bool,
     },
-    /// Stop all running mesh-llm, llama-server, and rpc-server processes.
+    /// Stop all running closedmesh, llama-server, and rpc-server processes.
     Stop,
     /// Blackboard — post, search, and read messages shared across the mesh.
     ///
-    /// Post a message:   mesh-llm blackboard "your message here"
-    /// Show feed:        mesh-llm blackboard
-    /// Search:           mesh-llm blackboard --search "query"
-    /// From a peer:      mesh-llm blackboard --from tyler
-    /// MCP server:       mesh-llm client --join <token> blackboard --mcp
-    /// Install skill:    mesh-llm blackboard install-skill
+    /// Post a message:   closedmesh blackboard "your message here"
+    /// Show feed:        closedmesh blackboard
+    /// Search:           closedmesh blackboard --search "query"
+    /// From a peer:      closedmesh blackboard --from tyler
+    /// MCP server:       closedmesh client --join <token> blackboard --mcp
+    /// Install skill:    closedmesh blackboard install-skill
     ///
     /// Conventions: prefix messages with QUESTION:, STATUS:, FINDING:, TIP: etc.
     /// Search picks these up naturally via multi-term OR matching.
@@ -569,7 +584,7 @@ pub(crate) enum Command {
         /// Max items to show (default: 20).
         #[arg(long, default_value = "20")]
         limit: usize,
-        /// Console/API port of the running mesh-llm instance.
+        /// Console/API port of the running closedmesh instance.
         #[arg(long, default_value = "3131")]
         port: u16,
         /// Run as an MCP server over stdio (for agent integration).
@@ -591,6 +606,36 @@ pub(crate) enum Command {
     Auth {
         #[command(subcommand)]
         command: AuthCommand,
+    },
+    /// Manage the ClosedMesh background service.
+    ///
+    /// Dispatches to the right OS-native service manager:
+    ///   - macOS:   launchd (`~/Library/LaunchAgents/dev.closedmesh.closedmesh.plist`)
+    ///   - Linux:   systemd --user (`~/.config/systemd/user/closedmesh.service`)
+    ///   - Windows: Task Scheduler (`ClosedMesh` task)
+    ///
+    /// Install the unit first via the platform installer:
+    ///   curl -fsSL https://closedmesh.com/install | sh -s -- --service     # macOS / Linux
+    ///   iwr -useb https://closedmesh.com/install.ps1 | iex; closedmesh-install -Service  # Windows
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum ServiceCommand {
+    /// Start the ClosedMesh service.
+    Start,
+    /// Stop the ClosedMesh service.
+    Stop,
+    /// Show service status (and pid if running).
+    Status,
+    /// Tail the service stdout/stderr logs.
+    Logs {
+        /// Follow new log output until interrupted (like `tail -f` or `journalctl -f`).
+        #[arg(short, long)]
+        follow: bool,
     },
 }
 
@@ -630,9 +675,9 @@ where
     // Skip leading global flags to find the pseudo-subcommand position.
     // Recognized value-taking flags: --log-format, --max-vram, --llama-flavor, --device,
     // --tensor-split, --bind-port, --max-clients, --port, --console, --draft-max, --ctx-size.
-    // Boolean flags: --help-advanced, --auto, --client, --headless, --publish, --blackboard,
-    // --plugin, --auto-update, --no-draft, --split, --no-enumerate-host, --listen-all,
-    // --no-console, --owner-required.
+    // Boolean flags: --help-advanced, --auto, --private-only, --client, --headless,
+    // --publish, --blackboard, --plugin, --auto-update, --no-draft, --split,
+    // --no-enumerate-host, --listen-all, --no-console, --owner-required.
     let value_taking_flags = [
         "--log-format",
         "--max-vram",
@@ -741,14 +786,14 @@ pub(crate) fn legacy_runtime_surface_warning(
 
     if cli.client {
         return Some(format!(
-            "⚠️ top-level `--client` now maps to `mesh-llm client`.\n  Please use: {}",
+            "⚠️ top-level `--client` now maps to `closedmesh client`.\n  Please use: {}",
             suggested_client_command(original_args)
         ));
     }
 
     if !cli.model.is_empty() || !cli.gguf.is_empty() || cli.mmproj.is_some() {
         return Some(format!(
-            "⚠️ top-level serving flags now map to `mesh-llm serve`.\n  Please use: {}",
+            "⚠️ top-level serving flags now map to `closedmesh serve`.\n  Please use: {}",
             suggested_serve_command(original_args)
         ));
     }
@@ -761,7 +806,7 @@ fn suggested_serve_command(original_args: &[OsString]) -> String {
     if let Some(program) = original_args.first() {
         args.push(program.clone());
     } else {
-        args.push(OsString::from("mesh-llm"));
+        args.push(OsString::from("closedmesh"));
     }
     args.push(OsString::from("serve"));
     args.extend(original_args.iter().skip(1).cloned());
@@ -773,7 +818,7 @@ fn suggested_client_command(original_args: &[OsString]) -> String {
     if let Some(program) = original_args.first() {
         args.push(program.clone());
     } else {
-        args.push(OsString::from("mesh-llm"));
+        args.push(OsString::from("closedmesh"));
     }
     args.push(OsString::from("client"));
     let mut skipped_client = false;
@@ -1275,5 +1320,102 @@ mod tests {
             } => {}
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn cli_accepts_private_only_flag() {
+        let normalized = normalize_runtime_surface_args(["mesh-llm", "serve", "--private-only"]);
+        let cli = Cli::parse_from(normalized.normalized);
+        assert!(cli.private_only);
+        assert!(!cli.auto);
+        assert!(!cli.publish);
+        assert!(cli.discover.is_none());
+        assert!(cli.mesh_name.is_none());
+        assert!(cli.region.is_none());
+    }
+
+    #[test]
+    fn cli_private_only_allows_explicit_invite_join() {
+        let normalized = normalize_runtime_surface_args([
+            "mesh-llm",
+            "serve",
+            "--private-only",
+            "--join",
+            "TOKEN",
+        ]);
+        let cli = Cli::parse_from(normalized.normalized);
+        assert!(cli.private_only);
+        assert_eq!(cli.join, vec!["TOKEN".to_string()]);
+    }
+
+    #[test]
+    fn cli_private_only_conflicts_with_auto() {
+        let normalized =
+            normalize_runtime_surface_args(["mesh-llm", "serve", "--private-only", "--auto"]);
+        let err =
+            Cli::try_parse_from(normalized.normalized).expect_err("--private-only --auto must err");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+        let rendered = err.to_string();
+        assert!(rendered.contains("--private-only"));
+        assert!(rendered.contains("--auto"));
+    }
+
+    #[test]
+    fn cli_private_only_conflicts_with_publish() {
+        let normalized =
+            normalize_runtime_surface_args(["mesh-llm", "serve", "--private-only", "--publish"]);
+        let err = Cli::try_parse_from(normalized.normalized)
+            .expect_err("--private-only --publish must err");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn cli_private_only_conflicts_with_discover() {
+        let normalized = normalize_runtime_surface_args([
+            "mesh-llm",
+            "serve",
+            "--private-only",
+            "--discover",
+            "poker-night",
+        ]);
+        let err = Cli::try_parse_from(normalized.normalized)
+            .expect_err("--private-only --discover must err");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn cli_private_only_conflicts_with_mesh_name() {
+        let normalized = normalize_runtime_surface_args([
+            "mesh-llm",
+            "serve",
+            "--private-only",
+            "--mesh-name",
+            "office",
+        ]);
+        let err = Cli::try_parse_from(normalized.normalized)
+            .expect_err("--private-only --mesh-name must err");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn cli_private_only_conflicts_with_region() {
+        let normalized = normalize_runtime_surface_args([
+            "mesh-llm",
+            "serve",
+            "--private-only",
+            "--region",
+            "EU",
+        ]);
+        let err = Cli::try_parse_from(normalized.normalized)
+            .expect_err("--private-only --region must err");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn cli_help_documents_private_only_flag() {
+        let mut command = Cli::command();
+        let help = command.render_long_help().to_string();
+        assert!(help.contains("--private-only"));
+        assert!(help.contains("Refuse to publish or discover"));
     }
 }

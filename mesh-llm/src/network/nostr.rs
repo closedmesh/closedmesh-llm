@@ -100,13 +100,13 @@ impl std::fmt::Display for DiscoveredMesh {
 }
 
 // ---------------------------------------------------------------------------
-// Keys — stored in ~/.mesh-llm/nostr.nsec
+// Keys — stored in ~/.closedmesh/nostr.nsec
 // ---------------------------------------------------------------------------
 
 fn nostr_key_path() -> Result<std::path::PathBuf> {
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
-    Ok(home.join(".mesh-llm").join("nostr.nsec"))
+    Ok(home.join(".closedmesh").join("nostr.nsec"))
 }
 
 /// Load or generate a Nostr keypair for publishing.
@@ -179,7 +179,7 @@ fn ensure_private_nostr_key_file(_path: &std::path::Path) -> Result<()> {
 pub fn rotate_keys() -> Result<()> {
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
-    let mesh_dir = home.join(".mesh-llm");
+    let mesh_dir = home.join(".closedmesh");
 
     let nostr_path = nostr_key_path()?;
     if nostr_path.exists() {
@@ -1784,7 +1784,7 @@ mod smart_auto_tests {
     #[test]
     fn smart_auto_sticky_preference() {
         // Save a fake last-mesh
-        let dir = dirs::home_dir().unwrap().join(".mesh-llm");
+        let dir = dirs::home_dir().unwrap().join(".closedmesh");
         let path = dir.join("last-mesh");
         let had_file = path.exists();
         let old_content = if had_file {
@@ -1837,7 +1837,7 @@ mod rotate_key_tests {
     use serial_test::serial;
     use std::fs;
 
-    // rotate_keys uses hardcoded paths (~/.mesh-llm/), so we test the logic
+    // rotate_keys uses hardcoded paths (~/.closedmesh/), so we test the logic
     // by verifying files are created/deleted in the real location.
     // This is safe because rotate_keys only deletes key and nostr.nsec.
     //
@@ -1848,7 +1848,7 @@ mod rotate_key_tests {
     #[test]
     #[serial]
     fn rotate_deletes_both_keys_and_handles_missing() {
-        let dir = dirs::home_dir().unwrap().join(".mesh-llm");
+        let dir = dirs::home_dir().unwrap().join(".closedmesh");
         fs::create_dir_all(&dir).ok();
 
         let key_path = dir.join("key");

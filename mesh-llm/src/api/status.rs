@@ -170,6 +170,7 @@ pub(super) struct StatusPayload {
     pub(super) my_hostname: Option<String>,
     pub(super) my_is_soc: Option<bool>,
     pub(super) gpus: Vec<GpuEntry>,
+    pub(super) capability: NodeCapabilityPayload,
     pub(super) routing_affinity: affinity::AffinityStatsSnapshot,
     /// Local-only routing outcome and current-node pressure snapshot measured on
     /// this node only; not mesh-wide aggregates.
@@ -208,8 +209,40 @@ pub(super) struct PeerPayload {
     pub(super) hostname: Option<String>,
     pub(super) is_soc: Option<bool>,
     pub(super) gpus: Vec<GpuEntry>,
+    pub(super) capability: NodeCapabilityPayload,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) first_joined_mesh_ts: Option<u64>,
+}
+
+/// Wire-friendly view of [`crate::mesh::NodeCapability`] for the status API.
+/// Coarse on purpose — UI clients render a single capability badge per node.
+#[derive(Clone, Debug, Default, Serialize)]
+pub(super) struct NodeCapabilityPayload {
+    /// "metal" | "cuda" | "rocm" | "vulkan" | "cpu"
+    pub(super) backend: String,
+    /// "apple" | "nvidia" | "amd" | "intel" | "none"
+    pub(super) vendor: String,
+    /// "lo" | "mid" | "hi" | "pro"
+    pub(super) compute_class: String,
+    pub(super) vram_total_mb: u64,
+    pub(super) vram_free_mb: u64,
+    /// In whole GB. 0 means "unknown / fall back to vram_total_mb".
+    pub(super) can_serve_max_gb: u64,
+    pub(super) loaded_models: Vec<String>,
+}
+
+impl NodeCapabilityPayload {
+    pub(super) fn from_capability(c: &crate::mesh::NodeCapability) -> Self {
+        Self {
+            backend: c.backend.label().to_string(),
+            vendor: c.vendor.label().to_string(),
+            compute_class: c.compute_class.label().to_string(),
+            vram_total_mb: c.vram_total_mb,
+            vram_free_mb: c.vram_free_mb,
+            can_serve_max_gb: c.can_serve_max_gb,
+            loaded_models: c.loaded_models.clone(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -458,6 +491,7 @@ mod tests {
             hostname: None,
             is_soc: None,
             gpus: vec![],
+            capability: NodeCapabilityPayload::default(),
             first_joined_mesh_ts: None,
         };
 
@@ -484,6 +518,7 @@ mod tests {
             hostname: None,
             is_soc: None,
             gpus: vec![],
+            capability: NodeCapabilityPayload::default(),
             first_joined_mesh_ts: None,
         };
 
@@ -534,6 +569,7 @@ mod tests {
             my_hostname: None,
             my_is_soc: None,
             gpus: vec![],
+            capability: NodeCapabilityPayload::default(),
             routing_affinity: affinity::AffinityStatsSnapshot::default(),
             routing_metrics: metrics::RoutingMetricsStatusSnapshot::default(),
             first_joined_mesh_ts: None,
@@ -580,6 +616,7 @@ mod tests {
             my_hostname: None,
             my_is_soc: None,
             gpus: vec![],
+            capability: NodeCapabilityPayload::default(),
             routing_affinity: affinity::AffinityStatsSnapshot::default(),
             routing_metrics: metrics::RoutingMetricsStatusSnapshot::default(),
             first_joined_mesh_ts: None,
@@ -633,6 +670,7 @@ mod tests {
             my_hostname: None,
             my_is_soc: None,
             gpus: vec![],
+            capability: NodeCapabilityPayload::default(),
             routing_affinity: affinity::AffinityStatsSnapshot::default(),
             routing_metrics: metrics::RoutingMetricsStatusSnapshot::default(),
             first_joined_mesh_ts: None,
@@ -681,6 +719,7 @@ mod tests {
             my_hostname: None,
             my_is_soc: None,
             gpus: vec![],
+            capability: NodeCapabilityPayload::default(),
             routing_affinity: affinity::AffinityStatsSnapshot::default(),
             routing_metrics: metrics::RoutingMetricsStatusSnapshot::default(),
             first_joined_mesh_ts: None,
@@ -710,6 +749,7 @@ mod tests {
             hostname: Some("peer.local".to_string()),
             is_soc: Some(false),
             gpus: vec![],
+            capability: NodeCapabilityPayload::default(),
             first_joined_mesh_ts: None,
         };
 
@@ -725,7 +765,7 @@ mod tests {
             api_port: Some(3131),
             version: Some("0.56.0".to_string()),
             started_at_unix: 1700000000,
-            runtime_dir: "/home/user/.mesh-llm/runtime/1234".to_string(),
+            runtime_dir: "/home/user/.closedmesh/runtime/1234".to_string(),
             is_self: true,
         };
 

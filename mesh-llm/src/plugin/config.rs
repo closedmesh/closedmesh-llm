@@ -88,7 +88,7 @@ pub fn config_path(override_path: Option<&Path>) -> Result<PathBuf> {
         return Ok(PathBuf::from(path));
     }
     let home = dirs::home_dir().context("Cannot determine home directory")?;
-    Ok(home.join(".mesh-llm").join("config.toml"))
+    Ok(home.join(".closedmesh").join("config.toml"))
 }
 
 pub fn load_config(override_path: Option<&Path>) -> Result<MeshConfig> {

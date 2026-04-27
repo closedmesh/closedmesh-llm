@@ -11484,8 +11484,8 @@ mod tests {
         let long_model = "Qwen3.6-35B-A3B-UD-Q4_K_XL-with-extra-routing-suffix";
         let long_token =
             "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.super.long.mesh.invite.token.payload";
-        let long_rpc_log = "/Users/ndizazzo/.mesh-llm/runtime/3845607/logs/rpc-server-43683-with-a-very-long-name.log";
-        let long_llama_log = "/Users/ndizazzo/.mesh-llm/runtime/3845607/logs/llama-server-8001-with-a-very-long-name.log";
+        let long_rpc_log = "/Users/ndizazzo/.closedmesh/runtime/3845607/logs/rpc-server-43683-with-a-very-long-name.log";
+        let long_llama_log = "/Users/ndizazzo/.closedmesh/runtime/3845607/logs/llama-server-8001-with-a-very-long-name.log";
         let mut formatter =
             DashboardFormatter::with_state(DashboardState::with_mesh_event_limit(8));
 
@@ -11525,11 +11525,11 @@ mod tests {
         assert!(dashboard.contains(long_llama_log));
         assert!(dashboard.contains("Mesh events (latest 8)"));
         assert!(dashboard.contains("│ rpc-server   starting   port=43683   device=CUDA0"));
-        assert!(dashboard.contains("│              logs=/Users/ndizazzo/.mesh-llm/runtime/3845607/logs/rpc-server-43683-with-a-very-long-name.log"));
+        assert!(dashboard.contains("│              logs=/Users/ndizazzo/.closedmesh/runtime/3845607/logs/rpc-server-43683-with-a-very-long-name.log"));
         assert!(dashboard.contains("│ llama-server   starting   port=8001"));
         assert!(dashboard.contains("model=Qwen3.6-35B-A3B-UD-Q4_K_XL-with-extra-routing-suffix"));
         assert!(dashboard.contains("ctx=8192"));
-        assert!(dashboard.contains("│              logs=/Users/ndizazzo/.mesh-llm/runtime/3845607/logs/llama-server-8001-with-a-very-long-name.log"));
+        assert!(dashboard.contains("│              logs=/Users/ndizazzo/.closedmesh/runtime/3845607/logs/llama-server-8001-with-a-very-long-name.log"));
         assert!(dashboard.contains("│ Qwen3.6-35B-A3B-UD-Q4_K_XL-with-extra-routing-suffix   ready   port=38373   role=host"));
         assert!(dashboard
             .lines()

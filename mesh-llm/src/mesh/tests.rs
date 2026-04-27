@@ -570,6 +570,7 @@ fn make_test_peer_info(peer_id: EndpointId) -> PeerInfo {
         served_model_runtime: vec![],
         owner_attestation: None,
         owner_summary: OwnershipSummary::default(),
+        capability: super::NodeCapability::default(),
     }
 }
 
@@ -1233,6 +1234,7 @@ fn gossip_frame_roundtrip_preserves_scanned_model_metadata() {
             ready: true,
         }],
         owner_attestation: None,
+        capability: None,
     };
 
     let proto_pa = local_ann_to_proto_ann(&local_ann);
@@ -1454,6 +1456,7 @@ fn transitive_peer_update_refreshes_metadata_fields() {
         served_model_descriptors: vec![],
         served_model_runtime: vec![],
         owner_attestation: None,
+        capability: None,
     };
 
     apply_transitive_ann(&mut existing, &addr, &ann);
@@ -1526,6 +1529,7 @@ fn transitive_peer_merge_preserves_richer_direct_address() {
         served_model_descriptors: vec![],
         served_model_runtime: vec![],
         owner_attestation: None,
+        capability: None,
     };
 
     apply_transitive_ann(&mut existing, &weak_addr, &ann);
@@ -1577,6 +1581,7 @@ fn transitive_peer_merge_preserves_richer_direct_address() {
         served_model_descriptors: vec![],
         served_model_runtime: vec![],
         owner_attestation: None,
+        capability: None,
     };
     apply_transitive_ann(&mut existing, &richer_addr, &ann2);
 
@@ -2122,6 +2127,7 @@ fn transitive_peer_update_refreshes_last_mentioned() {
         served_model_descriptors: vec![],
         served_model_runtime: vec![],
         owner_attestation: None,
+        capability: None,
     };
 
     apply_transitive_ann(&mut peer, &addr, &ann);
@@ -2780,6 +2786,7 @@ fn make_test_peer(id: EndpointId, rtt_ms: Option<u32>, vram_gb: u64) -> PeerInfo
         served_model_runtime: vec![],
         owner_attestation: None,
         owner_summary: OwnershipSummary::default(),
+        capability: super::NodeCapability::default(),
     }
 }
 

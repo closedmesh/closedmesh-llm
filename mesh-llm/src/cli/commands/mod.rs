@@ -9,6 +9,7 @@ mod models;
 mod moe;
 mod plugin;
 mod runtime;
+mod service;
 mod update;
 
 use anyhow::Result;
@@ -200,6 +201,7 @@ pub(crate) async fn dispatch(cli: &Cli) -> Result<bool> {
             } => auth::run_rotate_owner(owner_key.clone(), *no_passphrase, *force),
             AuthCommand::Trust { command } => auth::run_trust_command(command),
         },
+        Command::Service { command } => service::dispatch(command).await,
     }?;
     Ok(true)
 }

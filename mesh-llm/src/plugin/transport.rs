@@ -303,7 +303,7 @@ pub(crate) async fn connect_side_stream(
 #[cfg(unix)]
 fn runtime_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("Cannot determine home directory")?;
-    Ok(home.join(".mesh-llm").join("run").join("plugins"))
+    Ok(home.join(".closedmesh").join("run").join("plugins"))
 }
 
 pub(crate) fn make_instance_id() -> String {

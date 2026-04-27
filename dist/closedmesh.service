@@ -1,0 +1,28 @@
+[Unit]
+Description=ClosedMesh — private LLM mesh node
+After=network-online.target
+Wants=network-online.target
+
+# Reference systemd user unit for ClosedMesh.
+#
+# The official installer (`curl closedmesh.com/install | sh -s -- --service`)
+# generates this file with the right paths for your home directory at
+# ~/.config/systemd/user/closedmesh.service. This copy ships in the release
+# tarball as a reference.
+#
+# Replace HOME below with your home directory if you copy this manually,
+# then enable with:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now closedmesh
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/closedmesh serve --private-only --headless
+WorkingDirectory=%h
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:%h/.local/state/closedmesh/stdout.log
+StandardError=append:%h/.local/state/closedmesh/stderr.log
+
+[Install]
+WantedBy=default.target

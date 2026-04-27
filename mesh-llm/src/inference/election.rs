@@ -174,6 +174,7 @@ fn build_dense_launch_plan(
     force_split: bool,
     model_name: &str,
     model_peers: &[mesh::PeerInfo],
+    local_backend: Option<mesh::Backend>,
 ) -> DenseLaunchPlan {
     let min_vram = (model_bytes as f64 * 1.1) as u64;
     if !force_split && my_vram >= min_vram {
@@ -185,6 +186,18 @@ fn build_dense_launch_plan(
         .filter(|p| matches!(p.role, NodeRole::Worker) || p.is_assigned_model(model_name))
         .filter(|p| !matches!(p.role, NodeRole::Client))
         .filter(|p| !matches!(p.rtt_ms, Some(rtt) if rtt > mesh::MAX_SPLIT_RTT_MS))
+        // Backend-affinity for pipeline-parallel: in v1 we only split a model
+        // across peers whose acceleration backend matches the host's. Mixing
+        // Metal+CUDA layer-by-layer is technically possible inside llama.cpp's
+        // rpc-server but introduces tensor-format conversion costs and is
+        // explicitly out of scope here. Peers that haven't gossiped a
+        // capability yet (legacy versions) get a default `Backend::Cpu` and
+        // are therefore only co-elected with CPU hosts, which is the safe
+        // failure mode.
+        .filter(|p| match local_backend {
+            None => true,
+            Some(target) => p.capability.backend == target,
+        })
         .collect();
     candidates.sort_by_key(|p| (p.rtt_ms.unwrap_or(u32::MAX), p.id));
 
@@ -1778,6 +1791,7 @@ pub async fn election_loop(
             force_split,
             &model_name,
             &model_peers,
+            Some(node.local_backend().await),
         );
 
         // Splitting decision: only split when forced OR when the model
@@ -2870,11 +2884,20 @@ async fn moe_election_loop(
 /// Update the model targets map — sets our model's target and includes
 /// targets for other models we know about from peers.
 /// When multiple nodes serve the same model, all are included for load balancing.
+///
+/// Capability filtering: when a peer's advertised [`mesh::NodeCapability`] is
+/// known to be insufficient for a given model (we have a local size hint and
+/// the peer would clearly OOM), we drop that (peer, model) edge instead of
+/// adding a target the router would just retry-and-fail through. We only
+/// filter remote peers — local targets are spawned by election that already
+/// gated on local hardware.
 fn extend_targets_from_peer(
     targets: &mut HashMap<String, Vec<InferenceTarget>>,
     peer_models: &[String],
     role: &NodeRole,
     peer_id: iroh::EndpointId,
+    peer_capability: &mesh::NodeCapability,
+    model_requirements: &HashMap<String, mesh::CapabilityRequirements>,
 ) {
     // Only confirmed hosts can serve HTTP inference traffic.
     // Split workers may advertise the model they're helping serve, but they
@@ -2884,11 +2907,52 @@ fn extend_targets_from_peer(
     }
 
     for serving in peer_models {
+        if let Some(req) = model_requirements.get(serving) {
+            if !peer_capability.matches(req) {
+                tracing::debug!(
+                    peer = %peer_id,
+                    model = %serving,
+                    backend = peer_capability.backend.label(),
+                    vram_mb = peer_capability.vram_total_mb,
+                    min_vram_mb = ?req.min_vram_mb,
+                    "skipping peer for model: capability filter"
+                );
+                continue;
+            }
+        }
         targets
             .entry(serving.clone())
             .or_default()
             .push(InferenceTarget::Remote(peer_id));
     }
+}
+
+/// Build a `model_name → CapabilityRequirements` map from the sizes the local
+/// node knows about (its own announcements). Remote peers don't gossip sizes
+/// today, so we only have ground truth for models in our local catalog. For
+/// models we have no local size for we emit no requirement and trust the
+/// peer's self-advertisement.
+fn collect_model_requirements(
+    peers: &[mesh::PeerInfo],
+    local_id: iroh::EndpointId,
+) -> HashMap<String, mesh::CapabilityRequirements> {
+    let mut out: HashMap<String, mesh::CapabilityRequirements> = HashMap::new();
+    for p in peers {
+        if p.id != local_id {
+            continue;
+        }
+        for (model, size_bytes) in &p.available_model_sizes {
+            if *size_bytes == 0 {
+                continue;
+            }
+            let size_gb = (*size_bytes / (1024 * 1024 * 1024)).max(1);
+            out.insert(
+                model.clone(),
+                mesh::CapabilityRequirements::for_model_size_gb(size_gb),
+            );
+        }
+    }
+    out
 }
 
 async fn update_targets(
@@ -2929,10 +2993,47 @@ async fn update_targets(
             .push(my_target);
     }
 
+    let local_id = node.id();
+    let model_requirements = collect_model_requirements(&peers, local_id);
+
+    // Track peers we excluded purely because of the capability filter, so we
+    // can flag a model as "had candidates, all were filtered" — useful for
+    // the "no_capable_node" structured 503 path in the router.
+    let mut filtered_only_candidates: HashMap<String, usize> = HashMap::new();
+
     // All peers — group by model (multi-model aware)
     for p in &peers {
         let peer_models = p.routable_models();
-        extend_targets_from_peer(&mut targets, &peer_models, &p.role, p.id);
+        if matches!(p.role, NodeRole::Host { .. }) {
+            for serving in &peer_models {
+                if let Some(req) = model_requirements.get(serving) {
+                    if !p.capability.matches(req) {
+                        *filtered_only_candidates.entry(serving.clone()).or_default() += 1;
+                    }
+                }
+            }
+        }
+        extend_targets_from_peer(
+            &mut targets,
+            &peer_models,
+            &p.role,
+            p.id,
+            &p.capability,
+            &model_requirements,
+        );
+    }
+
+    for (model, dropped) in &filtered_only_candidates {
+        let still_have = targets.get(model).map(|v| !v.is_empty()).unwrap_or(false);
+        if !still_have && *dropped > 0 {
+            emit_info(
+                format!(
+                    "[{model}] {} peer(s) advertised this model but failed the capability filter; routing will return 503 no_capable_node",
+                    dropped
+                ),
+                None,
+            );
+        }
     }
 
     let count: usize = targets.values().map(|v| v.len()).sum();
@@ -2986,6 +3087,7 @@ async fn start_llama(
         force_split,
         model_name,
         model_peers,
+        Some(node.local_backend().await),
     );
     let worker_ids = match launch_plan {
         DenseLaunchPlan::Solo => {
@@ -3219,6 +3321,7 @@ mod tests {
             served_model_runtime: vec![],
             owner_attestation: None,
             owner_summary: crate::crypto::OwnershipSummary::default(),
+            capability: crate::mesh::NodeCapability::default(),
         }
     }
 
@@ -3235,7 +3338,7 @@ mod tests {
             make_dense_peer(id_d, 30, Some(40), model),
         ];
 
-        let plan = build_dense_launch_plan(60, 100, false, model, &peers);
+        let plan = build_dense_launch_plan(60, 100, false, model, &peers, None);
         assert_eq!(
             plan,
             DenseLaunchPlan::Split {
@@ -3280,6 +3383,7 @@ mod tests {
             false,
             model,
             std::slice::from_ref(&peer),
+            None,
         );
 
         assert_eq!(
@@ -3314,8 +3418,8 @@ mod tests {
         let mut with_spare = base.clone();
         with_spare.push(make_dense_peer(id_d, 50, Some(70), model));
 
-        let base_plan = build_dense_launch_plan(60, 100, false, model, &base);
-        let spare_plan = build_dense_launch_plan(60, 100, false, model, &with_spare);
+        let base_plan = build_dense_launch_plan(60, 100, false, model, &base, None);
+        let spare_plan = build_dense_launch_plan(60, 100, false, model, &with_spare, None);
 
         assert_eq!(base_plan.running_plan(), spare_plan.running_plan());
         assert_eq!(
@@ -3342,8 +3446,8 @@ mod tests {
             make_dense_peer(id_d, 30, Some(30), model),
         ];
 
-        let initial_plan = build_dense_launch_plan(50, 100, false, model, &initial);
-        let survivor_plan = build_dense_launch_plan(50, 100, false, model, &survivors);
+        let initial_plan = build_dense_launch_plan(50, 100, false, model, &initial, None);
+        let survivor_plan = build_dense_launch_plan(50, 100, false, model, &survivors, None);
 
         assert_eq!(
             initial_plan.running_plan(),
@@ -3369,7 +3473,7 @@ mod tests {
             make_dense_peer(id_c, 40, Some(mesh::MAX_SPLIT_RTT_MS + 1), model),
         ];
 
-        let plan = build_dense_launch_plan(50, 100, false, model, &peers);
+        let plan = build_dense_launch_plan(50, 100, false, model, &peers, None);
         assert_eq!(
             plan,
             DenseLaunchPlan::WaitingForCapacity {
@@ -3377,6 +3481,42 @@ mod tests {
                 total_group_vram: 80,
                 min_vram: 110,
             }
+        );
+    }
+
+    #[test]
+    fn dense_launch_plan_backend_affinity_excludes_mismatched_peers() {
+        let model = "dense";
+        let id_metal = make_id(2);
+        let id_cuda = make_id(3);
+        let mut metal_peer = make_dense_peer(id_metal, 60, Some(10), model);
+        metal_peer.capability = mesh::NodeCapability {
+            backend: mesh::Backend::Metal,
+            ..mesh::NodeCapability::default()
+        };
+        let mut cuda_peer = make_dense_peer(id_cuda, 60, Some(20), model);
+        cuda_peer.capability = mesh::NodeCapability {
+            backend: mesh::Backend::Cuda,
+            ..mesh::NodeCapability::default()
+        };
+        let peers = vec![metal_peer, cuda_peer];
+
+        // Local host is Metal — should only pick the Metal peer, never the CUDA one.
+        let plan = build_dense_launch_plan(
+            50,
+            100,
+            false,
+            model,
+            &peers,
+            Some(mesh::Backend::Metal),
+        );
+        let DenseLaunchPlan::Split { worker_ids, .. } = plan else {
+            panic!("expected Split plan, got {:?}", plan);
+        };
+        assert!(worker_ids.contains(&id_metal));
+        assert!(
+            !worker_ids.contains(&id_cuda),
+            "backend-affinity should exclude CUDA peer when host is Metal"
         );
     }
 
@@ -3724,8 +3864,17 @@ mod tests {
         let mut targets = HashMap::new();
         let worker_id = make_id(7);
         let models = vec!["Qwen3-Coder-Next-Q4_K_M".to_string()];
+        let cap = mesh::NodeCapability::default();
+        let reqs: HashMap<String, mesh::CapabilityRequirements> = HashMap::new();
 
-        extend_targets_from_peer(&mut targets, &models, &NodeRole::Worker, worker_id);
+        extend_targets_from_peer(
+            &mut targets,
+            &models,
+            &NodeRole::Worker,
+            worker_id,
+            &cap,
+            &reqs,
+        );
 
         assert!(targets.is_empty());
     }
@@ -3736,13 +3885,24 @@ mod tests {
         let worker_id = make_id(7);
         let host_id = make_id(8);
         let models = vec!["Qwen3-Coder-Next-Q4_K_M".to_string()];
+        let cap = mesh::NodeCapability::default();
+        let reqs: HashMap<String, mesh::CapabilityRequirements> = HashMap::new();
 
-        extend_targets_from_peer(&mut targets, &models, &NodeRole::Worker, worker_id);
+        extend_targets_from_peer(
+            &mut targets,
+            &models,
+            &NodeRole::Worker,
+            worker_id,
+            &cap,
+            &reqs,
+        );
         extend_targets_from_peer(
             &mut targets,
             &models,
             &NodeRole::Host { http_port: 8080 },
             host_id,
+            &cap,
+            &reqs,
         );
 
         let model_targets = targets.get("Qwen3-Coder-Next-Q4_K_M").unwrap();
@@ -3756,24 +3916,58 @@ mod tests {
         let host_a = make_id(8);
         let host_b = make_id(9);
         let models = vec!["Qwen3-8B-Q4_K_M".to_string()];
+        let cap = mesh::NodeCapability::default();
+        let reqs: HashMap<String, mesh::CapabilityRequirements> = HashMap::new();
 
         extend_targets_from_peer(
             &mut targets,
             &models,
             &NodeRole::Host { http_port: 8080 },
             host_a,
+            &cap,
+            &reqs,
         );
         extend_targets_from_peer(
             &mut targets,
             &models,
             &NodeRole::Host { http_port: 8081 },
             host_b,
+            &cap,
+            &reqs,
         );
 
         let model_targets = targets.get("Qwen3-8B-Q4_K_M").unwrap();
         assert_eq!(model_targets.len(), 2);
         assert!(matches!(model_targets[0], InferenceTarget::Remote(id) if id == host_a));
         assert!(matches!(model_targets[1], InferenceTarget::Remote(id) if id == host_b));
+    }
+
+    #[test]
+    fn test_extend_targets_capability_filter_drops_undersized_peer() {
+        let mut targets = HashMap::new();
+        let host_id = make_id(8);
+        let models = vec!["Llama-3.3-70B-Q4_K_M".to_string()];
+        // Tiny CPU node — can't match a 40 GB requirement.
+        let weak_cap = mesh::NodeCapability::default();
+        let mut reqs = HashMap::new();
+        reqs.insert(
+            "Llama-3.3-70B-Q4_K_M".to_string(),
+            mesh::CapabilityRequirements::for_model_size_gb(40),
+        );
+
+        extend_targets_from_peer(
+            &mut targets,
+            &models,
+            &NodeRole::Host { http_port: 8080 },
+            host_id,
+            &weak_cap,
+            &reqs,
+        );
+
+        assert!(
+            targets.is_empty(),
+            "capability filter should drop CPU/0-VRAM peer for a 40 GB model"
+        );
     }
 
     #[test]

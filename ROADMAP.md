@@ -96,3 +96,7 @@ Partially done. Unified demand map via gossip, standby nodes promote to serve. N
 ## Resilience
 
 Done: Nostr re-discovery (v0.26.1), llama-server watchdog (v0.27.0), multi-host load balancing (v0.27.0), API deadlock fix (v0.35.1), VRAM-scaled context (v0.35.1). Next: tensor split recovery when a peer dies, relay health monitoring.
+
+## Mixed-backend pipeline-parallel
+
+Today the dense launch planner restricts pipeline-parallel candidates to nodes that share the host's acceleration backend (Metal-only, CUDA-only, etc.). Mixing backends inside a single model — say, layers 0–15 on Metal and layers 16–31 on CUDA — is technically expressible inside llama.cpp's `rpc-server` but introduces tensor-format conversion at every layer boundary plus dtype/quant compatibility constraints we haven't validated. Treated as a separate design effort, not part of the "any-hardware mesh nodes" capability work. Until then, heterogeneous meshes (Apple Silicon + NVIDIA + AMD) can still run the *same* model on multiple nodes for throughput, just not split a single inference across mismatched backends.

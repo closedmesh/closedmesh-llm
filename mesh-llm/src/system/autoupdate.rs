@@ -594,7 +594,7 @@ async fn install_latest_bundle(
             .unwrap_or_default()
             .as_secs()
     );
-    let workspace = install_dir.join(format!(".mesh-llm-update-{unique}"));
+    let workspace = install_dir.join(format!(".closedmesh-update-{unique}"));
     let extracted = workspace.join("bundle");
     let archive = workspace.join(asset_name);
     let backup = workspace.join("backup");

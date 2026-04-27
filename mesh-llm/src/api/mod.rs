@@ -1024,6 +1024,9 @@ impl MeshApi {
                     p.gpu_compute_tflops_fp32.as_deref(),
                     p.gpu_compute_tflops_fp16.as_deref(),
                 ),
+                capability: crate::api::status::NodeCapabilityPayload::from_capability(
+                    &p.capability,
+                ),
                 first_joined_mesh_ts: p.first_joined_mesh_ts,
             })
             .collect();
@@ -1131,6 +1134,12 @@ impl MeshApi {
                     tf16_str.as_deref(),
                 )
             },
+            capability: node
+                .local_node_capability()
+                .await
+                .as_ref()
+                .map(crate::api::status::NodeCapabilityPayload::from_capability)
+                .unwrap_or_default(),
             routing_affinity,
             routing_metrics,
             first_joined_mesh_ts: node.first_joined_mesh_ts().await,
@@ -1865,6 +1874,7 @@ mod tests {
             owner_attestation: None,
             owner_summary: crate::crypto::OwnershipSummary::default(),
             first_joined_mesh_ts: None,
+            capability: crate::mesh::NodeCapability::default(),
         }
     }
 
@@ -2125,6 +2135,7 @@ mod tests {
             served_model_runtime: Vec::new(),
             owner_attestation: None,
             owner_summary: crate::crypto::OwnershipSummary::default(),
+            capability: crate::mesh::NodeCapability::default(),
         }
     }
 
