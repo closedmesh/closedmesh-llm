@@ -3502,14 +3502,8 @@ mod tests {
         let peers = vec![metal_peer, cuda_peer];
 
         // Local host is Metal — should only pick the Metal peer, never the CUDA one.
-        let plan = build_dense_launch_plan(
-            50,
-            100,
-            false,
-            model,
-            &peers,
-            Some(mesh::Backend::Metal),
-        );
+        let plan =
+            build_dense_launch_plan(50, 100, false, model, &peers, Some(mesh::Backend::Metal));
         let DenseLaunchPlan::Split { worker_ids, .. } = plan else {
             panic!("expected Split plan, got {:?}", plan);
         };

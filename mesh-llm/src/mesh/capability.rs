@@ -101,22 +101,37 @@ impl GpuVendor {
     /// Used to back-fill capability for older peers that don't advertise it.
     pub fn from_gpu_name(name: &str) -> Self {
         let n = name.to_ascii_lowercase();
-        if n.contains("apple") || n.contains(" m1")
-            || n.contains(" m2") || n.contains(" m3")
-            || n.contains(" m4") || n.contains(" m5")
+        if n.contains("apple")
+            || n.contains(" m1")
+            || n.contains(" m2")
+            || n.contains(" m3")
+            || n.contains(" m4")
+            || n.contains(" m5")
         {
             GpuVendor::Apple
-        } else if n.contains("nvidia") || n.contains("rtx") || n.contains("gtx")
-            || n.contains("tesla") || n.contains("a100") || n.contains("h100")
-            || n.contains("h200") || n.contains("l40") || n.contains("a40")
+        } else if n.contains("nvidia")
+            || n.contains("rtx")
+            || n.contains("gtx")
+            || n.contains("tesla")
+            || n.contains("a100")
+            || n.contains("h100")
+            || n.contains("h200")
+            || n.contains("l40")
+            || n.contains("a40")
             || n.contains("jetson")
         {
             GpuVendor::Nvidia
-        } else if n.contains("amd") || n.contains("radeon") || n.contains("instinct")
-            || n.starts_with("mi") || n.contains("rx ") || n.contains("rdna")
+        } else if n.contains("amd")
+            || n.contains("radeon")
+            || n.contains("instinct")
+            || n.starts_with("mi")
+            || n.contains("rx ")
+            || n.contains("rdna")
         {
             GpuVendor::Amd
-        } else if n.contains("intel") || n.contains("arc ") || n.contains(" arc")
+        } else if n.contains("intel")
+            || n.contains("arc ")
+            || n.contains(" arc")
             || n.contains("iris")
         {
             GpuVendor::Intel
@@ -235,11 +250,12 @@ impl NodeCapability {
             vendor: GpuVendor::from_proto(p.vendor).unwrap_or(GpuVendor::None),
             vram_total_mb: p.vram_total_mb,
             vram_free_mb: p.vram_free_mb,
-            compute_class: ComputeClass::from_proto(p.compute_class)
-                .unwrap_or(ComputeClass::from_vram_and_backend(
+            compute_class: ComputeClass::from_proto(p.compute_class).unwrap_or(
+                ComputeClass::from_vram_and_backend(
                     p.vram_total_mb,
                     Backend::from_proto(p.backend)?,
-                )),
+                ),
+            ),
             supported_archs: p.supported_archs.clone(),
             supported_quants: p.supported_quants.clone(),
             loaded_models: p.loaded_models.clone(),
@@ -345,10 +361,35 @@ fn max_servable_model_gb(backend: Backend, vram_total_mb: u64) -> u64 {
 /// requested model's `arch` field.
 pub fn default_supported_archs() -> &'static [&'static str] {
     &[
-        "llama", "llama2", "llama3", "mistral", "mixtral", "qwen", "qwen2", "qwen2.5", "qwen3",
-        "phi", "phi2", "phi3", "phi4", "gemma", "gemma2", "gemma3", "deepseek", "deepseek2",
-        "command-r", "command-r-plus", "falcon", "starcoder", "starcoder2", "bloom", "yi", "olmo",
-        "stablelm", "minicpm", "internlm",
+        "llama",
+        "llama2",
+        "llama3",
+        "mistral",
+        "mixtral",
+        "qwen",
+        "qwen2",
+        "qwen2.5",
+        "qwen3",
+        "phi",
+        "phi2",
+        "phi3",
+        "phi4",
+        "gemma",
+        "gemma2",
+        "gemma3",
+        "deepseek",
+        "deepseek2",
+        "command-r",
+        "command-r-plus",
+        "falcon",
+        "starcoder",
+        "starcoder2",
+        "bloom",
+        "yi",
+        "olmo",
+        "stablelm",
+        "minicpm",
+        "internlm",
     ]
 }
 

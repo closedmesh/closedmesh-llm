@@ -9,7 +9,7 @@
 //! CLI ("start it", "stop it", "is it running", "show me the logs"), routing
 //! to whichever service manager owns the unit on this OS.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use std::path::PathBuf;
 use std::process::Command;
 
