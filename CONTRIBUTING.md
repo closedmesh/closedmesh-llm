@@ -138,12 +138,16 @@ just ui-dev http://127.0.0.1:3131 5174
 ## Useful commands
 
 ```bash
+just fmt              # cargo fmt --all (run before pushing)
+just fmt-check        # cargo fmt --all -- --check (the gate CI enforces)
 just stop             # stop mesh/rpc/llama processes
 just test             # quick test against :9337
 just check-release    # release-target/docs/workflow parity check
 just compat-smoke ~/.cache/huggingface/hub/<model>.gguf   # optional 2-node + 1-client Python/Node/LiteLLM smoke
 just --list           # list all recipes
 ```
+
+> **Tip:** `cargo fmt` is enforced by CI on macOS and Linux. Run `just fmt-check` before pushing to avoid red builds.
 
 On native Windows, `just check-release` runs the host-safe Rust/doc invariant subset and skips the Bash-only `install.sh` / `package-release.sh` parity checks. Run it on macOS or Linux when you need full shell parity coverage.
 

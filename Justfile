@@ -314,6 +314,14 @@ auto: build
 
 # ── Utilities ──────────────────────────────────────────────────
 
+# Format the whole workspace with rustfmt (matches CI).
+fmt:
+    cargo fmt --all
+
+# Verify formatting without writing — same check CI runs.
+fmt-check:
+    cargo fmt --all -- --check
+
 # Update both tracked llama.cpp pin files from the prepared checkout.
 llama-update-pin:
     scripts/update-llama-pin.sh
