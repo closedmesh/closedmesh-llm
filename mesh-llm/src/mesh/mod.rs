@@ -1475,11 +1475,21 @@ impl Node {
             builder = builder.bind_addr(std::net::SocketAddr::from(([0, 0, 0, 0], port)))?;
         }
         let endpoint = builder.bind().await?;
-        // Wait briefly for relay connection so the invite token includes the relay URL.
-        // On sinkholed networks this times out and we proceed without relay (direct UDP only).
-        match tokio::time::timeout(std::time::Duration::from_secs(5), endpoint.online()).await {
+        // Wait for relay connection so the invite token includes the relay URL.
+        // The published invite goes out to Nostr immediately after this — peers
+        // behind NAT (including most home networks) MUST advertise a relay
+        // address there, or other peers can't reach back to them. The timeout
+        // is a fallback for genuinely sinkholed networks; on a normal home
+        // connection the relay registers in 1-3s, but cold-start + Tailscale
+        // CGNAT routing has been observed to take 10-15s on Apple Silicon
+        // laptops. 5s was too tight and silently produced relay-less invites
+        // that left LAN-NATed peers unreachable from cloud entries.
+        match tokio::time::timeout(std::time::Duration::from_secs(30), endpoint.online()).await {
             Ok(()) => tracing::info!("Relay connected"),
-            Err(_) => tracing::warn!("Relay connection timed out (5s) — proceeding without relay"),
+            Err(_) => tracing::warn!(
+                "Relay connection timed out (30s) — proceeding without relay; \
+                 LAN-NATed nodes will be unreachable from off-LAN peers."
+            ),
         }
 
         // Discover public IP via STUN so the invite token includes it.
