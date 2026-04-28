@@ -9,8 +9,11 @@
 FROM node:24-alpine AS ui-builder
 WORKDIR /app
 COPY mesh-llm/ui/package.json mesh-llm/ui/package-lock.json ./
-RUN --mount=type=cache,id=npm-cache,target=/root/.npm \
-    npm ci
+# No `--mount=type=cache` here — Railway's BuildKit fork requires a
+# provider-specific cache-key prefix. Re-downloading npm deps adds a few
+# seconds per build and keeps the Dockerfile portable across Fly,
+# Railway, plain Docker, and CI.
+RUN npm ci
 COPY mesh-llm/ui/ ./
 RUN npm run build
 
@@ -35,10 +38,10 @@ COPY mesh-api-ffi/ mesh-api-ffi/
 COPY mesh-llm-test-harness/ mesh-llm-test-harness/
 COPY tools/xtask/ tools/xtask/
 COPY --from=ui-builder /app/dist mesh-llm/ui/dist
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p mesh-llm && \
+# Same portability note as the npm RUN above: no cache mounts. The cargo
+# build is the long pole anyway (10–15 min cold) and Railway/Fly cold
+# starts already pay this cost on most deploys.
+RUN cargo build --release --locked -p mesh-llm && \
     cp target/release/closedmesh /usr/local/bin/closedmesh
 
 FROM debian:bookworm-slim
