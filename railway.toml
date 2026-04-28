@@ -32,5 +32,8 @@ restartPolicyMaxRetries = 5
 # Probe the OpenAI-compatible endpoint. `/v1/models` returns 200 with a
 # (possibly empty) JSON list as soon as the API is up; that's a stricter
 # check than a TCP-only probe.
+# Bumped to 60s — closedmesh needs ~10–15s to discover the mesh and join,
+# Caddy starts in <1s but reverse_proxy returns 502 until closedmesh is
+# answering. 30s wasn't enough headroom on cold-starts.
 healthcheckPath = "/v1/models"
-healthcheckTimeout = 30
+healthcheckTimeout = 60

@@ -39,9 +39,15 @@ CONSOLE_PORT="${CONSOLE_PORT:-3131}"
 # behaviour as before this change.
 if [ -n "${MESH_AUTH_TOKEN:-}" ]; then
   AUTH_MODE=1
-  INTERNAL_PORT=9337
+  # Caddy listens on $API_PORT (the public-facing port the PaaS routes
+  # traffic to). closedmesh has to bind a *different* port internally
+  # because Caddy on 0.0.0.0:$API_PORT shadows 127.0.0.1:$API_PORT —
+  # they share the loopback address space. We pick 19337 (= 9337 + 10000)
+  # so it stays out of the way of any well-known port the user might
+  # have collided with.
+  INTERNAL_PORT="${MESH_INTERNAL_PORT:-19337}"
   LISTEN_FLAG=""
-  echo "[entrypoint] MESH_AUTH_TOKEN is set — running Caddy auth gateway in front of closedmesh."
+  echo "[entrypoint] MESH_AUTH_TOKEN is set — Caddy on :$API_PORT will gate access to closedmesh on 127.0.0.1:$INTERNAL_PORT."
 else
   AUTH_MODE=0
   INTERNAL_PORT="$API_PORT"
