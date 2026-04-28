@@ -1,0 +1,28 @@
+# docker/Caddyfile — bearer-token auth gateway in front of the closedmesh
+# runtime. Only used when $MESH_AUTH_TOKEN is set (entrypoint launches
+# Caddy in that mode and binds closedmesh to 127.0.0.1).
+#
+#     {$GATEWAY_PORT} ──Caddy (auth)──> 127.0.0.1:{$INTERNAL_PORT} (closedmesh)
+#
+# `/v1/models` is intentionally allowed through unauthenticated so platform
+# healthchecks (Railway/Fly) don't need to know the token; that endpoint
+# only lists model names — no inference, no cost.
+
+{
+	auto_https off
+	admin off
+}
+
+:{$GATEWAY_PORT} {
+	@health path /v1/models
+	handle @health {
+		reverse_proxy 127.0.0.1:{$INTERNAL_PORT}
+	}
+
+	@authed header Authorization "Bearer {$MESH_AUTH_TOKEN}"
+	handle @authed {
+		reverse_proxy 127.0.0.1:{$INTERNAL_PORT}
+	}
+
+	respond "Unauthorized" 401
+}

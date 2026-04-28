@@ -45,11 +45,16 @@ RUN cargo build --release --locked -p mesh-llm && \
     cp target/release/closedmesh /usr/local/bin/closedmesh
 
 FROM debian:bookworm-slim
+# `caddy` provides the optional bearer-token auth gateway in front of the
+# runtime when $MESH_AUTH_TOKEN is set (see docker/entrypoint.sh and
+# docker/Caddyfile). It's a single static binary; tiny addition to the
+# image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libgomp1 libdbus-1-3 \
+    ca-certificates libgomp1 libdbus-1-3 caddy \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/local/bin/closedmesh /usr/local/bin/closedmesh
 COPY docker/entrypoint.sh /entrypoint.sh
+COPY docker/Caddyfile /etc/caddy/Caddyfile
 RUN chmod +x /entrypoint.sh
 ENV APP_MODE=console
 EXPOSE 3131 9337
