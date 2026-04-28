@@ -17,7 +17,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/closedmesh serve --private-only --headless
+ExecStart=%h/.local/bin/closedmesh serve --auto --mesh-name closedmesh --headless
 WorkingDirectory=%h
 Restart=on-failure
 RestartSec=5

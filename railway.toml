@@ -13,6 +13,22 @@
 #   PORT           = 9337           (Railway assigns by default; entrypoint
 #                                    binds the closedmesh API to whatever
 #                                    Railway provides)
+#   MESH_NAME      = closedmesh     (default in entrypoint.sh; scopes
+#                                    discovery + publication to a named
+#                                    mesh so peers running the binary with
+#                                    the same name join *this* mesh
+#                                    instead of the unnamed community pool)
+#   MESH_PUBLISH   = 1              (default; advertises the listing on
+#                                    Nostr so contributors can discover us)
+#   MESH_AUTH_TOKEN = <secret>      (gates /v1/* via Caddy; required for
+#                                    public PaaS deployments)
+#
+# Persistence note: the runtime stores its Nostr identity (which is part
+# of the mesh ID for named meshes) at $HOME/.closedmesh/. On Railway,
+# that path is ephemeral by default — every redeploy regenerates the key
+# and shifts the mesh ID, which forces contributors to re-discover. To
+# pin the mesh, attach a Railway volume mounted at /root/.closedmesh and
+# the originator pubkey will survive redeploys.
 #
 # Why this isn't a worker / GPU node: Railway has no GPUs. The mesh
 # discovers GPU peers (your Mac, vast.ai instances, Hetzner GPU boxes)

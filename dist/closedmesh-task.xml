@@ -53,7 +53,7 @@
   <Actions Context="Author">
     <Exec>
       <Command>%LOCALAPPDATA%\closedmesh\bin\closedmesh.exe</Command>
-      <Arguments>serve --private-only --headless</Arguments>
+      <Arguments>serve --auto --mesh-name closedmesh --headless</Arguments>
       <WorkingDirectory>%USERPROFILE%</WorkingDirectory>
     </Exec>
   </Actions>

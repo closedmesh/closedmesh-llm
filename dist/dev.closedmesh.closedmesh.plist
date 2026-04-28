@@ -18,7 +18,9 @@
     <array>
         <string>/Users/USERNAME/.local/bin/closedmesh</string>
         <string>serve</string>
-        <string>--private-only</string>
+        <string>--auto</string>
+        <string>--mesh-name</string>
+        <string>closedmesh</string>
         <string>--headless</string>
     </array>
     <key>WorkingDirectory</key>

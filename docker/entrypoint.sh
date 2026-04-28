@@ -24,6 +24,23 @@ if [ "$MESH_HEADLESS" = "1" ] || [ "$MESH_HEADLESS" = "true" ]; then
   HEADLESS_FLAG="--headless"
 fi
 
+# Named-mesh args. When MESH_NAME is set (default: "closedmesh") we scope
+# discovery and publication to that name instead of the unnamed community
+# pool. MESH_PUBLISH=1 (default in console/worker modes) tells the runtime
+# to advertise this listing on Nostr so contributors running with the same
+# `--mesh-name` can discover and join it. Set MESH_NAME="" to fall back to
+# the unnamed community mesh, or MESH_PUBLISH=0 to keep the mesh private.
+MESH_NAME="${MESH_NAME-closedmesh}"
+MESH_PUBLISH="${MESH_PUBLISH-1}"
+MESH_NAME_FLAG=""
+PUBLISH_FLAG=""
+if [ -n "$MESH_NAME" ]; then
+  MESH_NAME_FLAG="--mesh-name $MESH_NAME"
+fi
+if [ "$MESH_PUBLISH" = "1" ] || [ "$MESH_PUBLISH" = "true" ]; then
+  PUBLISH_FLAG="--publish"
+fi
+
 # Honor $PORT for PaaS providers (Railway, Render, Fly machine port mapping)
 # that assign a port at runtime. Falls back to the OpenAI-compatible default.
 API_PORT="${PORT:-9337}"
@@ -67,7 +84,7 @@ case "$APP_MODE" in
   console)
     if [ "$AUTH_MODE" = 1 ]; then start_caddy; fi
     # shellcheck disable=SC2086
-    exec closedmesh --client --auto --port "$INTERNAL_PORT" --console "$CONSOLE_PORT" $LISTEN_FLAG $HEADLESS_FLAG
+    exec closedmesh --client --auto --port "$INTERNAL_PORT" --console "$CONSOLE_PORT" $LISTEN_FLAG $HEADLESS_FLAG $MESH_NAME_FLAG $PUBLISH_FLAG
     ;;
   worker)
     BIN_DIR=/usr/local/lib/mesh-llm/bin
@@ -81,7 +98,7 @@ case "$APP_MODE" in
     fi
     if [ "$AUTH_MODE" = 1 ]; then start_caddy; fi
     # shellcheck disable=SC2086
-    exec closedmesh --auto --port "$INTERNAL_PORT" --console "$CONSOLE_PORT" --bin-dir "$BIN_DIR" $LISTEN_FLAG $HEADLESS_FLAG
+    exec closedmesh --auto --port "$INTERNAL_PORT" --console "$CONSOLE_PORT" --bin-dir "$BIN_DIR" $LISTEN_FLAG $HEADLESS_FLAG $MESH_NAME_FLAG $PUBLISH_FLAG
     ;;
   *)
     exec closedmesh "$@"
