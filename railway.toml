@@ -48,8 +48,15 @@ restartPolicyMaxRetries = 5
 # Probe the OpenAI-compatible endpoint. `/v1/models` returns 200 with a
 # (possibly empty) JSON list as soon as the API is up; that's a stricter
 # check than a TCP-only probe.
-# Bumped to 60s — closedmesh needs ~10–15s to discover the mesh and join,
-# Caddy starts in <1s but reverse_proxy returns 502 until closedmesh is
-# answering. 30s wasn't enough headroom on cold-starts.
+#
+# Cold-start budget for a *named* mesh with no peers yet:
+#   ~1s   Caddy comes up
+#   ~5s   Nostr relay connect + initial discovery query
+#   ~30s  "Failed to join any peer" timeout (named mesh, 0 peers)
+#   ~5s   Standalone bring-up + API bind
+# Total ~40s steady-state, but cold container + cold relays can stretch
+# to 90–120s. 60s left no headroom and rolled back our first deploy with
+# the named mesh enabled. 300s gives us a comfortable margin without
+# masking a real boot failure.
 healthcheckPath = "/v1/models"
-healthcheckTimeout = 60
+healthcheckTimeout = 300
