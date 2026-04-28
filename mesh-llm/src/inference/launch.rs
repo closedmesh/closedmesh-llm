@@ -895,10 +895,16 @@ pub async fn start_rpc_server(
     let port = find_free_port().await?;
 
     let device = resolve_device_for_binary(&rpc_server.path, rpc_server.flavor, device)?;
-    let startup_timeout = if device.starts_with("Vulkan") {
-        std::time::Duration::from_secs(90)
-    } else {
+    // GPU backends compile shaders / allocate device contexts at first launch, which
+    // can easily exceed 15s. Vulkan was already given headroom; Metal on Apple
+    // Silicon takes ~8s just to load the embedded library and another ~30-45s to
+    // allocate the command queue / initialise the model on a warm path, and
+    // CUDA/ROCm driver init can be similarly slow on cold boot. CPU has no such
+    // warmup, so we keep its tight bound to fail fast on real bugs.
+    let startup_timeout = if device == "CPU" {
         std::time::Duration::from_secs(15)
+    } else {
+        std::time::Duration::from_secs(120)
     };
     let startup_polls = (startup_timeout.as_millis() / 500) as usize;
 
