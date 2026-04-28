@@ -24,10 +24,15 @@ if [ "$MESH_HEADLESS" = "1" ] || [ "$MESH_HEADLESS" = "true" ]; then
   HEADLESS_FLAG="--headless"
 fi
 
+# Honor $PORT for PaaS providers (Railway, Render, Fly machine port mapping)
+# that assign a port at runtime. Falls back to the OpenAI-compatible default.
+API_PORT="${PORT:-9337}"
+CONSOLE_PORT="${CONSOLE_PORT:-3131}"
+
 case "$APP_MODE" in
   console)
     # shellcheck disable=SC2086
-    exec closedmesh --client --auto --port 9337 --console 3131 --listen-all $HEADLESS_FLAG
+    exec closedmesh --client --auto --port "$API_PORT" --console "$CONSOLE_PORT" --listen-all $HEADLESS_FLAG
     ;;
   worker)
     BIN_DIR=/usr/local/lib/mesh-llm/bin
@@ -40,7 +45,7 @@ case "$APP_MODE" in
       exit 1
     fi
     # shellcheck disable=SC2086
-    exec closedmesh --auto --port 9337 --console 3131 --bin-dir "$BIN_DIR" --listen-all $HEADLESS_FLAG
+    exec closedmesh --auto --port "$API_PORT" --console "$CONSOLE_PORT" --bin-dir "$BIN_DIR" --listen-all $HEADLESS_FLAG
     ;;
   *)
     exec closedmesh "$@"
