@@ -1097,6 +1097,17 @@ fn model_tiers() -> Vec<(String, f64)> {
 ///   63-179GB: Qwen3-Coder-Next (48G) — frontier coder ~85B
 ///   179GB+:  MiniMax-M2.5 (138G) — 456B MoE flagship
 pub fn auto_model_pack(vram_gb: f64) -> Vec<String> {
+    // Router-only / pure-CPU entry nodes start the runtime with `--max-vram 0`
+    // explicitly to mean "I have no GPU; do not elect me as a host." Returning
+    // an empty pack keeps the auto-discovery codepath happy (it falls into
+    // passive/standby mode and just routes traffic to peers that *do* host
+    // models). Without this guard, the fallback at the bottom of this function
+    // unconditionally picks `Qwen3-4B-Q4_K_M`, which a 1-vCPU/1GB-RAM cloud VM
+    // can't realistically host — and the runtime then spends startup downloading
+    // a ~2.4GB model that will never load instead of joining the mesh.
+    if vram_gb <= 0.0 {
+        return Vec::new();
+    }
     let local_models = crate::models::scan_local_models();
     let tiers = model_tiers();
 
