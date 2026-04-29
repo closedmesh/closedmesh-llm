@@ -381,12 +381,21 @@ pub async fn publish_loop(node: crate::mesh::Node, keys: Keys, config: PublishLo
         // Then try merging with any other mesh (different mesh, unnamed only).
         // Only merge into meshes strictly larger than us to avoid two solo nodes
         // endlessly unpublishing and trying to join each other.
+        //
+        // Routers / pure-client publishers (e.g. the canonical entry node behind
+        // mesh.closedmesh.com running `client --auto --publish --mesh-name X`)
+        // are explicitly excluded. A router is the *authority* for its named
+        // mesh and must keep that listing live for inbound joiners — abandoning
+        // it to merge into a larger unnamed mesh would silently hijack every
+        // external client whose only known address is the router's hostname.
+        // GPU-peer-based merging only makes sense for organic compute clusters.
         let gpu_peers = peers
             .iter()
             .filter(|p| !matches!(p.role, crate::mesh::NodeRole::Client))
             .count();
         let my_node_count = gpu_peers + 1; // peers + self
-        if gpu_peers == 0 {
+        let is_router = matches!(node.role().await, crate::mesh::NodeRole::Client);
+        if gpu_peers == 0 && !is_router {
             let filter = MeshFilter::default();
             if let Ok(listings) = discover(&relays, &filter, disco.as_ref()).await {
                 let my_npub = publisher.npub();
