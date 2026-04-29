@@ -1471,14 +1471,21 @@ impl Node {
         {
             use iroh::{RelayConfig, RelayMap};
             let urls: Vec<String> = if relay_urls.is_empty() {
+                // n0's public canary Iroh relays. The previous defaults
+                // (*.michaelneale.mesh-llm.iroh.link) silently rotted off
+                // the public DNS, leaving the runtime with no working
+                // relay map — every NAT'd peer would fail QUIC hole-punch
+                // and the public mesh on closedmesh.com would show "0
+                // models" even with active hosts. n0 maintains these
+                // canary URLs as part of the iroh project.
                 vec![
-                    "https://usw1-2.relay.michaelneale.mesh-llm.iroh.link./".into(),
-                    "https://aps1-1.relay.michaelneale.mesh-llm.iroh.link./".into(),
+                    "https://use1-1.relay.n0.iroh-canary.iroh.link./".into(),
+                    "https://euw-1.relay.n0.iroh-canary.iroh.link./".into(),
                 ]
             } else {
                 relay_urls.to_vec()
             };
-            // Two iroh relays: US West (primary) and Asia-Pacific South (fallback).
+            // Two iroh relays: US East (primary) and EU West (fallback).
             let configs: Vec<RelayConfig> = urls
                 .iter()
                 .map(|url| RelayConfig::new(url.parse().expect("invalid relay URL"), None))
