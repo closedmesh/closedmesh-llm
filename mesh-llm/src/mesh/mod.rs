@@ -914,8 +914,20 @@ pub struct RouteEntry {
 /// Discover our public IP via STUN, then pair it with the given port.
 /// We can't send STUN from the bound port (iroh owns it), but we only need
 /// the public IP — the port is known from --bind-port + router forwarding.
+///
+/// IPv4-only by design: this function exists to populate the `Ip(v4):port`
+/// entry of the published invite token, which is the most universally
+/// reachable address (every consumer-grade NAT speaks v4; not every
+/// home/coffee-shop network speaks v6 to AWS). Picking the first DNS
+/// result for `stun.l.google.com` on a dual-stack host like an AWS
+/// Lightsail VM yielded an IPv6 STUN server, which (a) returned an IPv6
+/// XOR-MAPPED-ADDRESS that this parser correctly skipped (we only look
+/// for v4), and (b) wasted the 2s budget the function has per server.
+/// The result was no IPv4 ever published from cloud entry nodes — the
+/// exact failure that put `mesh.closedmesh.com` behind only-relay-and-IPv6
+/// addresses for a while.
 async fn stun_public_addr(advertised_port: u16) -> Option<std::net::SocketAddr> {
-    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 
     let stun_servers = [
         "stun.l.google.com:19302",
@@ -938,8 +950,13 @@ async fn stun_public_addr(advertised_port: u16) -> Option<std::net::SocketAddr> 
         req[7] = 0x42; // Magic Cookie
         rand::fill(&mut req[8..20]);
 
+        // Walk the resolved address list and pick the first IPv4. On
+        // dual-stack Linux, `lookup_host` typically yields IPv6 first
+        // (per RFC 6724 default precedence + glibc's gai.conf), so the
+        // previous "take .next()" picked an IPv6 STUN target and we
+        // never got a v4 mapping back.
         let dest: SocketAddr = match tokio::net::lookup_host(server).await {
-            Ok(mut addrs) => match addrs.next() {
+            Ok(addrs) => match addrs.filter(|a| matches!(a.ip(), IpAddr::V4(_))).next() {
                 Some(a) => a,
                 None => continue,
             },
