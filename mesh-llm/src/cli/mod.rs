@@ -252,6 +252,15 @@ pub(crate) struct Cli {
     #[arg(long, short)]
     pub(crate) join: Vec<String>,
 
+    /// URL of an HTTP endpoint that returns a JSON object with a `token`
+    /// field (the same shape as `closedmesh`'s own `/api/status`). The
+    /// runtime fetches it once at startup and treats the returned token as
+    /// `--join <token>`. Used as a stable bootstrap pointer for the public
+    /// ClosedMesh entry node so the desktop app and `install.sh` don't have
+    /// to embed a token that rotates whenever the entry node restarts.
+    #[arg(long)]
+    pub(crate) join_url: Option<String>,
+
     /// Discover a mesh via Nostr and join it.
     #[arg(long, default_missing_value = "", num_args = 0..=1)]
     pub(crate) discover: Option<String>,
@@ -694,6 +703,7 @@ where
         "--gguf",
         "--mmproj",
         "--join",
+        "--join-url",
         "--discover",
         "--mesh-name",
         "--region",

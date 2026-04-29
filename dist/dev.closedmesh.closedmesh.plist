@@ -21,6 +21,8 @@
         <string>--auto</string>
         <string>--mesh-name</string>
         <string>closedmesh</string>
+        <string>--join-url</string>
+        <string>https://mesh.closedmesh.com/api/status</string>
         <string>--headless</string>
     </array>
     <key>WorkingDirectory</key>

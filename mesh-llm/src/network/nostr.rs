@@ -114,6 +114,14 @@ pub fn load_or_create_keys() -> Result<Keys> {
     load_or_create_keys_at(&nostr_key_path()?)
 }
 
+/// Bech32 (`npub1…`) encoding of a `Keys` public key. Exposed as a free
+/// function so callers in modules that don't `use nostr_sdk::prelude::*`
+/// don't have to also import the `ToBech32` trait just to ask "what's my
+/// npub?".
+pub fn npub_for_keys(keys: &Keys) -> String {
+    keys.public_key().to_bech32().unwrap_or_default()
+}
+
 fn load_or_create_keys_at(path: &std::path::Path) -> Result<Keys> {
     if let Some(parent) = path.parent() {
         ensure_private_nostr_dir(parent)?;
@@ -243,7 +251,7 @@ impl Publisher {
     }
 
     pub fn npub(&self) -> String {
-        self.keys.public_key().to_bech32().unwrap_or_default()
+        npub_for_keys(&self.keys)
     }
 
     /// Publish (or replace) the mesh listing. Uses a replaceable event
@@ -970,12 +978,40 @@ pub fn smart_auto(
     my_vram_gb: f64,
     target_name: Option<&str>,
 ) -> AutoDecision {
+    smart_auto_with_self(meshes, my_vram_gb, target_name, None)
+}
+
+/// Like [`smart_auto`] but lets the caller pass its own Nostr `npub` so
+/// the candidate list excludes any listing that this very node previously
+/// published.
+///
+/// Without this filter, two nodes both running `--auto --mesh-name X` end
+/// up in separate meshes if they each publish before discovering the
+/// other: smart_auto would happily rank "the listing I published 30
+/// seconds ago" highest (it has the most recent, most accurate snapshot
+/// of capacity), pick it as the join target, and try to dial itself.
+/// On a fresh restart that's harmless but pointless; on the path that
+/// matters — a contributor restart while a canonical entry node like
+/// mesh.closedmesh.com is also publishing the same name — it lets the
+/// contributor's own stale listing keep them out of the real mesh
+/// indefinitely.
+pub fn smart_auto_with_self(
+    meshes: &[DiscoveredMesh],
+    my_vram_gb: f64,
+    target_name: Option<&str>,
+    my_npub: Option<&str>,
+) -> AutoDecision {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
     let last_mesh_id = crate::mesh::load_last_mesh_id();
+
+    let not_self = |m: &&DiscoveredMesh| match my_npub {
+        Some(me) => m.publisher_npub != me,
+        None => true,
+    };
 
     // If target name is set, only consider meshes with that exact name.
     // Otherwise `--auto` considers only the community mesh: unnamed listings
@@ -991,9 +1027,14 @@ pub fn smart_auto(
                     .map(|n| n.eq_ignore_ascii_case(target))
                     .unwrap_or(false)
             })
+            .filter(not_self)
             .collect()
     } else {
-        meshes.iter().filter(|m| is_auto_eligible(m)).collect()
+        meshes
+            .iter()
+            .filter(|m| is_auto_eligible(m))
+            .filter(not_self)
+            .collect()
     };
 
     // Score and rank

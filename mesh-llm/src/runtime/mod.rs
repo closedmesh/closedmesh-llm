@@ -756,6 +756,110 @@ fn owner_runtime_config(cli: &Cli) -> Result<mesh::OwnerRuntimeConfig> {
 /// Wait for either SIGINT (ctrl-c) or SIGTERM. Without this, an unhandled
 /// SIGTERM aborts the process before destructors run, so PidfileGuard never
 /// removes its file and child llama-server / rpc-server are left orphaned.
+/// Resolve `--join-url <URL>` into a concrete `--join <token>` entry.
+///
+/// The runtime fetches the URL once at startup, parses the response as
+/// JSON `{"token": "<invite>"}` (the same shape as `closedmesh`'s own
+/// `/api/status` endpoint), and pushes the token onto `cli.join`. This
+/// is the bootstrap mechanism the public closedmesh.com infrastructure
+/// uses: the desktop app's launchd plist ships with
+/// `--join-url https://mesh.closedmesh.com/api/status` and never needs
+/// to embed a token that rotates whenever the entry node restarts.
+///
+/// Failures are intentionally non-fatal — a network blip on startup
+/// shouldn't strand the runtime forever, so we log a warning and let
+/// `--auto` (which is typically also set) fall back to Nostr discovery.
+/// An explicit `--join` always wins over `--join-url`; if both are set
+/// the URL is ignored entirely.
+async fn resolve_join_url(cli: &mut Cli) {
+    let url = match cli.join_url.as_deref() {
+        Some(u) if !u.trim().is_empty() => u.trim().to_string(),
+        _ => return,
+    };
+    if !cli.join.is_empty() {
+        let _ = emit_event(OutputEvent::Info {
+            message: format!(
+                "--join was supplied explicitly; ignoring --join-url {url}"
+            ),
+            context: Some("join-url".into()),
+        });
+        return;
+    }
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = emit_event(OutputEvent::Warning {
+                message: format!(
+                    "Could not build HTTP client for --join-url: {e}. Falling back to --auto discovery."
+                ),
+                context: Some("join-url".into()),
+            });
+            return;
+        }
+    };
+
+    let resp = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = emit_event(OutputEvent::Warning {
+                message: format!(
+                    "Could not fetch join token from --join-url {url}: {e}. Falling back to --auto discovery."
+                ),
+                context: Some("join-url".into()),
+            });
+            return;
+        }
+    };
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let _ = emit_event(OutputEvent::Warning {
+            message: format!(
+                "Join-url {url} returned HTTP {status}. Falling back to --auto discovery."
+            ),
+            context: Some("join-url".into()),
+        });
+        return;
+    }
+    let payload: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = emit_event(OutputEvent::Warning {
+                message: format!(
+                    "Join-url {url} returned non-JSON response: {e}. Falling back to --auto discovery."
+                ),
+                context: Some("join-url".into()),
+            });
+            return;
+        }
+    };
+    let token = payload
+        .get("token")
+        .and_then(|t| t.as_str())
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    match token {
+        Some(t) => {
+            let _ = emit_event(OutputEvent::Info {
+                message: format!("Resolved --join-url {url} into a join token"),
+                context: Some("join-url".into()),
+            });
+            cli.join.push(t);
+        }
+        None => {
+            let _ = emit_event(OutputEvent::Warning {
+                message: format!(
+                    "Join-url {url} response missing `token` field. Falling back to --auto discovery."
+                ),
+                context: Some("join-url".into()),
+            });
+        }
+    }
+}
+
 async fn wait_shutdown_signal() {
     #[cfg(unix)]
     {
@@ -823,6 +927,8 @@ pub(crate) async fn run() -> Result<()> {
         cli.log_format,
         initial_console_session_mode(normalized_args.explicit_surface),
     );
+
+    resolve_join_url(&mut cli).await;
 
     if cli.private_only {
         let _ = emit_event(OutputEvent::Info {
@@ -1020,7 +1126,17 @@ pub(crate) async fn run() -> Result<()> {
             );
         }
 
-        match nostr::smart_auto(&meshes, my_vram_gb, target_name) {
+        // Pull our own Nostr identity so smart_auto can skip listings we
+        // published ourselves on a previous run — without this, a contributor
+        // restart while a canonical entry node like mesh.closedmesh.com is
+        // also publishing the same name would just re-target the contributor's
+        // own stale listing and never land in the real mesh.
+        let my_npub_owned = nostr::load_or_create_keys()
+            .ok()
+            .map(|k| nostr::npub_for_keys(&k));
+        let my_npub = my_npub_owned.as_deref();
+
+        match nostr::smart_auto_with_self(&meshes, my_vram_gb, target_name, my_npub) {
             nostr::AutoDecision::Join { candidates } => {
                 if cli.client {
                     // Clients skip health probe — joining itself is the test.
@@ -1086,7 +1202,12 @@ pub(crate) async fn run() -> Result<()> {
                         });
                         if let Ok(retry_meshes) = nostr::discover(&relays, &filter, None).await {
                             if let nostr::AutoDecision::Join { candidates } =
-                                nostr::smart_auto(&retry_meshes, my_vram_gb, target_name)
+                                nostr::smart_auto_with_self(
+                                    &retry_meshes,
+                                    my_vram_gb,
+                                    target_name,
+                                    my_npub,
+                                )
                             {
                                 let (_, mesh) = &candidates[0];
                                 if cli.mesh_name.is_none() {
