@@ -3478,8 +3478,19 @@ async fn run_passive(
     let mut passive_publication_state = None;
     let mut passive_publication_rx = None;
 
-    // Nostr publishing (if --publish, for standby GPU nodes advertising capacity)
-    if cli.publish && !is_client {
+    // Nostr publishing (if --publish). Enabled for both:
+    //   • standby GPU nodes (non-client) advertising spare capacity, and
+    //   • pure client/router nodes (e.g. a public entry node on a VM with
+    //     no GPU) that need the mesh listing to exist on Nostr so peers
+    //     can discover and join through them.
+    //
+    // Without the client-side branch, a deployment like
+    // `closedmesh client --auto --publish --mesh-name closedmesh` on a
+    // cloud VM is invisible to other peers: it has no own_peers and no
+    // served models, so the watchdog (below) never elects to take over
+    // publishing, and the publish_loop never starts. That breaks the
+    // canonical "always-on entry node" use case (mesh.closedmesh.com).
+    if cli.publish {
         let pub_node = node.clone();
         match nostr::load_or_create_keys() {
             Ok(nostr_keys) => {
@@ -3506,9 +3517,10 @@ async fn run_passive(
                 });
             }
             Err(e) => {
+                let role_label = if is_client { "Client" } else { "Standby" };
                 let _ = emit_event(OutputEvent::Warning {
                     message: format!(
-                        "Publishing to Nostr failed: {e}. Standby node is running privately — add --publish after fixing the issue to make discoverable."
+                        "Publishing to Nostr failed: {e}. {role_label} node is running privately — fix the issue and restart with --publish to make it discoverable."
                     ),
                     context: cli.mesh_name.as_ref().map(|mesh_name| format!("mesh={mesh_name}")),
                 });
