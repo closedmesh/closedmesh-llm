@@ -163,11 +163,19 @@ pub(super) fn start_new_mesh(
 ) {
     let pack = nostr::auto_model_pack(my_vram_gb);
     let primary = pack.first().cloned().unwrap_or_default();
-    if !has_startup_models && cli.model.is_empty() {
+    // `auto_model_pack` returns an empty Vec for `--max-vram 0` (router-only
+    // entry nodes). Without the `!primary.is_empty()` guard we'd inject an
+    // empty string into `cli.model`, which the runtime later validates as
+    // a model ref and rejects with "Expected an exact model ref...". The
+    // empty path is exactly right for an entry node — start a mesh, advertise
+    // it, but don't pretend to host anything.
+    if !has_startup_models && cli.model.is_empty() && !primary.is_empty() {
         cli.model.push(primary.clone().into());
     }
     let detail = if has_startup_models {
         "using configured startup models".to_string()
+    } else if primary.is_empty() {
+        "no local model — running as router".to_string()
     } else {
         format!("serving: {primary}")
     };
