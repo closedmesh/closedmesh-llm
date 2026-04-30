@@ -1187,64 +1187,16 @@ pub(crate) async fn run() -> Result<()> {
             }
             nostr::AutoDecision::StartNew { models } => {
                 if cli.client {
-                    // Retry discovery — meshes may appear later
+                    // No mesh found on initial discovery. Start the node immediately
+                    // in standby mode so the console API is bound straight away —
+                    // blocking retry loops here would prevent the management API from
+                    // ever starting (broken invariant caught by ci-client-auto-test).
+                    // The node runs as an idle client with no join candidates; the
+                    // user can supply --join-url or restart once a mesh is available.
                     let _ = emit_event(OutputEvent::DiscoveryFailed {
-                        message: "No meshes found yet — retrying in 15s...".to_string(),
+                        message: "No meshes found — starting in standby mode.".to_string(),
                         detail: None,
                     });
-                    let mut found = false;
-                    for attempt in 1..=20 {
-                        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-                        let _ = emit_event(OutputEvent::DiscoveryStarting {
-                            source: format!("Nostr retry {attempt}/20"),
-                        });
-                        if let Ok(retry_meshes) = nostr::discover(&relays, &filter, None).await {
-                            if let nostr::AutoDecision::Join { candidates } =
-                                nostr::smart_auto_with_self(
-                                    &retry_meshes,
-                                    my_vram_gb,
-                                    target_name,
-                                    my_npub,
-                                )
-                            {
-                                let (_, mesh) = &candidates[0];
-                                if cli.mesh_name.is_none() {
-                                    if let Some(ref name) = mesh.listing.name {
-                                        cli.mesh_name = Some(name.clone());
-                                    }
-                                }
-                                let _ = emit_event(OutputEvent::DiscoveryJoined {
-                                    mesh: mesh
-                                        .listing
-                                        .name
-                                        .as_deref()
-                                        .unwrap_or("unnamed")
-                                        .to_string(),
-                                });
-                                for (token, _) in &candidates {
-                                    cli.join.push(token.clone());
-                                }
-                                found = true;
-                                break;
-                            }
-                        } else {
-                            let _ = emit_event(OutputEvent::DiscoveryFailed {
-                                message: format!("Retry {attempt}/20 discovery failed"),
-                                detail: None,
-                            });
-                        }
-                    }
-                    if !found {
-                        // No mesh found after all retries — proceed with an empty
-                        // candidate list so the node still starts and binds its
-                        // console API. The node will run as an idle client; it can
-                        // be joined later or will pick up a mesh on next launch.
-                        let _ = emit_event(OutputEvent::DiscoveryFailed {
-                            message: "No meshes found after retrying — starting in standby mode."
-                                .to_string(),
-                            detail: None,
-                        });
-                    }
                 } else {
                     start_new_mesh(&mut cli, &models, my_vram_gb, has_startup_models);
                 }
