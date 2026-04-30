@@ -78,7 +78,7 @@ case "$APP_MODE" in
   console)
     start_caddy
     # shellcheck disable=SC2086
-    exec closedmesh --client --auto --port "$INTERNAL_PORT" --console "$CONSOLE_PORT" $HEADLESS_FLAG $MESH_NAME_FLAG $PUBLISH_FLAG
+    exec closedmesh client --auto --port "$INTERNAL_PORT" --console "$CONSOLE_PORT" $HEADLESS_FLAG $MESH_NAME_FLAG $PUBLISH_FLAG
     ;;
   worker)
     BIN_DIR=/usr/local/lib/mesh-llm/bin
