@@ -320,7 +320,8 @@ versioned_asset_name() {
     local version="$1"
 
     resolve_release_target
-    printf 'closedmesh-%s-%s.%s\n' "$version" "$TARGET_TRIPLE" "$ARCHIVE_EXT"
+    # Derive from STABLE_ASSET: "closedmesh-darwin-aarch64.tar.gz" → "closedmesh-v0.X.0-darwin-aarch64.tar.gz"
+    printf 'closedmesh-%s-%s\n' "$version" "${STABLE_ASSET#closedmesh-}"
 }
 
 usage() {

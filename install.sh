@@ -355,17 +355,17 @@ asset_name() {
         supported)
             case "$(platform_id)" in
         Darwin/arm64)
-            echo "mesh-llm-aarch64-apple-darwin.tar.gz"
+            echo "closedmesh-darwin-aarch64.tar.gz"
             ;;
         Linux/aarch64)
-            echo "mesh-llm-aarch64-unknown-linux-gnu.tar.gz"
+            echo "closedmesh-linux-aarch64.tar.gz"
             ;;
         Linux/x86_64)
             case "$flavor" in
-                cpu) echo "mesh-llm-x86_64-unknown-linux-gnu.tar.gz" ;;
-                cuda) echo "mesh-llm-x86_64-unknown-linux-gnu-cuda.tar.gz" ;;
-                rocm) echo "mesh-llm-x86_64-unknown-linux-gnu-rocm.tar.gz" ;;
-                vulkan) echo "mesh-llm-x86_64-unknown-linux-gnu-vulkan.tar.gz" ;;
+                cpu) echo "closedmesh-linux-x86_64.tar.gz" ;;
+                cuda) echo "closedmesh-linux-x86_64-cuda.tar.gz" ;;
+                rocm) echo "closedmesh-linux-x86_64-rocm.tar.gz" ;;
+                vulkan) echo "closedmesh-linux-x86_64-vulkan.tar.gz" ;;
                 *)
                     echo "error: unsupported Linux flavor '$flavor'" >&2
                     exit 1

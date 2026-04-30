@@ -161,8 +161,8 @@ $Flavor = Normalize-RecipeArgument $Flavor @("flavor", "backend")
 $binaryFlavor = Get-BinaryFlavor $Flavor
 $targetTriple = "x86_64-pc-windows-msvc"
 $archiveExt = "zip"
-$stableAsset = "closedmesh-windows-x86_64$(if ($binaryFlavor) { "-$binaryFlavor" }).$archiveExt"
-$versionedAsset = New-ReleaseAssetName -Prefix "closedmesh-$Version" -TargetTriple $targetTriple -ArchiveExt $archiveExt -BinaryFlavor $binaryFlavor
+$stableAsset = "closedmesh-windows-x86_64$(Get-FlavorSuffix $binaryFlavor).$archiveExt"
+$versionedAsset = "closedmesh-$Version-windows-x86_64$(Get-FlavorSuffix $binaryFlavor).$archiveExt"
 
 $meshBinary = Join-Path $releaseBinDir "closedmesh.exe"
 $rpcBinary = Join-Path $buildBinDir "rpc-server.exe"

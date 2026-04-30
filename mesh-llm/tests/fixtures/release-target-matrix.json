@@ -4,48 +4,48 @@
     "arch": "aarch64",
     "flavor": "metal",
     "support": "supported",
-    "stable_asset": "mesh-llm-aarch64-apple-darwin.tar.gz",
-    "versioned_asset": "mesh-llm-v0.60.0-aarch64-apple-darwin.tar.gz"
+    "stable_asset": "closedmesh-darwin-aarch64.tar.gz",
+    "versioned_asset": "closedmesh-v0.60.0-darwin-aarch64.tar.gz"
   },
   {
     "os": "linux",
     "arch": "x86_64",
     "flavor": "cpu",
     "support": "supported",
-    "stable_asset": "mesh-llm-x86_64-unknown-linux-gnu.tar.gz",
-    "versioned_asset": "mesh-llm-v0.60.0-x86_64-unknown-linux-gnu.tar.gz"
+    "stable_asset": "closedmesh-linux-x86_64.tar.gz",
+    "versioned_asset": "closedmesh-v0.60.0-linux-x86_64.tar.gz"
   },
   {
     "os": "linux",
     "arch": "x86_64",
     "flavor": "cuda",
     "support": "supported",
-    "stable_asset": "mesh-llm-x86_64-unknown-linux-gnu-cuda.tar.gz",
-    "versioned_asset": "mesh-llm-v0.60.0-x86_64-unknown-linux-gnu-cuda.tar.gz"
+    "stable_asset": "closedmesh-linux-x86_64-cuda.tar.gz",
+    "versioned_asset": "closedmesh-v0.60.0-linux-x86_64-cuda.tar.gz"
   },
   {
     "os": "linux",
     "arch": "x86_64",
     "flavor": "rocm",
     "support": "supported",
-    "stable_asset": "mesh-llm-x86_64-unknown-linux-gnu-rocm.tar.gz",
-    "versioned_asset": "mesh-llm-v0.60.0-x86_64-unknown-linux-gnu-rocm.tar.gz"
+    "stable_asset": "closedmesh-linux-x86_64-rocm.tar.gz",
+    "versioned_asset": "closedmesh-v0.60.0-linux-x86_64-rocm.tar.gz"
   },
   {
     "os": "linux",
     "arch": "x86_64",
     "flavor": "vulkan",
     "support": "supported",
-    "stable_asset": "mesh-llm-x86_64-unknown-linux-gnu-vulkan.tar.gz",
-    "versioned_asset": "mesh-llm-v0.60.0-x86_64-unknown-linux-gnu-vulkan.tar.gz"
+    "stable_asset": "closedmesh-linux-x86_64-vulkan.tar.gz",
+    "versioned_asset": "closedmesh-v0.60.0-linux-x86_64-vulkan.tar.gz"
   },
   {
     "os": "linux",
     "arch": "aarch64",
     "flavor": "cpu",
     "support": "supported",
-    "stable_asset": "mesh-llm-aarch64-unknown-linux-gnu.tar.gz",
-    "versioned_asset": "mesh-llm-v0.60.0-aarch64-unknown-linux-gnu.tar.gz"
+    "stable_asset": "closedmesh-linux-aarch64.tar.gz",
+    "versioned_asset": "closedmesh-v0.60.0-linux-aarch64.tar.gz"
   },
   {
     "os": "linux",
@@ -108,32 +108,32 @@
     "arch": "x86_64",
     "flavor": "cpu",
     "support": "supported",
-    "stable_asset": "mesh-llm-x86_64-pc-windows-msvc.zip",
-    "versioned_asset": "mesh-llm-v0.60.0-x86_64-pc-windows-msvc.zip"
+    "stable_asset": "closedmesh-windows-x86_64.zip",
+    "versioned_asset": "closedmesh-v0.60.0-windows-x86_64.zip"
   },
   {
     "os": "windows",
     "arch": "x86_64",
     "flavor": "cuda",
     "support": "supported",
-    "stable_asset": "mesh-llm-x86_64-pc-windows-msvc-cuda.zip",
-    "versioned_asset": "mesh-llm-v0.60.0-x86_64-pc-windows-msvc-cuda.zip"
+    "stable_asset": "closedmesh-windows-x86_64-cuda.zip",
+    "versioned_asset": "closedmesh-v0.60.0-windows-x86_64-cuda.zip"
   },
   {
     "os": "windows",
     "arch": "x86_64",
     "flavor": "rocm",
     "support": "supported",
-    "stable_asset": "mesh-llm-x86_64-pc-windows-msvc-rocm.zip",
-    "versioned_asset": "mesh-llm-v0.60.0-x86_64-pc-windows-msvc-rocm.zip"
+    "stable_asset": "closedmesh-windows-x86_64-rocm.zip",
+    "versioned_asset": "closedmesh-v0.60.0-windows-x86_64-rocm.zip"
   },
   {
     "os": "windows",
     "arch": "x86_64",
     "flavor": "vulkan",
     "support": "supported",
-    "stable_asset": "mesh-llm-x86_64-pc-windows-msvc-vulkan.zip",
-    "versioned_asset": "mesh-llm-v0.60.0-x86_64-pc-windows-msvc-vulkan.zip"
+    "stable_asset": "closedmesh-windows-x86_64-vulkan.zip",
+    "versioned_asset": "closedmesh-v0.60.0-windows-x86_64-vulkan.zip"
   },
   {
     "os": "linux",

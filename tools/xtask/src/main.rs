@@ -93,11 +93,11 @@ fn fixture_release_tag(rows: &[FixtureRow]) -> DynResult<String> {
         };
 
         let stable_tail = stable
-            .strip_prefix("mesh-llm-")
-            .ok_or("stable asset missing mesh-llm- prefix")?;
+            .strip_prefix("closedmesh-")
+            .ok_or("stable asset missing closedmesh- prefix")?;
         let versioned_tail = versioned
-            .strip_prefix("mesh-llm-")
-            .ok_or("versioned asset missing mesh-llm- prefix")?;
+            .strip_prefix("closedmesh-")
+            .ok_or("versioned asset missing closedmesh- prefix")?;
         let suffix = format!("-{stable_tail}");
         if let Some(version) = versioned_tail.strip_suffix(&suffix) {
             return Ok(version.to_string());
@@ -476,9 +476,9 @@ fn windows_asset_name(flavor: &str, version_prefix: &str) -> String {
     };
 
     if suffix.is_empty() {
-        format!("mesh-llm{version_prefix}-x86_64-pc-windows-msvc.zip")
+        format!("closedmesh{version_prefix}-windows-x86_64.zip")
     } else {
-        format!("mesh-llm{version_prefix}-x86_64-pc-windows-msvc-{suffix}.zip")
+        format!("closedmesh{version_prefix}-windows-x86_64-{suffix}.zip")
     }
 }
 
@@ -489,12 +489,9 @@ fn check_docs_and_workflow_invariants(repo_root: &Path) -> DynResult<()> {
     let release_workflow = fs::read_to_string(repo_root.join(".github/workflows/release.yml"))?;
     let ci_workflow = fs::read_to_string(repo_root.join(".github/workflows/ci.yml"))?;
 
-    // README references the upstream `mesh-llm-*.tar.gz` bundle names indirectly
-    // through `RELEASE.md` and `install.sh`. The README itself was rewritten
-    // for the ClosedMesh fork and no longer carries asset filenames inline.
     ensure_contains(
         &release,
-        "mesh-llm-aarch64-unknown-linux-gnu.tar.gz",
+        "closedmesh-linux-aarch64.tar.gz",
         "RELEASE Linux ARM64 asset note",
     )?;
     ensure_contains(

@@ -17,7 +17,7 @@
 just build
 ```
 
-On macOS, this prepares upstream llama.cpp with the Mesh-LLM patch queue, builds with `-DGGML_METAL=ON -DGGML_RPC=ON -DBUILD_SHARED_LIBS=OFF -DLLAMA_OPENSSL=OFF`, and builds the Rust mesh-llm binary. Linux release workflows build CPU, ARM64 CPU, CUDA, ROCm, and Vulkan variants separately. The Linux ARM64 CPU bundle is `mesh-llm-aarch64-unknown-linux-gnu.tar.gz`, and `arm64` and `aarch64` mean the same 64-bit ARM target in release and install docs.
+On macOS, this prepares upstream llama.cpp with the Mesh-LLM patch queue, builds with `-DGGML_METAL=ON -DGGML_RPC=ON -DBUILD_SHARED_LIBS=OFF -DLLAMA_OPENSSL=OFF`, and builds the Rust closedmesh binary. Linux release workflows build CPU, ARM64 CPU, CUDA, ROCm, and Vulkan variants separately. The Linux ARM64 CPU bundle is `closedmesh-linux-aarch64.tar.gz`, and `arm64` and `aarch64` mean the same 64-bit ARM target in release and install docs.
 
 On Windows, use the release-specific recipes directly:
 
@@ -116,12 +116,12 @@ Running `.github/workflows/release.yml` via `workflow_dispatch` triggers the rel
 - still leaves the local Windows bundle recipes available in `Justfile` for manual builds
 - uploads `MeshLLMFFI.xcframework.zip` for Swift Package Manager consumers
 - publishes the Android AAR to GitHub Packages as `ai.meshllm:meshllm-android:<version>`
-- uploads versioned assets such as `mesh-llm-v0.X.0-aarch64-apple-darwin.tar.gz`
-- uploads the Linux ARM64 CPU asset as `mesh-llm-aarch64-unknown-linux-gnu.tar.gz`
-- uploads stable `latest` assets such as `mesh-llm-x86_64-unknown-linux-gnu.tar.gz`
-- uploads CUDA-specific Linux assets such as `mesh-llm-x86_64-unknown-linux-gnu-cuda.tar.gz`
-- uploads ROCm-specific Linux assets such as `mesh-llm-x86_64-unknown-linux-gnu-rocm.tar.gz`
-- uploads Vulkan-specific Linux assets such as `mesh-llm-x86_64-unknown-linux-gnu-vulkan.tar.gz`
+- uploads versioned assets such as `closedmesh-v0.X.0-darwin-aarch64.tar.gz`
+- uploads the Linux ARM64 CPU asset as `closedmesh-linux-aarch64.tar.gz`
+- uploads stable `latest` assets such as `closedmesh-linux-x86_64.tar.gz`
+- uploads CUDA-specific Linux assets such as `closedmesh-linux-x86_64-cuda.tar.gz`
+- uploads ROCm-specific Linux assets such as `closedmesh-linux-x86_64-rocm.tar.gz`
+- uploads Vulkan-specific Linux assets such as `closedmesh-linux-x86_64-vulkan.tar.gz`
 - keeps the legacy macOS `mesh-bundle.tar.gz` asset available for direct archive installs
 - creates the GitHub release automatically with generated notes
 - marks hyphenated tags such as `v0.X.0-rc.1` as GitHub prereleases
@@ -143,12 +143,12 @@ After the workflow finishes, verify:
 - `MeshLLMFFI.xcframework.zip` exists for Swift Package Manager installs
 - `ai.meshllm:meshllm-android:<version>` is visible in the GitHub Packages Maven registry for the repo
 - `mesh-bundle.tar.gz` still exists for direct macOS archive installs
-- `mesh-llm-aarch64-apple-darwin.tar.gz` exists
-- `mesh-llm-aarch64-unknown-linux-gnu.tar.gz` exists
-- `mesh-llm-x86_64-unknown-linux-gnu.tar.gz` exists
-- `mesh-llm-x86_64-unknown-linux-gnu-vulkan.tar.gz` exists unless this was a prerelease with `skip_gpu_bundles=true`
-- `mesh-llm-x86_64-unknown-linux-gnu-cuda.tar.gz` exists unless this was a prerelease with `skip_gpu_bundles=true`
-- `mesh-llm-x86_64-unknown-linux-gnu-rocm.tar.gz` exists unless this was a prerelease with `skip_gpu_bundles=true`
+- `closedmesh-darwin-aarch64.tar.gz` exists
+- `closedmesh-linux-aarch64.tar.gz` exists
+- `closedmesh-linux-x86_64.tar.gz` exists
+- `closedmesh-linux-x86_64-vulkan.tar.gz` exists unless this was a prerelease with `skip_gpu_bundles=true`
+- `closedmesh-linux-x86_64-cuda.tar.gz` exists unless this was a prerelease with `skip_gpu_bundles=true`
+- `closedmesh-linux-x86_64-rocm.tar.gz` exists unless this was a prerelease with `skip_gpu_bundles=true`
 - Windows release bundles are not expected from the current GitHub Actions workflow while the publish block stays commented out
 
 ## Notes
