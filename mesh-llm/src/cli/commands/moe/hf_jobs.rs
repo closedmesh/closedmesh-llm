@@ -524,19 +524,19 @@ mod tests {
     fn release_assets_match_expected_linux_names() {
         assert_eq!(
             release_asset_name("latest", HfJobReleaseTarget::Cpu),
-            "mesh-llm-x86_64-unknown-linux-gnu.tar.gz"
+            "closedmesh-linux-x86_64.tar.gz"
         );
         assert_eq!(
             release_asset_name("v0.1.0", HfJobReleaseTarget::Cuda),
-            "mesh-llm-v0.1.0-x86_64-unknown-linux-gnu-cuda.tar.gz"
+            "closedmesh-v0.1.0-linux-x86_64-cuda.tar.gz"
         );
         assert_eq!(
             release_asset_name("v0.1.0", HfJobReleaseTarget::Rocm),
-            "mesh-llm-v0.1.0-x86_64-unknown-linux-gnu-rocm.tar.gz"
+            "closedmesh-v0.1.0-linux-x86_64-rocm.tar.gz"
         );
         assert_eq!(
             release_asset_name("v0.1.0", HfJobReleaseTarget::Vulkan),
-            "mesh-llm-v0.1.0-x86_64-unknown-linux-gnu-vulkan.tar.gz"
+            "closedmesh-v0.1.0-linux-x86_64-vulkan.tar.gz"
         );
     }
 
