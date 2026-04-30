@@ -6,8 +6,8 @@ let repoRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 let swiftSDKRelativePath = "sdk/swift"
 let ffiXCFrameworkRelativePath = "\(swiftSDKRelativePath)/Generated/MeshLLMFFI.xcframework"
 let ffiXCFrameworkPath = "\(repoRoot)/\(ffiXCFrameworkRelativePath)"
-let remoteFFIXCFrameworkURL = "https://github.com/Mesh-LLM/mesh-llm/releases/download/v0.65.3/MeshLLMFFI.xcframework.zip"
-let remoteFFIXCFrameworkChecksum = "57fd6423040c16fb62a1969fae763505bda25bc8f0f764052af3bd11cb884b2f"
+let remoteFFIXCFrameworkURL = "https://github.com/Mesh-LLM/mesh-llm/releases/download/v0.65.4/MeshLLMFFI.xcframework.zip"
+let remoteFFIXCFrameworkChecksum = "3c1732982d03b7a8ffb3c4cfe8ec2862a6f3b5ebc87af9b0db44eed410bfbafd"
 let forceStubFFI = ProcessInfo.processInfo.environment["MESH_SWIFT_FORCE_STUB"] == "1"
 let hasLocalFFIXCFramework = FileManager.default.fileExists(atPath: ffiXCFrameworkPath)
 let hasRemoteFFIXCFramework = !forceStubFFI
