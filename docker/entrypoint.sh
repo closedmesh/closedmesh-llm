@@ -40,8 +40,8 @@ if [ "$MESH_PUBLISH" = "1" ] || [ "$MESH_PUBLISH" = "true" ]; then
   PUBLISH_FLAG="--publish"
 fi
 
-# Honor $PORT for PaaS providers (Railway, Render, Fly machine port mapping)
-# that assign a port at runtime. Falls back to the OpenAI-compatible default.
+# Honor $PORT when the host assigns a port at runtime (e.g. Lightsail reverse
+# proxy, or local docker -p overrides). Falls back to the OpenAI-compat default.
 API_PORT="${PORT:-9337}"
 CONSOLE_PORT="${CONSOLE_PORT:-3131}"
 

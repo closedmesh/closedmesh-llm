@@ -145,4 +145,4 @@ It prints `--help` and exits without binding the console or API ports.
 
 ## Live demo
 
-**[Try it now](https://mesh-llm-console.fly.dev/)** — web console connected to the default public mesh. Runs as a client on Fly.io, no GPU.
+**[Try it now](https://closedmesh.com)** — web chat connected to the public mesh.

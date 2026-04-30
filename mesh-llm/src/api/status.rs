@@ -655,7 +655,7 @@ mod tests {
                 logical_id: "provider-node-1".to_string(),
                 models: vec!["Qwen".to_string()],
                 vram_gb: 24.0,
-                provider: Some("fly".to_string()),
+                provider: Some("lightsail".to_string()),
                 state: WakeableNodeState::Sleeping,
                 wake_eta_secs: Some(90),
             }],
