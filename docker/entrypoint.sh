@@ -66,8 +66,12 @@ else
 fi
 
 start_caddy() {
-  # Caddy reads {$GATEWAY_PORT}, {$INTERNAL_PORT}, {$CONSOLE_PORT}, and
-  # {$MESH_AUTH_TOKEN} from the environment via Caddyfile placeholders.
+  # Caddy reads {$GATEWAY_PORT}, {$SITE_ADDR}, {$INTERNAL_PORT},
+  # {$CONSOLE_PORT}, and {$MESH_AUTH_TOKEN} from the environment.
+  # SITE_ADDR defaults to ":$API_PORT" (plain HTTP on that port) but can
+  # be set to a domain name (e.g. "mesh.closedmesh.com") so Caddy binds
+  # to port 80 for that hostname — useful when the host routes 80→container.
+  SITE_ADDR="${SITE_ADDR:-:$API_PORT}" \
   GATEWAY_PORT="$API_PORT" INTERNAL_PORT="$INTERNAL_PORT" CONSOLE_PORT="$CONSOLE_PORT" \
     caddy run --config "$CADDYFILE" --adapter caddyfile &
   CADDY_PID=$!

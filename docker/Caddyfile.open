@@ -11,7 +11,7 @@
 	admin off
 }
 
-:{$GATEWAY_PORT} {
+{$SITE_ADDR::{$GATEWAY_PORT}} {
 	@console_path path /api/*
 	handle @console_path {
 		reverse_proxy 127.0.0.1:{$CONSOLE_PORT}

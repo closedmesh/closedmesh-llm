@@ -20,7 +20,7 @@
 	admin off
 }
 
-:{$GATEWAY_PORT} {
+{$SITE_ADDR::{$GATEWAY_PORT}} {
 	# P2P bootstrap — always open so new contributors can join the mesh.
 	@join path /api/status
 	handle @join {
