@@ -1,0 +1,23 @@
+# docker/Caddyfile.open — transparent reverse proxy with no auth.
+# Used when $MESH_AUTH_TOKEN is NOT set (entrypoint selects this file).
+#
+#     {$GATEWAY_PORT} ──Caddy (open)──> 127.0.0.1:{$INTERNAL_PORT}  (OpenAI API)
+#                     └─────────────> 127.0.0.1:{$CONSOLE_PORT}     (admin console)
+#
+# All paths are open. Use Caddyfile (not this file) in any public deployment.
+
+{
+	auto_https off
+	admin off
+}
+
+:{$GATEWAY_PORT} {
+	@console_path path /api/*
+	handle @console_path {
+		reverse_proxy 127.0.0.1:{$CONSOLE_PORT}
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:{$INTERNAL_PORT}
+	}
+}
