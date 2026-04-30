@@ -88,8 +88,8 @@ copy_runtime_libs() {
 
 bundle_bin_name() {
     local name="$1"
-    if [[ "$name" == "mesh-llm" ]]; then
-        echo "$name"
+    if [[ "$name" == "closedmesh" || "$name" == "mesh-llm" ]]; then
+        echo "closedmesh"
         return
     fi
 
@@ -291,20 +291,26 @@ resolve_release_target() {
     case "$normalized" in
         macos/aarch64)
             TARGET_TRIPLE="aarch64-apple-darwin"
+            STABLE_OS="darwin"
+            STABLE_ARCH="aarch64"
             LEGACY_ASSET="mesh-bundle.tar.gz"
             ;;
         linux/x86_64)
             TARGET_TRIPLE="x86_64-unknown-linux-gnu"
+            STABLE_OS="linux"
+            STABLE_ARCH="x86_64"
             ;;
         linux/aarch64)
             TARGET_TRIPLE="aarch64-unknown-linux-gnu"
+            STABLE_OS="linux"
+            STABLE_ARCH="aarch64"
             ;;
         *)
             return 1
             ;;
     esac
 
-    STABLE_ASSET="$(printf 'mesh-llm-%s%s.%s\n' "$TARGET_TRIPLE" "$(flavor_suffix "$effective_flavor")" "$ARCHIVE_EXT")"
+    STABLE_ASSET="$(printf 'closedmesh-%s-%s%s.%s\n' "$STABLE_OS" "$STABLE_ARCH" "$(flavor_suffix "$effective_flavor")" "$ARCHIVE_EXT")"
     TARGET_TRIPLE="${TARGET_TRIPLE}$(flavor_suffix "$effective_flavor")"
 
     return 0
@@ -314,7 +320,7 @@ versioned_asset_name() {
     local version="$1"
 
     resolve_release_target
-    printf 'mesh-llm-%s-%s.%s\n' "$version" "$TARGET_TRIPLE" "$ARCHIVE_EXT"
+    printf 'closedmesh-%s-%s.%s\n' "$version" "$TARGET_TRIPLE" "$ARCHIVE_EXT"
 }
 
 usage() {
@@ -347,7 +353,7 @@ main() {
     bundle_dir="$_STAGING_DIR/mesh-bundle"
     mkdir -p "$bundle_dir"
 
-    cp "$RELEASE_BIN_DIR/mesh-llm${BIN_EXT}" "$bundle_dir/$(bundle_bin_name mesh-llm)"
+    cp "$RELEASE_BIN_DIR/closedmesh${BIN_EXT}" "$bundle_dir/$(bundle_bin_name closedmesh)"
     cp "$BUILD_BIN_DIR/rpc-server${BIN_EXT}" "$bundle_dir/$(bundle_bin_name rpc-server)"
     cp "$BUILD_BIN_DIR/llama-server${BIN_EXT}" "$bundle_dir/$(bundle_bin_name llama-server)"
     cp "$BUILD_BIN_DIR/llama-moe-analyze${BIN_EXT}" "$bundle_dir/llama-moe-analyze"
@@ -355,7 +361,7 @@ main() {
     copy_runtime_libs "$bundle_dir"
 
     if [[ "$os_name" == "Darwin" ]]; then
-        for bin in "$bundle_dir/$(bundle_bin_name mesh-llm)" "$bundle_dir/$(bundle_bin_name rpc-server)" "$bundle_dir/$(bundle_bin_name llama-server)" "$bundle_dir/llama-moe-analyze" "$bundle_dir/llama-moe-split"; do
+        for bin in "$bundle_dir/$(bundle_bin_name closedmesh)" "$bundle_dir/$(bundle_bin_name rpc-server)" "$bundle_dir/$(bundle_bin_name llama-server)" "$bundle_dir/llama-moe-analyze" "$bundle_dir/llama-moe-split"; do
             [[ -f "$bin" ]] || continue
             install_name_tool -add_rpath @executable_path/ "$bin" 2>/dev/null || true
         done

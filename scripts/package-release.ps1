@@ -96,8 +96,8 @@ function Get-BundleBinaryName {
         [string]$BinaryFlavor
     )
 
-    if ($BaseName -eq "mesh-llm") {
-        return "$BaseName.exe"
+    if ($BaseName -eq "mesh-llm" -or $BaseName -eq "closedmesh") {
+        return "closedmesh.exe"
     }
 
     if ($BinaryFlavor) {
@@ -161,10 +161,10 @@ $Flavor = Normalize-RecipeArgument $Flavor @("flavor", "backend")
 $binaryFlavor = Get-BinaryFlavor $Flavor
 $targetTriple = "x86_64-pc-windows-msvc"
 $archiveExt = "zip"
-$stableAsset = New-ReleaseAssetName -Prefix "mesh-llm" -TargetTriple $targetTriple -ArchiveExt $archiveExt -BinaryFlavor $binaryFlavor
-$versionedAsset = New-ReleaseAssetName -Prefix "mesh-llm-$Version" -TargetTriple $targetTriple -ArchiveExt $archiveExt -BinaryFlavor $binaryFlavor
+$stableAsset = "closedmesh-windows-x86_64$(if ($binaryFlavor) { "-$binaryFlavor" }).$archiveExt"
+$versionedAsset = New-ReleaseAssetName -Prefix "closedmesh-$Version" -TargetTriple $targetTriple -ArchiveExt $archiveExt -BinaryFlavor $binaryFlavor
 
-$meshBinary = Join-Path $releaseBinDir "mesh-llm.exe"
+$meshBinary = Join-Path $releaseBinDir "closedmesh.exe"
 $rpcBinary = Join-Path $buildBinDir "rpc-server.exe"
 $llamaBinary = Join-Path $buildBinDir "llama-server.exe"
 
@@ -184,7 +184,7 @@ $bundleDir = Join-Path $stagingRoot "mesh-bundle"
 New-Item -ItemType Directory -Path $bundleDir -Force | Out-Null
 
 try {
-    Copy-Item $meshBinary -Destination (Join-Path $bundleDir (Get-BundleBinaryName "mesh-llm" $binaryFlavor)) -Force
+    Copy-Item $meshBinary -Destination (Join-Path $bundleDir (Get-BundleBinaryName "closedmesh" $binaryFlavor)) -Force
     Copy-Item $rpcBinary -Destination (Join-Path $bundleDir (Get-BundleBinaryName "rpc-server" $binaryFlavor)) -Force
     Copy-Item $llamaBinary -Destination (Join-Path $bundleDir (Get-BundleBinaryName "llama-server" $binaryFlavor)) -Force
     Copy-RuntimeLibs $bundleDir
