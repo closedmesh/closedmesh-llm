@@ -135,17 +135,6 @@ impl ReleaseTarget {
         }
     }
 
-    fn target_triple(self) -> Option<&'static str> {
-        match (self.os, self.arch) {
-            (CanonicalOs::Macos, CanonicalArch::Aarch64) => Some("aarch64-apple-darwin"),
-            (CanonicalOs::Linux, CanonicalArch::X86_64) => Some("x86_64-unknown-linux-gnu"),
-            (CanonicalOs::Linux, CanonicalArch::Aarch64) => Some("aarch64-unknown-linux-gnu"),
-            (CanonicalOs::Linux, CanonicalArch::Arm) => Some("arm-unknown-linux-gnueabihf"),
-            (CanonicalOs::Windows, CanonicalArch::X86_64) => Some("x86_64-pc-windows-msvc"),
-            _ => None,
-        }
-    }
-
     pub(crate) fn stable_asset_name(self) -> Option<String> {
         self.asset_name(None)
     }
@@ -154,12 +143,29 @@ impl ReleaseTarget {
         self.asset_name(Some(release_tag))
     }
 
+    fn os_str(self) -> &'static str {
+        match self.os {
+            CanonicalOs::Macos => "darwin",
+            CanonicalOs::Linux => "linux",
+            CanonicalOs::Windows => "windows",
+        }
+    }
+
+    fn arch_str(self) -> Option<&'static str> {
+        match self.arch {
+            CanonicalArch::X86_64 => Some("x86_64"),
+            CanonicalArch::Aarch64 => Some("aarch64"),
+            CanonicalArch::Arm => None,
+        }
+    }
+
     fn asset_name(self, release_tag: Option<&str>) -> Option<String> {
         if self.support_status() != SupportStatus::Supported {
             return None;
         }
 
-        let triple = self.target_triple()?;
+        let os = self.os_str();
+        let arch = self.arch_str()?;
         let archive = self.archive_kind().extension();
         let flavor_suffix = match self.flavor {
             BinaryFlavor::Cpu | BinaryFlavor::Metal => "",
@@ -169,8 +175,10 @@ impl ReleaseTarget {
         };
 
         match release_tag {
-            Some(tag) => Some(format!("mesh-llm-{tag}-{triple}{flavor_suffix}.{archive}")),
-            None => Some(format!("mesh-llm-{triple}{flavor_suffix}.{archive}")),
+            Some(tag) => Some(format!(
+                "closedmesh-{tag}-{os}-{arch}{flavor_suffix}.{archive}"
+            )),
+            None => Some(format!("closedmesh-{os}-{arch}{flavor_suffix}.{archive}")),
         }
     }
 }
@@ -289,7 +297,7 @@ mod tests {
         );
         assert_eq!(
             arm64.stable_asset_name(),
-            Some("mesh-llm-aarch64-unknown-linux-gnu.tar.gz".to_string())
+            Some("closedmesh-linux-aarch64.tar.gz".to_string())
         );
     }
 
