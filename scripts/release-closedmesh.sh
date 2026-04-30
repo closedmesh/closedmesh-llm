@@ -95,8 +95,6 @@ case "$os/$arch_canon/$FLAVOR" in
 esac
 
 asset="closedmesh-${platform_suffix}.tar.gz"
-tarball="$OUTPUT_DIR/$asset"
-sha_file="$tarball.sha256"
 
 bin="$RELEASE_BIN_DIR/closedmesh"
 if [[ ! -x "$bin" ]]; then
@@ -106,6 +104,10 @@ if [[ ! -x "$bin" ]]; then
 fi
 
 mkdir -p "$OUTPUT_DIR"
+# Resolve to absolute path so the tarball path stays valid after cd-into-staging.
+OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
+tarball="$OUTPUT_DIR/$asset"
+sha_file="$tarball.sha256"
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 
