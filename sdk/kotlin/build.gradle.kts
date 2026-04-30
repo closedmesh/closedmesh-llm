@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "ai.meshllm"
-version = "0.65.1"
+version = "0.65.3"
 
 val androidArtifactId = "meshllm-android"
 
