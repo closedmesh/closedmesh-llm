@@ -9,7 +9,6 @@ on:
       - '.dockerignore'
       - 'Justfile'
       - 'docker/**'
-      - 'fly/Dockerfile'
       - 'mesh-llm/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -39,15 +38,6 @@ jobs:
       dockerfile_path: docker/Dockerfile.client
       validate_shared_core: true
       validate_workflow_no_qemu: true
-      validate_entrypoint_modes: true
-
-  docker-validate-fly-shared:
-    uses: ./.github/workflows/docker-precheck.yml
-    with:
-      job_name: Docker validate fly shared
-      dockerfile_path: fly/Dockerfile
-      validate_shared_core: true
-      validate_fly_ui_builder: true
       validate_entrypoint_modes: true
 
   docker-validate-cpu:
@@ -88,7 +78,7 @@ jobs:
       validate_entrypoint_modes: true
 
   docker-client-amd64:
-    needs: [docker-validate-client, docker-validate-fly-shared]
+    needs: [docker-validate-client]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
@@ -129,7 +119,7 @@ jobs:
             type=gha,mode=max,scope=docker-llama-client-amd64
 
   docker-client-arm64:
-    needs: [docker-validate-client, docker-validate-fly-shared]
+    needs: [docker-validate-client]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04-arm
     steps:
