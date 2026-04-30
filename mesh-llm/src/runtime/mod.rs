@@ -778,7 +778,9 @@ async fn resolve_join_url(cli: &mut Cli) {
     };
     if !cli.join.is_empty() {
         let _ = emit_event(OutputEvent::Info {
-            message: format!("--join was supplied explicitly; ignoring --join-url {url}"),
+            message: format!(
+                "--join was supplied explicitly; ignoring --join-url {url}"
+            ),
             context: Some("join-url".into()),
         });
         return;
@@ -1235,11 +1237,15 @@ pub(crate) async fn run() -> Result<()> {
                         }
                     }
                     if !found {
+                        // No mesh found after all retries — proceed with an empty
+                        // candidate list so the node still starts and binds its
+                        // console API. The node will run as an idle client; it can
+                        // be joined later or will pick up a mesh on next launch.
                         let _ = emit_event(OutputEvent::DiscoveryFailed {
-                            message: "No meshes found after 5 minutes of retrying.".to_string(),
+                            message: "No meshes found after retrying — starting in standby mode."
+                                .to_string(),
                             detail: None,
                         });
-                        anyhow::bail!("No meshes found after 5 minutes of retrying.");
                     }
                 } else {
                     start_new_mesh(&mut cli, &models, my_vram_gb, has_startup_models);
