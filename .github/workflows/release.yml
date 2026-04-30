@@ -264,7 +264,9 @@ jobs:
         shell: bash
         env:
           MESH_RELEASE_FLAVOR: ${{ matrix.closedmesh_flavor }}
-        run: scripts/release-closedmesh.sh dist
+        run: |
+          chmod +x scripts/release-closedmesh.sh
+          scripts/release-closedmesh.sh dist
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v6
@@ -345,6 +347,7 @@ jobs:
       - name: Package closedmesh installer artifacts (Linux ARM64)
         shell: bash
         run: |
+          chmod +x scripts/release-closedmesh.sh
           # The closedmesh binary itself is flavor-agnostic (it spawns
           # llama-server / rpc-server which are flavor-specific). Ship one
           # tarball per supported runtime flavor for ARM64 so the installer
@@ -424,7 +427,9 @@ jobs:
         shell: bash
         env:
           MESH_RELEASE_FLAVOR: cuda
-        run: scripts/release-closedmesh.sh dist
+        run: |
+          chmod +x scripts/release-closedmesh.sh
+          scripts/release-closedmesh.sh dist
 
       - name: Upload CUDA release artifacts
         uses: actions/upload-artifact@v6
@@ -498,7 +503,9 @@ jobs:
         shell: bash
         env:
           MESH_RELEASE_FLAVOR: rocm
-        run: scripts/release-closedmesh.sh dist
+        run: |
+          chmod +x scripts/release-closedmesh.sh
+          scripts/release-closedmesh.sh dist
 
       - name: Upload ROCm release artifacts
         uses: actions/upload-artifact@v6
@@ -573,7 +580,9 @@ jobs:
         shell: bash
         env:
           MESH_RELEASE_FLAVOR: vulkan
-        run: scripts/release-closedmesh.sh dist
+        run: |
+          chmod +x scripts/release-closedmesh.sh
+          scripts/release-closedmesh.sh dist
 
       - name: Upload Vulkan release artifacts
         uses: actions/upload-artifact@v6
