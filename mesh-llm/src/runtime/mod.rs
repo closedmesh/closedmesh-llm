@@ -778,9 +778,7 @@ async fn resolve_join_url(cli: &mut Cli) {
     };
     if !cli.join.is_empty() {
         let _ = emit_event(OutputEvent::Info {
-            message: format!(
-                "--join was supplied explicitly; ignoring --join-url {url}"
-            ),
+            message: format!("--join was supplied explicitly; ignoring --join-url {url}"),
             context: Some("join-url".into()),
         });
         return;
