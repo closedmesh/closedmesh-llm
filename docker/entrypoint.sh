@@ -80,9 +80,8 @@ start_caddy() {
 
 case "$APP_MODE" in
   console)
-    start_caddy
     # shellcheck disable=SC2086
-    exec closedmesh client --auto --port "$INTERNAL_PORT" --console "$CONSOLE_PORT" $HEADLESS_FLAG $MESH_NAME_FLAG $PUBLISH_FLAG
+    exec closedmesh client --auto --port "$INTERNAL_PORT" --console "$CONSOLE_PORT" --listen-all $HEADLESS_FLAG $MESH_NAME_FLAG $PUBLISH_FLAG
     ;;
   worker)
     BIN_DIR=/usr/local/lib/mesh-llm/bin
@@ -94,9 +93,8 @@ case "$APP_MODE" in
       echo "APP_MODE=worker requires bundled llama binaries in $BIN_DIR; use a full-node image (:cpu/:cuda/:rocm/:vulkan) or APP_MODE=console." >&2
       exit 1
     fi
-    start_caddy
     # shellcheck disable=SC2086
-    exec closedmesh --auto --port "$INTERNAL_PORT" --console "$CONSOLE_PORT" --bin-dir "$BIN_DIR" $HEADLESS_FLAG $MESH_NAME_FLAG $PUBLISH_FLAG
+    exec closedmesh --auto --port "$INTERNAL_PORT" --console "$CONSOLE_PORT" --bin-dir "$BIN_DIR" --listen-all $HEADLESS_FLAG $MESH_NAME_FLAG $PUBLISH_FLAG
     ;;
   *)
     exec closedmesh "$@"
