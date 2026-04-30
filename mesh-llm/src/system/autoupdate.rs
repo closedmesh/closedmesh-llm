@@ -1147,8 +1147,8 @@ mod tests {
     fn test_release_asset_url() {
         std::env::remove_var(SELF_UPDATE_REPO_ENV);
         assert_eq!(
-            release_asset_url("v0.60.0", "mesh-llm-aarch64-apple-darwin.tar.gz"),
-            "https://github.com/Mesh-LLM/mesh-llm/releases/download/v0.60.0/mesh-llm-aarch64-apple-darwin.tar.gz"
+            release_asset_url("v0.60.0", "closedmesh-darwin-aarch64.tar.gz"),
+            "https://github.com/Mesh-LLM/mesh-llm/releases/download/v0.60.0/closedmesh-darwin-aarch64.tar.gz"
         );
     }
 
@@ -1177,8 +1177,8 @@ mod tests {
             "https://api.github.com/repos/jdumay/mesh-llm/releases/tags/v0.60.0"
         );
         assert_eq!(
-            release_asset_url("v0.60.0", "mesh-llm-x86_64-unknown-linux-gnu.tar.gz"),
-            "https://github.com/jdumay/mesh-llm/releases/download/v0.60.0/mesh-llm-x86_64-unknown-linux-gnu.tar.gz"
+            release_asset_url("v0.60.0", "closedmesh-linux-x86_64.tar.gz"),
+            "https://github.com/jdumay/mesh-llm/releases/download/v0.60.0/closedmesh-linux-x86_64.tar.gz"
         );
         std::env::remove_var(SELF_UPDATE_REPO_ENV);
     }
@@ -1206,11 +1206,11 @@ mod tests {
         let expected = match (std::env::consts::OS, std::env::consts::ARCH) {
             ("macos", "aarch64") => Some((
                 launch::BinaryFlavor::Metal,
-                "mesh-llm-aarch64-apple-darwin.tar.gz",
+                "closedmesh-darwin-aarch64.tar.gz",
             )),
             ("linux", "x86_64") => Some((
                 launch::BinaryFlavor::Cpu,
-                "mesh-llm-x86_64-unknown-linux-gnu.tar.gz",
+                "closedmesh-linux-x86_64.tar.gz",
             )),
             _ => None,
         };
@@ -1229,24 +1229,24 @@ mod tests {
         assert!(platform_has_release_assets_for("windows", "x86_64"));
         assert_eq!(
             stable_release_asset_name_for("windows", "x86_64", launch::BinaryFlavor::Cpu),
-            Some("mesh-llm-x86_64-pc-windows-msvc.zip".to_string())
+            Some("closedmesh-windows-x86_64.zip".to_string())
         );
         assert_eq!(
             stable_release_asset_name_for("windows", "x86_64", launch::BinaryFlavor::Cuda),
-            Some("mesh-llm-x86_64-pc-windows-msvc-cuda.zip".to_string())
+            Some("closedmesh-windows-x86_64-cuda.zip".to_string())
         );
         assert_eq!(
             stable_release_asset_name_for("windows", "x86_64", launch::BinaryFlavor::Rocm),
-            Some("mesh-llm-x86_64-pc-windows-msvc-rocm.zip".to_string())
+            Some("closedmesh-windows-x86_64-rocm.zip".to_string())
         );
         assert_eq!(
             stable_release_asset_name_for("windows", "x86_64", launch::BinaryFlavor::Vulkan),
-            Some("mesh-llm-x86_64-pc-windows-msvc-vulkan.zip".to_string())
+            Some("closedmesh-windows-x86_64-vulkan.zip".to_string())
         );
         let release = ReleaseInfo {
             tag: "v0.60.0".to_string(),
             version: "0.60.0".to_string(),
-            assets: vec!["mesh-llm-v0.60.0-x86_64-pc-windows-msvc.zip".to_string()],
+            assets: vec!["closedmesh-v0.60.0-windows-x86_64.zip".to_string()],
         };
         assert!(release_has_any_platform_asset(
             &release, "windows", "x86_64"
@@ -1265,7 +1265,7 @@ mod tests {
 
     #[test]
     fn test_linux_arm64_release_asset_names() {
-        let stable_asset = "mesh-llm-aarch64-unknown-linux-gnu.tar.gz".to_string();
+        let stable_asset = "closedmesh-linux-aarch64.tar.gz".to_string();
         assert!(platform_has_release_assets_for("linux", "aarch64"));
         assert_eq!(
             stable_release_asset_name_for("linux", "aarch64", launch::BinaryFlavor::Cpu),
@@ -1304,7 +1304,7 @@ mod tests {
         assert_eq!(arm64_asset, aarch64_asset);
         assert_eq!(
             arm64_asset,
-            Some("mesh-llm-aarch64-unknown-linux-gnu.tar.gz".to_string())
+            Some("closedmesh-linux-aarch64.tar.gz".to_string())
         );
     }
 
@@ -1314,8 +1314,8 @@ mod tests {
             tag: "v0.60.0".to_string(),
             version: "0.60.0".to_string(),
             assets: vec![
-                "mesh-llm-aarch64-unknown-linux-gnu.tar.gz".to_string(),
-                "mesh-llm-v0.60.0-aarch64-unknown-linux-gnu.tar.gz".to_string(),
+                "closedmesh-linux-aarch64.tar.gz".to_string(),
+                "closedmesh-v0.60.0-linux-aarch64.tar.gz".to_string(),
             ],
         };
 
@@ -1325,7 +1325,7 @@ mod tests {
                 ReleaseTarget::from_raw("linux", "arm64", launch::BinaryFlavor::Cpu).unwrap(),
                 ReleaseAssetPreference::StableFirst,
             ),
-            Some("mesh-llm-aarch64-unknown-linux-gnu.tar.gz".to_string())
+            Some("closedmesh-linux-aarch64.tar.gz".to_string())
         );
     }
 
@@ -1334,7 +1334,7 @@ mod tests {
         let release = ReleaseInfo {
             tag: "v0.60.0".to_string(),
             version: "0.60.0".to_string(),
-            assets: vec!["mesh-llm-v0.60.0-aarch64-unknown-linux-gnu.tar.gz".to_string()],
+            assets: vec!["closedmesh-v0.60.0-linux-aarch64.tar.gz".to_string()],
         };
 
         assert_eq!(
@@ -1343,7 +1343,7 @@ mod tests {
                 ReleaseTarget::from_raw("linux", "aarch64", launch::BinaryFlavor::Cpu).unwrap(),
                 ReleaseAssetPreference::StableFirst,
             ),
-            Some("mesh-llm-v0.60.0-aarch64-unknown-linux-gnu.tar.gz".to_string())
+            Some("closedmesh-v0.60.0-linux-aarch64.tar.gz".to_string())
         );
     }
 
@@ -1353,8 +1353,8 @@ mod tests {
             tag: "v0.60.0".to_string(),
             version: "0.60.0".to_string(),
             assets: vec![
-                "mesh-llm-aarch64-unknown-linux-gnu.tar.gz".to_string(),
-                "mesh-llm-v0.60.0-aarch64-unknown-linux-gnu.tar.gz".to_string(),
+                "closedmesh-linux-aarch64.tar.gz".to_string(),
+                "closedmesh-v0.60.0-linux-aarch64.tar.gz".to_string(),
             ],
         };
 
@@ -1364,7 +1364,7 @@ mod tests {
                 ReleaseTarget::from_raw("linux", "aarch64", launch::BinaryFlavor::Cpu).unwrap(),
                 ReleaseAssetPreference::VersionedFirst,
             ),
-            Some("mesh-llm-v0.60.0-aarch64-unknown-linux-gnu.tar.gz".to_string())
+            Some("closedmesh-v0.60.0-linux-aarch64.tar.gz".to_string())
         );
     }
 
@@ -1373,7 +1373,7 @@ mod tests {
         let release = ReleaseInfo {
             tag: "v0.60.0".to_string(),
             version: "0.60.0".to_string(),
-            assets: vec!["mesh-llm-aarch64-unknown-linux-gnu.tar.gz".to_string()],
+            assets: vec!["closedmesh-linux-aarch64.tar.gz".to_string()],
         };
 
         assert_eq!(
@@ -1382,7 +1382,7 @@ mod tests {
                 ReleaseTarget::from_raw("linux", "arm64", launch::BinaryFlavor::Cpu).unwrap(),
                 ReleaseAssetPreference::VersionedFirst,
             ),
-            Some("mesh-llm-aarch64-unknown-linux-gnu.tar.gz".to_string())
+            Some("closedmesh-linux-aarch64.tar.gz".to_string())
         );
     }
 
