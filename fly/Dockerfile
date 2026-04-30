@@ -55,7 +55,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /usr/local/bin/closedmesh /usr/local/bin/closedmesh
 COPY docker/entrypoint.sh /entrypoint.sh
 COPY docker/Caddyfile /etc/caddy/Caddyfile
-COPY docker/Caddyfile.open /etc/caddy/Caddyfile.open
 RUN chmod +x /entrypoint.sh
 ENV APP_MODE=console
 EXPOSE 3131 9337

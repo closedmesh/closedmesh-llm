@@ -7,7 +7,7 @@ primary_region = "syd"
 [build.args]
 
 [http_service]
-  internal_port = 9337
+  internal_port = 3131
   force_https = true
   auto_stop_machines = "off"
   auto_start_machines = true
