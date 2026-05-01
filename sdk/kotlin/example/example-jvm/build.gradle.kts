@@ -24,7 +24,7 @@ dependencies {
 sourceSets {
     main {
         kotlin {
-            srcDir("../../src/main/kotlin/ai/meshllm")
+            srcDir("../../src/main/kotlin/com/closedmesh")
         }
     }
 }

@@ -697,51 +697,6 @@ jobs:
             gh release create "$RELEASE_TAG" "${files[@]}" "${release_args[@]}" --generate-notes
           fi
 
-  publish_crates:
-    name: Publish crates.io packages
-    runs-on: ubuntu-latest
-    if: false
-    needs:
-      - prepare_release
-      - publish
-
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ needs.prepare_release.outputs.release_sha }}
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Publish mesh-llm-client
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --locked -p mesh-llm-client
-
-      - name: Wait for mesh-llm-client to appear on crates.io
-        env:
-          RELEASE_VERSION: ${{ needs.prepare_release.outputs.version }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          for attempt in $(seq 1 30); do
-            if python3 -c 'import json, sys, urllib.request; version = sys.argv[1]; payload = json.load(urllib.request.urlopen("https://crates.io/api/v1/crates/mesh-llm-client", timeout=10)); sys.exit(0 if version in {item["num"] for item in payload.get("versions", [])} else 1)' "$RELEASE_VERSION"
-            then
-              echo "mesh-llm-client $RELEASE_VERSION is visible on crates.io"
-              exit 0
-            fi
-
-            echo "mesh-llm-client $RELEASE_VERSION not visible on crates.io yet (attempt $attempt/30)"
-            sleep 10
-          done
-
-          echo "mesh-llm-client $RELEASE_VERSION did not appear on crates.io in time" >&2
-          exit 1
-
-      - name: Publish mesh-api
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --locked -p mesh-api
 
   publish_android_maven:
     name: Publish Android Maven package
@@ -798,9 +753,8 @@ jobs:
     needs:
       - prepare_release
       - publish
-      - publish_crates
       - publish_android_maven
-    if: always() && needs.prepare_release.result == 'success' && needs.publish.result == 'success' && (needs.publish_crates.result == 'success' || needs.publish_crates.result == 'skipped') && (needs.publish_android_maven.result == 'success' || needs.publish_android_maven.result == 'skipped')
+    if: always() && needs.prepare_release.result == 'success' && needs.publish.result == 'success' && (needs.publish_android_maven.result == 'success' || needs.publish_android_maven.result == 'skipped')
 
     steps:
       - uses: actions/checkout@v5
