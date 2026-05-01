@@ -700,6 +700,7 @@ jobs:
   publish_crates:
     name: Publish crates.io packages
     runs-on: ubuntu-latest
+    if: false
     needs:
       - prepare_release
       - publish
@@ -745,6 +746,7 @@ jobs:
   publish_android_maven:
     name: Publish Android Maven package
     runs-on: ubuntu-latest
+    if: false
     needs:
       - prepare_release
       - publish
