@@ -1,4 +1,4 @@
-package ai.meshllm
+package com.closedmesh
 
 import io.mockk.every
 import io.mockk.just

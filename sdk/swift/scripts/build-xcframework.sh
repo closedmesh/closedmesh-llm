@@ -151,7 +151,7 @@ create_framework() {
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>ai.meshllm.MeshLLMFFI</string>
+    <string>com.closedmesh.MeshLLMFFI</string>
     <key>CFBundleName</key>
     <string>MeshLLMFFI</string>
     <key>CFBundlePackageType</key>

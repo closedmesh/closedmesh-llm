@@ -1,4 +1,4 @@
-package ai.meshllm
+package com.closedmesh
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose

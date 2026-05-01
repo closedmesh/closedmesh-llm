@@ -746,7 +746,6 @@ jobs:
   publish_android_maven:
     name: Publish Android Maven package
     runs-on: ubuntu-latest
-    if: false
     needs:
       - prepare_release
       - publish

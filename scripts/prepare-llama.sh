@@ -38,7 +38,7 @@ if [[ "$(git -C "$LLAMA_WORKDIR" config --bool remote.origin.promisor || true)" 
         git -C "$LLAMA_WORKDIR" fetch --refetch --filter=blob:limit=1g origin
     fi
 fi
-git -C "$LLAMA_WORKDIR" config user.name "${GIT_AUTHOR_NAME:-Mesh-LLM CI}"
+git -C "$LLAMA_WORKDIR" config user.name "${GIT_AUTHOR_NAME:-ClosedMesh CI}"
 git -C "$LLAMA_WORKDIR" config user.email "${GIT_AUTHOR_EMAIL:-ci@mesh-llm.local}"
 
 case "$MODE" in

@@ -39,7 +39,7 @@ If a model fits on one machine, it runs there. If it doesn't, ClosedMesh LLM aut
 
 The two are versioned and released independently. Most teams only ever install the runtime — the chat product talks to it for them.
 
-> ClosedMesh LLM is a fork of [Mesh-LLM/mesh-llm](https://github.com/Mesh-LLM/mesh-llm). The Rust crate names are kept upstream-compatible (`mesh-llm`, `mesh-client`, etc.) so we can rebase cleanly; the **shipped binary**, **service label**, and **data directory** are all `closedmesh`-branded.
+> ClosedMesh LLM is a fork of [Mesh-LLM/mesh-llm](https://github.com/closedmesh/closedmesh-llm). The Rust crate names are kept upstream-compatible (`mesh-llm`, `mesh-client`, etc.) so we can rebase cleanly; the **shipped binary**, **service label**, and **data directory** are all `closedmesh`-branded.
 
 ## Quick start
 
@@ -346,4 +346,4 @@ scripts/                 Release, install, smoke-test scripts
 
 Apache-2.0 / MIT, dual-licensed. See [LICENSE](LICENSE).
 
-ClosedMesh LLM is a fork of [Mesh-LLM/mesh-llm](https://github.com/Mesh-LLM/mesh-llm) under the same dual-license terms.
+ClosedMesh LLM is a fork of [Mesh-LLM/mesh-llm](https://github.com/closedmesh/closedmesh-llm) under the same dual-license terms.

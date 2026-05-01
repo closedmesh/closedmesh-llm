@@ -7,7 +7,7 @@ kotlin {
     jvmToolchain(21)
 }
 
-group = "ai.meshllm.example"
+group = "com.closedmesh.example"
 version = "0.1.0"
 
 repositories {
@@ -30,5 +30,5 @@ sourceSets {
 }
 
 application {
-    mainClass.set("ai.meshllm.example.ExampleMainKt")
+    mainClass.set("com.closedmesh.example.ExampleMainKt")
 }

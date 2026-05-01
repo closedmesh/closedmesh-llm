@@ -1,9 +1,9 @@
-package ai.meshllm.example
+package com.closedmesh.example
 
-import ai.meshllm.ChatMessage
-import ai.meshllm.ChatRequest
-import ai.meshllm.Event
-import ai.meshllm.MeshClient
+import com.closedmesh.ChatMessage
+import com.closedmesh.ChatRequest
+import com.closedmesh.Event
+import com.closedmesh.MeshClient
 import com.sun.jna.NativeLibrary
 import kotlinx.coroutines.runBlocking
 import uniffi.mesh_ffi.createClient
@@ -76,7 +76,7 @@ fun main(args: Array<String>) = runBlocking {
     println("[disconnect] ok")
 }
 
-private fun waitForModels(client: MeshClient): List<ai.meshllm.Model> {
+private fun waitForModels(client: MeshClient): List<com.closedmesh.Model> {
     val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
     while (System.nanoTime() < deadline) {
         val models = runBlocking { client.listModels() }

@@ -15,7 +15,7 @@ Add the GitHub Packages Maven repository:
 ```kotlin
 repositories {
     maven {
-        url = uri("https://maven.pkg.github.com/Mesh-LLM/mesh-llm")
+        url = uri("https://maven.pkg.github.com/closedmesh/closedmesh-llm")
         credentials {
             username = providers.gradleProperty("gpr.user").orElse(System.getenv("GITHUB_ACTOR")).get()
             password = providers.gradleProperty("gpr.key").orElse(System.getenv("GITHUB_TOKEN")).get()

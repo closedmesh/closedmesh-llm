@@ -5,10 +5,10 @@ plugins {
     `maven-publish`
 }
 
-group = "ai.meshllm"
+group = "com.closedmesh"
 version = "0.65.6"
 
-val androidArtifactId = "meshllm-android"
+val androidArtifactId = "closedmesh-android"
 
 repositories {
     mavenCentral()
@@ -168,20 +168,20 @@ publishing {
 
             pom {
                 name.set("MeshLLM Android SDK")
-                description.set("Android/Kotlin bindings for connecting to mesh-llm meshes.")
-                url.set("https://github.com/Mesh-LLM/mesh-llm")
+                description.set("Android/Kotlin bindings for connecting to ClosedMesh.")
+                url.set("https://github.com/closedmesh/closedmesh-llm")
 
                 licenses {
                     license {
                         name.set("MIT")
-                        url.set("https://github.com/Mesh-LLM/mesh-llm/blob/main/LICENSE")
+                        url.set("https://github.com/closedmesh/closedmesh-llm/blob/main/LICENSE")
                     }
                 }
 
                 scm {
-                    url.set("https://github.com/Mesh-LLM/mesh-llm")
-                    connection.set("scm:git:https://github.com/Mesh-LLM/mesh-llm.git")
-                    developerConnection.set("scm:git:ssh://git@github.com/Mesh-LLM/mesh-llm.git")
+                    url.set("https://github.com/closedmesh/closedmesh-llm")
+                    connection.set("scm:git:https://github.com/closedmesh/closedmesh-llm.git")
+                    developerConnection.set("scm:git:ssh://git@github.com/closedmesh/closedmesh-llm.git")
                 }
 
                 withXml {
@@ -239,7 +239,7 @@ publishing {
     repositories {
         maven {
             name = "GitHubPackages"
-            url = uri("https://maven.pkg.github.com/Mesh-LLM/mesh-llm")
+            url = uri("https://maven.pkg.github.com/closedmesh/closedmesh-llm")
             credentials {
                 username = providers.environmentVariable("GITHUB_ACTOR")
                     .orElse(providers.gradleProperty("gpr.user"))

@@ -43,7 +43,7 @@ mesh-llm serve --llama-flavor vulkan --model Qwen2.5-32B
 Source builds must use `just`:
 
 ```bash
-git clone https://github.com/Mesh-LLM/mesh-llm
+git clone https://github.com/closedmesh/closedmesh-llm
 cd mesh-llm
 just build
 ```

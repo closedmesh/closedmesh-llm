@@ -41,7 +41,7 @@ function Prepare-Llama {
         & git am --abort *> $null
         Invoke-NativeCommand "git" @("remote", "set-url", "origin", $upstreamUrl)
         Invoke-NativeCommand "git" @("fetch", "origin", "master", "--tags")
-        Invoke-NativeCommand "git" @("config", "user.name", "Mesh-LLM CI")
+        Invoke-NativeCommand "git" @("config", "user.name", "ClosedMesh CI")
         Invoke-NativeCommand "git" @("config", "user.email", "ci@mesh-llm.local")
         Invoke-NativeCommand "git" @("-c", "advice.detachedHead=false", "checkout", "--detach", "--quiet", $targetSha)
         Invoke-NativeCommand "git" @("reset", "--hard", "--quiet", $targetSha)

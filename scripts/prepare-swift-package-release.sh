@@ -19,7 +19,7 @@ PACKAGE_SWIFT="$REPO_ROOT/Package.swift"
 ARTIFACT_DIR="$REPO_ROOT/dist"
 ARTIFACT_NAME="MeshLLMFFI.xcframework.zip"
 ARTIFACT_PATH="$ARTIFACT_DIR/$ARTIFACT_NAME"
-ARTIFACT_URL="https://github.com/Mesh-LLM/mesh-llm/releases/download/$TAG/$ARTIFACT_NAME"
+ARTIFACT_URL="https://github.com/closedmesh/closedmesh-llm/releases/download/$TAG/$ARTIFACT_NAME"
 
 mkdir -p "$ARTIFACT_DIR"
 
