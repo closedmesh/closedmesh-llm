@@ -864,22 +864,50 @@ impl MeshApi {
                 let has_assigned_model_work = has_runtime_descriptors
                     || has_nonempty_models(&peer.serving_models)
                     || has_nonempty_models(&peer.hosted_models);
-                let has_legacy_serving_signal = has_nonempty_models(&peer.hosted_models)
-                    || has_nonempty_models(&peer.serving_models)
-                    || peer
-                        .routable_models()
-                        .iter()
-                        .any(|model| !model.trim().is_empty());
+                let has_nonempty_routable = peer
+                    .routable_models()
+                    .iter()
+                    .any(|model| !model.trim().is_empty());
 
+                // Runtime descriptors are the modern, authoritative signal.
                 if has_ready_runtime {
-                    NodeState::Serving
-                } else if has_runtime_descriptors && has_assigned_model_work {
-                    NodeState::Loading
-                } else if has_legacy_serving_signal {
-                    NodeState::Serving
-                } else {
-                    NodeState::Standby
+                    return NodeState::Serving;
                 }
+                if has_runtime_descriptors && has_assigned_model_work {
+                    return NodeState::Loading;
+                }
+
+                // `hosted_models` is the pre-runtime-descriptor signal for
+                // "this peer is actively routing this model": the runtime only
+                // writes it after llama.cpp passes health checks (see
+                // runtime/mod.rs set_hosted_models / set_serving_models pair).
+                // Honour it as proof of actually serving.
+                if has_nonempty_models(&peer.hosted_models) {
+                    return NodeState::Serving;
+                }
+
+                // Modern peers that explicitly advertised `hosted_models` (even
+                // as empty) but still have non-empty `serving_models` are
+                // declaring intent without proof — either llama.cpp hasn't
+                // finished loading, or it failed to launch (e.g. missing
+                // rpc-server binary). Don't paint that as Serving; it's the
+                // bug that made failed-to-launch peers show up as
+                // "Serving Qwen3-0.6B" on the public status page.
+                if peer.hosted_models_known && has_nonempty_models(&peer.serving_models) {
+                    return NodeState::Loading;
+                }
+
+                // Legacy fallback: peers from before `hosted_models` was added
+                // to the gossip schema (identified by `hosted_models_known =
+                // false`, meaning their announcement omitted the field
+                // entirely) used `serving_models` as the authoritative signal.
+                // Preserve that behavior so older nodes don't silently drop
+                // off the public status page.
+                if has_nonempty_models(&peer.serving_models) || has_nonempty_routable {
+                    return NodeState::Serving;
+                }
+
+                NodeState::Standby
             }
         }
     }
@@ -1951,6 +1979,24 @@ mod tests {
         peer.serving_models = vec!["Qwen".into()];
 
         assert_eq!(MeshApi::derive_peer_state(&peer), NodeState::Serving);
+    }
+
+    /// A modern peer that explicitly advertised `hosted_models` (even as
+    /// empty) has opted into the newer schema; if its `serving_models`
+    /// declares intent but `hosted_models` is empty and no runtime descriptor
+    /// reports ready, we must NOT paint it as Serving — that's aspirational
+    /// state, not actual serving. The regression this test guards is a failed
+    /// launch (e.g. missing rpc-server binary) showing up as
+    /// "Serving Qwen3-0.6B" on the public status page.
+    #[test]
+    fn derive_peer_state_reports_loading_for_modern_peer_with_empty_hosted_models() {
+        let mut peer = make_test_state_peer(8, mesh::NodeRole::Host { http_port: 9337 });
+        peer.serving_models = vec!["Qwen3-0.6B".into()];
+        peer.hosted_models = vec![];
+        peer.hosted_models_known = true;
+        peer.served_model_runtime = vec![];
+
+        assert_eq!(MeshApi::derive_peer_state(&peer), NodeState::Loading);
     }
 
     #[test]
