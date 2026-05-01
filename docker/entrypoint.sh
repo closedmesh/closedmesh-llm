@@ -78,10 +78,15 @@ start_caddy() {
   trap 'kill -TERM $CADDY_PID 2>/dev/null || true' INT TERM EXIT
 }
 
+BIND_PORT_FLAG=""
+if [ -n "${MESH_BIND_PORT:-}" ]; then
+  BIND_PORT_FLAG="--bind-port $MESH_BIND_PORT"
+fi
+
 case "$APP_MODE" in
   console)
     # shellcheck disable=SC2086
-    exec closedmesh client --auto --port "$INTERNAL_PORT" --console "$CONSOLE_PORT" --listen-all $HEADLESS_FLAG $MESH_NAME_FLAG $PUBLISH_FLAG
+    exec closedmesh client --auto --port "$INTERNAL_PORT" --console "$CONSOLE_PORT" --listen-all $HEADLESS_FLAG $MESH_NAME_FLAG $PUBLISH_FLAG $BIND_PORT_FLAG
     ;;
   worker)
     BIN_DIR=/usr/local/lib/mesh-llm/bin
