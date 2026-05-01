@@ -121,6 +121,19 @@ mod darwin {
             ));
         }
         let target = uid_target()?;
+        let full_target = format!("{target}/{SERVICE_LABEL_DARWIN}");
+
+        // `launchctl bootstrap` returns exit 5 (EIO) if the service is
+        // already bootstrapped in this domain, which is a common state
+        // (install.sh bootstraps the LaunchAgent on install, then the user
+        // runs `closedmesh service start` and hits the noisy error).
+        // Mirror install.sh's idempotent dance: best-effort bootout first
+        // so bootstrap has a clean slate. Errors here are expected when the
+        // service isn't loaded — ignore them.
+        let _ = Command::new("launchctl")
+            .args(["bootout", &full_target])
+            .output();
+
         let status = Command::new("launchctl")
             .args(["bootstrap", &target])
             .arg(&plist)
