@@ -3,9 +3,24 @@
 #
 # Produces dist-release/closedmesh-<platform-suffix>.tar.gz, where <platform-suffix>
 # matches what closedmesh/public/install.sh asks for. Runs alongside the existing
-# scripts/package-release.sh (which produces the upstream mesh-llm bundle) — this
-# script just trims the bundle down to the closedmesh-installer contract:
+# scripts/package-release.sh (which produces the upstream mesh-llm bundle).
 #
+# What goes in the tarball depends on the flavor:
+#
+#   - metal (macOS arm64) / cpu (Linux): the full runtime — closedmesh,
+#     rpc-server-<flavor>, llama-server-<flavor>, llama-moe-{analyze,split},
+#     and any runtime shared libraries. These flavors are small enough (~40MB
+#     on macOS, ~45MB on Linux CPU) to ship as a single-tarball installer
+#     payload that works end-to-end after `curl … | sh`.
+#
+#   - cuda / rocm / vulkan: only the main closedmesh binary. These flavors'
+#     llama.cpp runtime bundles balloon from tens of MB to hundreds of MB
+#     (ROCm) or low gigabytes (CUDA) because they drag in cuBLAS / HIP
+#     shared libraries. We keep the installer tarball slim; install.sh
+#     does a second download of the matching `closedmesh-v<ver>-<target>.tar.gz`
+#     (produced by package-release.sh) for the llama.cpp runtime.
+#
+# Every flavor always includes:
 #   <archive>/closedmesh
 #   <archive>/dev.closedmesh.closedmesh.plist  (macOS only, reference)
 #   <archive>/closedmesh.service               (Linux only, systemd reference)
@@ -24,6 +39,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RELEASE_BIN_DIR="$REPO_ROOT/target/release"
+BUILD_BIN_DIR="${MESH_LLM_LLAMA_BUILD_BIN_DIR:-$REPO_ROOT/.deps/llama.cpp/build/bin}"
 DIST_DIR_DEFAULT="$REPO_ROOT/dist-release"
 
 FLAVOR="${MESH_RELEASE_FLAVOR:-}"
@@ -131,6 +147,72 @@ case "$os" in
 esac
 
 [[ -f "$REPO_ROOT/LICENSE" ]] && cp "$REPO_ROOT/LICENSE" "$stage/LICENSE"
+
+# For metal/cpu flavors the llama.cpp runtime is small enough (tens of MB) to
+# ship alongside the main binary, so the installer tarball works end-to-end
+# after a single download. GPU flavors stay slim here — install.sh pulls the
+# full bundle separately to avoid a 1.7GB curl | sh on CUDA.
+case "$FLAVOR" in
+    metal|cpu)
+        include_runtime=1
+        ;;
+    *)
+        include_runtime=0
+        ;;
+esac
+
+if (( include_runtime )); then
+    missing_bins=()
+    for bin in "rpc-server" "llama-server" "llama-moe-analyze" "llama-moe-split"; do
+        src="$BUILD_BIN_DIR/$bin"
+        [[ ! -x "$src" ]] && missing_bins+=("$bin") && continue
+        # Flavor-suffix the two that mesh-llm's launch.rs expects flavored.
+        case "$bin" in
+            rpc-server|llama-server) dest="$stage/${bin}-${FLAVOR}" ;;
+            *)                       dest="$stage/${bin}" ;;
+        esac
+        cp "$src" "$dest"
+        chmod +x "$dest"
+    done
+
+    if (( ${#missing_bins[@]} > 0 )); then
+        echo "release-closedmesh: missing llama.cpp binaries for flavor '$FLAVOR':" >&2
+        printf '  - %s\n' "${missing_bins[@]}" >&2
+        echo "                    expected under $BUILD_BIN_DIR" >&2
+        echo "                    run 'just release-build' first." >&2
+        exit 1
+    fi
+
+    # Pull in any runtime shared libs llama-server links against (dylibs on
+    # Darwin, .so on Linux). For a static Metal build this is usually empty,
+    # which is fine — nothing to copy.
+    shopt -s nullglob
+    runtime_libs=()
+    case "$os" in
+        Darwin) runtime_libs=("$BUILD_BIN_DIR"/*.dylib) ;;
+        Linux)  runtime_libs=("$BUILD_BIN_DIR"/*.so "$BUILD_BIN_DIR"/*.so.*) ;;
+    esac
+    shopt -u nullglob
+    if (( ${#runtime_libs[@]} > 0 )); then
+        for lib in "${runtime_libs[@]}"; do
+            cp "$lib" "$stage/"
+        done
+    fi
+
+    # macOS needs the binaries to look next to themselves for their dylibs;
+    # mirror what package-release.sh does for the full bundle.
+    if [[ "$os" == "Darwin" ]]; then
+        for bin in \
+            "$stage/closedmesh" \
+            "$stage/rpc-server-${FLAVOR}" \
+            "$stage/llama-server-${FLAVOR}" \
+            "$stage/llama-moe-analyze" \
+            "$stage/llama-moe-split"; do
+            [[ -f "$bin" ]] || continue
+            install_name_tool -add_rpath @executable_path/ "$bin" 2>/dev/null || true
+        done
+    fi
+fi
 
 (cd "$stage" && tar -czf "$tarball" ./*)
 
