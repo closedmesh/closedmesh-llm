@@ -956,10 +956,7 @@ async fn stun_public_addr(advertised_port: u16) -> Option<std::net::SocketAddr> 
         // previous "take .next()" picked an IPv6 STUN target and we
         // never got a v4 mapping back.
         let dest: SocketAddr = match tokio::net::lookup_host(server).await {
-            Ok(addrs) => match addrs
-                .filter(|a| matches!(a.ip(), IpAddr::V4(_)))
-                .next()
-            {
+            Ok(addrs) => match addrs.filter(|a| matches!(a.ip(), IpAddr::V4(_))).next() {
                 Some(a) => a,
                 None => continue,
             },
@@ -2958,17 +2955,11 @@ impl Node {
                         let c = match connect_result {
                             Err(_) => {
                                 mark_dead(self, peer_id, "connect timeout (10s)").await;
-                                anyhow::bail!(
-                                    "Timeout connecting to {}",
-                                    peer_id.fmt_short()
-                                );
+                                anyhow::bail!("Timeout connecting to {}", peer_id.fmt_short());
                             }
                             Ok(Err(e)) => {
                                 mark_dead(self, peer_id, "connect error").await;
-                                anyhow::bail!(
-                                    "Failed to connect to {}: {e}",
-                                    peer_id.fmt_short()
-                                );
+                                anyhow::bail!("Failed to connect to {}: {e}", peer_id.fmt_short());
                             }
                             Ok(Ok(c)) => c,
                         };
