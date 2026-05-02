@@ -956,7 +956,10 @@ async fn stun_public_addr(advertised_port: u16) -> Option<std::net::SocketAddr> 
         // previous "take .next()" picked an IPv6 STUN target and we
         // never got a v4 mapping back.
         let dest: SocketAddr = match tokio::net::lookup_host(server).await {
-            Ok(addrs) => match addrs.filter(|a| matches!(a.ip(), IpAddr::V4(_))).next() {
+            Ok(addrs) => match addrs
+                .filter(|a| matches!(a.ip(), IpAddr::V4(_)))
+                .next()
+            {
                 Some(a) => a,
                 None => continue,
             },
@@ -2927,26 +2930,48 @@ impl Node {
         &self,
         peer_id: EndpointId,
     ) -> Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
+        // Helper to mark the peer dead when any tunnel-open path fails. Without
+        // this, dense-model election keeps picking a ghost host for minutes
+        // (until heartbeat / stale prune catches up). Tunnel failure is by far
+        // the earliest and most reliable signal that a peer is unreachable.
+        async fn mark_dead(node: &Node, peer_id: EndpointId, reason: &str) {
+            tracing::info!(
+                "Tunnel to {} failed ({reason}) — broadcasting peer death",
+                peer_id.fmt_short()
+            );
+            node.handle_peer_death(peer_id).await;
+        }
+
         let conn = {
             let state = self.state.lock().await;
             match state.connections.get(&peer_id).cloned() {
                 Some(c) => c,
                 None => {
-                    // Try on-demand connect using peer's addr from peer info
                     let addr = state.peers.get(&peer_id).map(|p| p.addr.clone());
                     drop(state);
                     if let Some(addr) = addr {
-                        let c = tokio::time::timeout(
+                        let connect_result = tokio::time::timeout(
                             std::time::Duration::from_secs(10),
                             connect_mesh(&self.endpoint, addr),
                         )
-                        .await
-                        .map_err(|_| {
-                            anyhow::anyhow!("Timeout connecting to {}", peer_id.fmt_short())
-                        })?
-                        .map_err(|e| {
-                            anyhow::anyhow!("Failed to connect to {}: {e}", peer_id.fmt_short())
-                        })?;
+                        .await;
+                        let c = match connect_result {
+                            Err(_) => {
+                                mark_dead(self, peer_id, "connect timeout (10s)").await;
+                                anyhow::bail!(
+                                    "Timeout connecting to {}",
+                                    peer_id.fmt_short()
+                                );
+                            }
+                            Ok(Err(e)) => {
+                                mark_dead(self, peer_id, "connect error").await;
+                                anyhow::bail!(
+                                    "Failed to connect to {}: {e}",
+                                    peer_id.fmt_short()
+                                );
+                            }
+                            Ok(Ok(c)) => c,
+                        };
                         self.state
                             .lock()
                             .await
@@ -2954,29 +2979,32 @@ impl Node {
                             .insert(peer_id, c.clone());
                         c
                     } else {
+                        // Missing addr is usually transient (just learned about
+                        // peer, haven't gossiped its addr yet) so don't
+                        // pre-emptively kill it — let heartbeat decide.
                         anyhow::bail!("No connection or address for {}", peer_id.fmt_short());
                     }
                 }
             }
         };
-        let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let outer = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             let (mut send, recv) = conn.open_bi().await?;
             send.write_all(&[STREAM_TUNNEL_HTTP]).await?;
             Ok::<_, anyhow::Error>((send, recv))
         })
-        .await
-        .map_err(|_| anyhow::anyhow!("Timeout opening tunnel to {}", peer_id.fmt_short()))?;
+        .await;
 
-        if result.is_err() {
-            // Connection failed — peer is likely dead, broadcast it
-            tracing::info!(
-                "Tunnel to {} failed, broadcasting death",
-                peer_id.fmt_short()
-            );
-            self.handle_peer_death(peer_id).await;
+        match outer {
+            Err(_) => {
+                mark_dead(self, peer_id, "open_bi/write timeout (5s)").await;
+                anyhow::bail!("Timeout opening tunnel to {}", peer_id.fmt_short());
+            }
+            Ok(Err(e)) => {
+                mark_dead(self, peer_id, "open_bi/write error").await;
+                Err(e)
+            }
+            Ok(Ok(streams)) => Ok(streams),
         }
-
-        result
     }
 
     pub async fn set_tunnel_port(&self, id: EndpointId, port: u16) {

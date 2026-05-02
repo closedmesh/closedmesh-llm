@@ -2580,6 +2580,13 @@ pub async fn route_model_request(
                         affinity.forget_target(model, prefix_hash, &target);
                     }
                 }
+                // Dense remote host that timed out at request-level is almost
+                // certainly dead. Mirror the MoE path: evict it so election
+                // re-runs against live peers immediately, instead of waiting
+                // for the 60s heartbeat / 180s stale prune to notice.
+                if let election::InferenceTarget::Remote(peer_id) = &target {
+                    node.handle_peer_death(*peer_id).await;
+                }
                 if !refreshed {
                     let refresh_node = node.clone();
                     tokio::spawn(async move {
@@ -2597,6 +2604,13 @@ pub async fn route_model_request(
                     if cached_target == &target {
                         affinity.forget_target(model, prefix_hash, &target);
                     }
+                }
+                // Same rationale as RetryableTimeout above: a dense Remote
+                // returning unavailable means the host claims it can't serve
+                // — boot it from our peer table so election picks someone
+                // live, otherwise we keep proxying to a ghost for minutes.
+                if let election::InferenceTarget::Remote(peer_id) = &target {
+                    node.handle_peer_death(*peer_id).await;
                 }
                 if !refreshed {
                     let refresh_node = node.clone();
