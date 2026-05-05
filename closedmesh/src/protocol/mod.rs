@@ -1578,6 +1578,7 @@ mod tests {
                 ctx_size: Some(8192),
                 gpu_id: Some("pci:0000:65:00.0".to_string()),
                 parallel: None,
+                force_split: None,
             }],
             plugins: vec![PluginConfigEntry {
                 name: "blackboard".to_string(),
@@ -1629,6 +1630,7 @@ mod tests {
                 ctx_size: None,
                 gpu_id: None,
                 parallel: None,
+                force_split: None,
             }],
             plugins: vec![],
         };
@@ -1650,6 +1652,7 @@ mod tests {
                 ctx_size: None,
                 gpu_id: None,
                 parallel: None,
+                force_split: None,
             }],
             plugins: vec![],
         };
@@ -1674,6 +1677,7 @@ mod tests {
                 ctx_size: Some(8192),
                 gpu_id: Some("pci:0000:65:00.0".to_string()),
                 parallel: None,
+                force_split: None,
             }],
             plugins: vec![],
         };

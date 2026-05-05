@@ -44,8 +44,9 @@ use self::routes::dispatch_request;
 use self::state::ApiInner;
 use self::status::{
     build_gpus, build_ownership_payload, build_runtime_processes_payload,
-    build_runtime_status_payload, LocalInstance, MeshModelPayload, NodeState, PeerPayload,
-    RuntimeProcessesPayload, RuntimeStatusPayload, StatusPayload, WakeableNode, WakeableNodeState,
+    build_runtime_status_payload, LocalInstance, MeshFitPayload, MeshModelPayload, MoeShardPayload,
+    NodeState, PeerPayload, RuntimeProcessesPayload, RuntimeStatusPayload, SplitGroupPayload,
+    StatusPayload, WakeableNode, WakeableNodeState,
 };
 use crate::inference::election;
 use crate::mesh;
@@ -175,6 +176,402 @@ fn likely_audio_model(name: &str, description: Option<&str>) -> bool {
     ]
     .iter()
     .any(|needle| haystack.contains(needle))
+}
+
+/// Result of [`classify_peer_split_role`] — three optional fields the caller
+/// folds into a `PeerPayload`. We return a struct rather than a tuple so the
+/// call sites stay readable when more split modes get added later.
+struct PeerSplitClassification {
+    role: Option<String>,
+    group: Option<SplitGroupPayload>,
+    moe_shard: Option<MoeShardPayload>,
+}
+
+/// Coarse classification of a peer's role inside the mesh's current
+/// inference topology. Pure inference from observable gossip — no live
+/// election state is required.
+///
+/// We classify based on:
+///   - The peer's `NodeRole` (Host vs Worker vs Client).
+///   - Whether `serving_models` overlaps with any model that has multiple
+///     active serving peers (a proxy for "this model is split or
+///     replicated across nodes").
+///   - Whether the model is bigger than any single peer in the group
+///     (which makes pipeline-parallel the only way it could be running).
+///
+/// MoE detection currently leans on the `serving_models` count being >1
+/// for the same model — we don't have GGUF metadata for peer models in
+/// the mesh state at this layer, so the runtime's per-model `MeshModelPayload`
+/// is the source of truth for `moe = true`. The peer-side classifier
+/// returns `MoeShardPayload` heuristically; clients should cross-reference
+/// against `MeshModelPayload.split_kind == "moe"` for ground truth.
+fn classify_peer_split_role(
+    peer: &mesh::PeerInfo,
+    all_peers: &[mesh::PeerInfo],
+    my_vram_gb: f64,
+) -> PeerSplitClassification {
+    if matches!(peer.role, mesh::NodeRole::Client) {
+        return PeerSplitClassification {
+            role: None,
+            group: None,
+            moe_shard: None,
+        };
+    }
+
+    // Find the first model this peer is actively contributing to that has
+    // co-serving peers. Most of the time this is a single model per peer;
+    // multi-model nodes still get classified by the largest cohort.
+    let candidate_models: Vec<&str> = peer
+        .serving_models
+        .iter()
+        .map(String::as_str)
+        .chain(peer.hosted_models.iter().map(String::as_str))
+        .collect();
+
+    let mut best: Option<(&str, Vec<&mesh::PeerInfo>, Option<&mesh::PeerInfo>)> = None;
+    for model in &candidate_models {
+        let cohort: Vec<&mesh::PeerInfo> = all_peers
+            .iter()
+            .filter(|p| p.id != peer.id && p.is_assigned_model(model))
+            .collect();
+        let host = all_peers
+            .iter()
+            .find(|p| p.routes_http_model(model))
+            .or_else(|| {
+                if peer.routes_http_model(model) {
+                    Some(peer)
+                } else {
+                    None
+                }
+            });
+        if !cohort.is_empty()
+            || matches!(
+                best.as_ref(),
+                Some((_, existing, _)) if existing.is_empty()
+            )
+            || best.is_none()
+        {
+            best = Some((*model, cohort, host));
+        }
+    }
+
+    let Some((model, cohort, host)) = best else {
+        // Peer reports no models — could be standby. No role to surface.
+        return PeerSplitClassification {
+            role: None,
+            group: None,
+            moe_shard: None,
+        };
+    };
+
+    if cohort.is_empty() {
+        // Solo serve — the peer is hosting/serving a model nobody else does.
+        // Skip a role badge for plain solo because the existing `role` and
+        // `serving_models` already convey that; the UI uses `split_role` for
+        // multi-node states specifically.
+        return PeerSplitClassification {
+            role: None,
+            group: None,
+            moe_shard: None,
+        };
+    }
+
+    // We have ≥1 co-serving peer for `model`. The host of that model is the
+    // anchor of the split group (if any). Build the SplitGroup payload.
+    let mut peer_ids: Vec<String> = std::iter::once(peer.id.fmt_short().to_string())
+        .chain(cohort.iter().map(|c| c.id.fmt_short().to_string()))
+        .collect();
+    peer_ids.sort();
+    peer_ids.dedup();
+
+    let total_group_vram_gb = (peer.vram_bytes as f64 / 1e9)
+        + cohort
+            .iter()
+            .map(|c| c.vram_bytes as f64 / 1e9)
+            .sum::<f64>();
+
+    let host_id = host
+        .map(|h| h.id.fmt_short().to_string())
+        .unwrap_or_else(|| peer.id.fmt_short().to_string());
+
+    let group = SplitGroupPayload {
+        model: model.to_string(),
+        host_id: host_id.clone(),
+        peer_ids,
+        total_group_vram_gb,
+    };
+
+    // Count all Host-role peers (including self if applicable) that route
+    // this model. Multiple hosts ⇒ MoE / multi-host, never a single
+    // pipeline-host with workers.
+    let total_routing_hosts = all_peers
+        .iter()
+        .filter(|p| p.id != peer.id && p.routes_http_model(model))
+        .count()
+        + if peer.routes_http_model(model) { 1 } else { 0 };
+
+    let role = if total_routing_hosts >= 2 {
+        // Multiple Hosts serving the same model means independent shards
+        // (MoE) or simple multi-host load balancing. The peer-level classifier
+        // can't distinguish between those without GGUF metadata; it picks the
+        // more informative label and lets the model-level classifier override
+        // via `split_kind`.
+        Some("moe_shard".to_string())
+    } else if peer.routes_http_model(model) {
+        Some("pipeline_host".to_string())
+    } else if matches!(peer.role, mesh::NodeRole::Worker) {
+        Some("pipeline_worker".to_string())
+    } else {
+        None
+    };
+
+    let moe_shard = if matches!(role.as_deref(), Some("moe_shard")) {
+        Some(MoeShardPayload {
+            model: model.to_string(),
+            total_shards: total_routing_hosts as u32,
+        })
+    } else {
+        None
+    };
+
+    let _ = host; // host info already encoded in `host_id` above.
+
+    let _ = my_vram_gb; // kept for symmetry with future weight-aware branches
+
+    PeerSplitClassification {
+        role,
+        group: Some(group),
+        moe_shard,
+    }
+}
+
+/// Coarse classification of how the mesh is currently serving a single
+/// model. See [`status::MeshModelPayload::split_kind`] for the wire-level
+/// description; this is the producer side.
+///
+/// We pick one of:
+/// - `cold`        — no live host yet (model in catalog only)
+/// - `solo`        — single peer hosts/serves it
+/// - `pipeline`    — multiple peers participating, dense + size > any
+///   single peer's VRAM (only viable layout)
+/// - `moe`         — multiple peers and the model is MoE (independent
+///   shards or load-balancing replicas)
+/// - `multi_host`  — multiple peers, dense, fits on each individually
+///   (load-balancing replicas, no split)
+//
+// Kept as 8 args because each input is genuinely orthogonal — collapsing
+// into a struct would force callers to construct + name fields they don't
+// otherwise carry. The "too many arguments" lint is allowed here on
+// purpose.
+#[allow(clippy::too_many_arguments)]
+fn classify_model_split_kind(
+    model_name: &str,
+    is_warm: bool,
+    moe: bool,
+    node_count: usize,
+    size_gb: f64,
+    all_peers: &[mesh::PeerInfo],
+    my_vram_gb: f64,
+    local_serves_this_model: bool,
+) -> String {
+    if !is_warm || node_count == 0 {
+        return "cold".to_string();
+    }
+    if node_count == 1 {
+        return "solo".to_string();
+    }
+    if moe {
+        return "moe".to_string();
+    }
+    // Dense + multi-node. Distinguish "pipeline (split because too big)" from
+    // "multi_host (load-balanced replicas)" by checking whether any single
+    // hosting peer has enough VRAM to hold the model alone. The election
+    // planner would not split a model that fits anywhere by itself.
+    let single_peer_can_fit = if local_serves_this_model {
+        my_vram_gb * 0.95 >= size_gb
+    } else {
+        false
+    } || all_peers
+        .iter()
+        .any(|p| p.routes_http_model(model_name) && (p.vram_bytes as f64 / 1e9) * 0.95 >= size_gb);
+
+    if single_peer_can_fit {
+        "multi_host".to_string()
+    } else {
+        "pipeline".to_string()
+    }
+}
+
+/// Per-model mesh capacity assessment. The desktop Models page renders one
+/// of three states from this:
+///   - `fits_on_largest_node = true`  → "Solo on this Mac" / "Solo on N1"
+///   - `fits_pooled = true`           → "Will use M nodes pooling Y GB"
+///   - both false                     → "Needs more contributors (X / Y GB)"
+///
+/// We only count peers that are plausibly eligible to participate in a
+/// pipeline split: not entry nodes, with non-zero VRAM, and not currently
+/// flagged as Client-only. Same-backend / RTT eligibility is *not* enforced
+/// here yet — those come from `closedmesh-llm/closedmesh/src/inference/election.rs`
+/// and would require either a per-call backend query or backend-aware peer
+/// filtering. The chat product can refine this client-side using
+/// `peer.capability.backend` once it consumes the per-peer split fields.
+fn compute_mesh_fit(size_gb: f64, my_vram_gb: f64, all_peers: &[mesh::PeerInfo]) -> MeshFitPayload {
+    // Mirror the dense election planner's headroom multiplier so the UI
+    // doesn't claim a fit the runtime would refuse (closedmesh-llm/closedmesh/
+    // src/inference/election.rs build_dense_launch_plan multiplies by 1.1).
+    let needed_vram_gb = size_gb * 1.1;
+
+    let mut fits_on_largest_node = my_vram_gb * 1.0 >= needed_vram_gb;
+    let mut pooled_vram_gb = my_vram_gb;
+    let mut eligible_peer_count: u32 = if my_vram_gb > 0.0 { 1 } else { 0 };
+
+    for peer in all_peers {
+        if matches!(peer.role, mesh::NodeRole::Client) {
+            continue;
+        }
+        // Skip likely entry-node hostnames so the public mesh entry doesn't
+        // inflate "pooled" capacity in the chat UI. This mirrors the
+        // app-side `isEntryNode` filter in app/api/status/route.ts.
+        if peer
+            .hostname
+            .as_deref()
+            .map(|h| h.starts_with("ip-"))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let peer_vram_gb = peer.vram_bytes as f64 / 1e9;
+        if peer_vram_gb <= 0.0 {
+            continue;
+        }
+        eligible_peer_count += 1;
+        pooled_vram_gb += peer_vram_gb;
+        if peer_vram_gb >= needed_vram_gb {
+            fits_on_largest_node = true;
+        }
+    }
+
+    let fits_pooled = pooled_vram_gb >= needed_vram_gb;
+
+    MeshFitPayload {
+        fits_on_largest_node,
+        fits_pooled,
+        pooled_vram_gb,
+        needed_vram_gb,
+        eligible_peer_count,
+    }
+}
+
+/// Local-node analogue of [`classify_peer_split_role`]. The local node never
+/// appears in the `peers` list, so we feed our own model membership into the
+/// same logic to surface `my_split_role` / `my_split_group` on `StatusPayload`.
+fn classify_local_split_role(
+    self_id: &str,
+    is_host: bool,
+    is_client: bool,
+    serving_models: &[String],
+    hosted_models: &[String],
+    my_vram_gb: f64,
+    all_peers: &[mesh::PeerInfo],
+) -> PeerSplitClassification {
+    if is_client {
+        return PeerSplitClassification {
+            role: None,
+            group: None,
+            moe_shard: None,
+        };
+    }
+
+    let candidate_models: Vec<&str> = serving_models
+        .iter()
+        .map(String::as_str)
+        .chain(hosted_models.iter().map(String::as_str))
+        .collect();
+
+    let mut best: Option<(&str, Vec<&mesh::PeerInfo>)> = None;
+    for model in &candidate_models {
+        let cohort: Vec<&mesh::PeerInfo> = all_peers
+            .iter()
+            .filter(|p| p.is_assigned_model(model))
+            .collect();
+        if !cohort.is_empty() || best.is_none() {
+            best = Some((*model, cohort));
+        }
+    }
+
+    let Some((model, cohort)) = best else {
+        return PeerSplitClassification {
+            role: None,
+            group: None,
+            moe_shard: None,
+        };
+    };
+
+    if cohort.is_empty() {
+        return PeerSplitClassification {
+            role: None,
+            group: None,
+            moe_shard: None,
+        };
+    }
+
+    let mut peer_ids: Vec<String> = std::iter::once(self_id.to_string())
+        .chain(cohort.iter().map(|c| c.id.fmt_short().to_string()))
+        .collect();
+    peer_ids.sort();
+    peer_ids.dedup();
+
+    let total_group_vram_gb = my_vram_gb
+        + cohort
+            .iter()
+            .map(|c| c.vram_bytes as f64 / 1e9)
+            .sum::<f64>();
+
+    // Determine host: prefer an existing peer with Host role for this model,
+    // otherwise fall back to "we are the host" if our local flag agrees.
+    let host_peer = all_peers.iter().find(|p| p.routes_http_model(model));
+    let host_id = host_peer
+        .map(|h| h.id.fmt_short().to_string())
+        .unwrap_or_else(|| self_id.to_string());
+
+    let group = SplitGroupPayload {
+        model: model.to_string(),
+        host_id: host_id.clone(),
+        peer_ids,
+        total_group_vram_gb,
+    };
+
+    let i_am_host = host_peer.map(|_| false).unwrap_or(is_host);
+
+    // If multiple peers also have Host role for this model, treat ourselves
+    // as one shard of an MoE / multi-host deployment.
+    let other_host_count = all_peers
+        .iter()
+        .filter(|p| p.routes_http_model(model))
+        .count();
+
+    let role = if other_host_count >= 1 && is_host {
+        Some("moe_shard".to_string())
+    } else if i_am_host {
+        Some("pipeline_host".to_string())
+    } else {
+        Some("pipeline_worker".to_string())
+    };
+
+    let moe_shard = if matches!(role.as_deref(), Some("moe_shard")) {
+        Some(MoeShardPayload {
+            model: model.to_string(),
+            total_shards: (other_host_count + 1) as u32,
+        })
+    } else {
+        None
+    };
+
+    PeerSplitClassification {
+        role,
+        group: Some(group),
+        moe_shard,
+    }
 }
 
 fn fit_hint_for_machine(size_gb: f64, my_vram_gb: f64) -> (String, String) {
@@ -768,6 +1165,17 @@ impl MeshApi {
                     })
                     .unwrap_or_else(|| name.clone());
                 let (fit_label, fit_detail) = fit_hint_for_machine(size_gb, my_vram_gb);
+                let split_kind = classify_model_split_kind(
+                    name,
+                    is_warm,
+                    moe,
+                    node_count,
+                    size_gb,
+                    &all_peers,
+                    my_vram_gb,
+                    my_serving_models.iter().any(|m| m == name),
+                );
+                let mesh_fit = compute_mesh_fit(size_gb, my_vram_gb, &all_peers);
                 MeshModelPayload {
                     name: name.clone(),
                     display_name,
@@ -815,6 +1223,8 @@ impl MeshApi {
                     download_command: format!("closedmesh models download {}", command_ref),
                     run_command: format!("closedmesh serve --model {}", command_ref),
                     auto_command: format!("closedmesh serve --auto --model {}", command_ref),
+                    split_kind,
+                    mesh_fit,
                 }
             })
             .collect()
@@ -1024,38 +1434,44 @@ impl MeshApi {
         let my_requested_models = node.requested_models().await;
         let peers: Vec<PeerPayload> = all_peers
             .iter()
-            .map(|p| PeerPayload {
-                id: p.id.fmt_short().to_string(),
-                owner: build_ownership_payload(&p.owner_summary),
-                role: match p.role {
-                    mesh::NodeRole::Worker => "Worker".into(),
-                    mesh::NodeRole::Host { .. } => "Host".into(),
-                    mesh::NodeRole::Client => "Client".into(),
-                },
-                state: Self::derive_peer_state(p),
-                models: p.models.clone(),
-                available_models: p.available_models.clone(),
-                requested_models: p.requested_models.clone(),
-                vram_gb: p.vram_bytes as f64 / 1e9,
-                serving_models: p.serving_models.clone(),
-                hosted_models: p.hosted_models.clone(),
-                hosted_models_known: p.hosted_models_known,
-                version: p.version.clone(),
-                rtt_ms: p.rtt_ms,
-                hostname: p.hostname.clone(),
-                is_soc: p.is_soc,
-                gpus: build_gpus(
-                    p.gpu_name.as_deref(),
-                    p.gpu_vram.as_deref(),
-                    p.gpu_reserved_bytes.as_deref(),
-                    p.gpu_mem_bandwidth_gbps.as_deref(),
-                    p.gpu_compute_tflops_fp32.as_deref(),
-                    p.gpu_compute_tflops_fp16.as_deref(),
-                ),
-                capability: crate::api::status::NodeCapabilityPayload::from_capability(
-                    &p.capability,
-                ),
-                first_joined_mesh_ts: p.first_joined_mesh_ts,
+            .map(|p| {
+                let split_classification = classify_peer_split_role(p, &all_peers, my_vram_gb);
+                PeerPayload {
+                    id: p.id.fmt_short().to_string(),
+                    owner: build_ownership_payload(&p.owner_summary),
+                    role: match p.role {
+                        mesh::NodeRole::Worker => "Worker".into(),
+                        mesh::NodeRole::Host { .. } => "Host".into(),
+                        mesh::NodeRole::Client => "Client".into(),
+                    },
+                    state: Self::derive_peer_state(p),
+                    models: p.models.clone(),
+                    available_models: p.available_models.clone(),
+                    requested_models: p.requested_models.clone(),
+                    vram_gb: p.vram_bytes as f64 / 1e9,
+                    serving_models: p.serving_models.clone(),
+                    hosted_models: p.hosted_models.clone(),
+                    hosted_models_known: p.hosted_models_known,
+                    version: p.version.clone(),
+                    rtt_ms: p.rtt_ms,
+                    hostname: p.hostname.clone(),
+                    is_soc: p.is_soc,
+                    gpus: build_gpus(
+                        p.gpu_name.as_deref(),
+                        p.gpu_vram.as_deref(),
+                        p.gpu_reserved_bytes.as_deref(),
+                        p.gpu_mem_bandwidth_gbps.as_deref(),
+                        p.gpu_compute_tflops_fp32.as_deref(),
+                        p.gpu_compute_tflops_fp16.as_deref(),
+                    ),
+                    capability: crate::api::status::NodeCapabilityPayload::from_capability(
+                        &p.capability,
+                    ),
+                    first_joined_mesh_ts: p.first_joined_mesh_ts,
+                    split_role: split_classification.role,
+                    split_group: split_classification.group,
+                    moe_shard: split_classification.moe_shard,
+                }
             })
             .collect();
 
@@ -1091,6 +1507,21 @@ impl MeshApi {
             display_model_name.as_str(),
         );
         let node_status = Self::derive_node_status(node_state);
+
+        // Synthesize a PeerInfo-shaped view of this node so we can reuse the
+        // peer split classifier above. The local node is "self" — it never
+        // shows up in the peer list — so we feed it through the same logic
+        // and end up with the same split_role / split_group fields populated
+        // for the dashboard.
+        let self_split = classify_local_split_role(
+            node_id.as_str(),
+            effective_is_host,
+            is_client,
+            &my_serving_models,
+            &my_hosted_models,
+            my_vram_gb,
+            &all_peers,
+        );
 
         StatusPayload {
             version: CLOSEDMESH_VERSION.to_string(),
@@ -1171,6 +1602,9 @@ impl MeshApi {
             routing_affinity,
             routing_metrics,
             first_joined_mesh_ts: node.first_joined_mesh_ts().await,
+            my_split_role: self_split.role,
+            my_split_group: self_split.group,
+            my_moe_shard: self_split.moe_shard,
         }
     }
 
@@ -1662,6 +2096,215 @@ mod tests {
             first.get("bandwidth_gbps").is_none(),
             "API status JSON should use mem_bandwidth_gbps"
         );
+    }
+
+    #[test]
+    fn classify_model_split_kind_marks_solo_when_single_node() {
+        let kind =
+            classify_model_split_kind("Qwen3-8B-Q4_K_M", true, false, 1, 5.0, &[], 16.0, true);
+        assert_eq!(kind, "solo");
+    }
+
+    #[test]
+    fn classify_model_split_kind_marks_pipeline_when_dense_too_big_for_any_node() {
+        let host = make_test_peer(
+            1,
+            mesh::NodeRole::Host { http_port: 9337 },
+            vec!["GLM-4.7-Flash"],
+            vec!["GLM-4.7-Flash"],
+            true,
+        );
+        let worker = make_test_peer(
+            2,
+            mesh::NodeRole::Worker,
+            vec!["GLM-4.7-Flash"],
+            vec![],
+            true,
+        );
+        let kind = classify_model_split_kind(
+            "GLM-4.7-Flash",
+            true,
+            false,
+            2,
+            // Each peer has 24 GB; needed VRAM (44 GB) exceeds either alone.
+            44.0,
+            &[host, worker],
+            8.0,
+            false,
+        );
+        assert_eq!(kind, "pipeline");
+    }
+
+    #[test]
+    fn classify_model_split_kind_marks_multi_host_when_dense_fits_each_node() {
+        let host_a = make_test_peer(
+            3,
+            mesh::NodeRole::Host { http_port: 9337 },
+            vec!["Qwen3-8B-Q4_K_M"],
+            vec!["Qwen3-8B-Q4_K_M"],
+            true,
+        );
+        let host_b = make_test_peer(
+            4,
+            mesh::NodeRole::Host { http_port: 9337 },
+            vec!["Qwen3-8B-Q4_K_M"],
+            vec!["Qwen3-8B-Q4_K_M"],
+            true,
+        );
+        let kind = classify_model_split_kind(
+            "Qwen3-8B-Q4_K_M",
+            true,
+            false,
+            2,
+            // 4 GB model fits comfortably on either 24 GB host.
+            4.0,
+            &[host_a, host_b],
+            8.0,
+            false,
+        );
+        assert_eq!(kind, "multi_host");
+    }
+
+    #[test]
+    fn classify_model_split_kind_marks_moe_when_flag_set_and_multi_node() {
+        let host_a = make_test_peer(
+            5,
+            mesh::NodeRole::Host { http_port: 9337 },
+            vec!["Qwen3-30B-A3B"],
+            vec!["Qwen3-30B-A3B"],
+            true,
+        );
+        let host_b = make_test_peer(
+            6,
+            mesh::NodeRole::Host { http_port: 9337 },
+            vec!["Qwen3-30B-A3B"],
+            vec!["Qwen3-30B-A3B"],
+            true,
+        );
+        let kind = classify_model_split_kind(
+            "Qwen3-30B-A3B",
+            true,
+            true,
+            2,
+            18.0,
+            &[host_a, host_b],
+            16.0,
+            false,
+        );
+        assert_eq!(kind, "moe");
+    }
+
+    #[test]
+    fn classify_model_split_kind_returns_cold_when_no_active_nodes() {
+        let kind =
+            classify_model_split_kind("Qwen3-8B-Q4_K_M", false, false, 0, 5.0, &[], 16.0, false);
+        assert_eq!(kind, "cold");
+    }
+
+    #[test]
+    fn compute_mesh_fit_marks_fits_solo_when_local_box_has_enough_vram() {
+        let fit = compute_mesh_fit(20.0, 64.0, &[]);
+        assert!(fit.fits_on_largest_node);
+        assert!(fit.fits_pooled);
+        assert!(fit.eligible_peer_count >= 1);
+        assert!((fit.needed_vram_gb - 22.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn compute_mesh_fit_marks_pooled_when_swarm_combined_capacity_clears_threshold() {
+        let peer_a = make_test_peer(
+            10,
+            mesh::NodeRole::Host { http_port: 9337 },
+            vec![],
+            vec![],
+            true,
+        );
+        let peer_b = make_test_peer(11, mesh::NodeRole::Worker, vec![], vec![], true);
+        // size=40 GB, needed=44 GB. local 16 GB + 2× peers 24 GB each = 64 GB total.
+        let fit = compute_mesh_fit(40.0, 16.0, &[peer_a, peer_b]);
+        assert!(!fit.fits_on_largest_node);
+        assert!(fit.fits_pooled);
+        assert!(fit.pooled_vram_gb >= 60.0);
+        assert_eq!(fit.eligible_peer_count, 3);
+    }
+
+    #[test]
+    fn compute_mesh_fit_marks_neither_when_pool_short() {
+        let small_peer = mesh::PeerInfo {
+            vram_bytes: 4_000_000_000,
+            ..make_test_peer(12, mesh::NodeRole::Worker, vec![], vec![], true)
+        };
+        // size=200 GB, needed=220 GB; local 8 GB + peer 4 GB only = 12 GB.
+        let fit = compute_mesh_fit(200.0, 8.0, &[small_peer]);
+        assert!(!fit.fits_on_largest_node);
+        assert!(!fit.fits_pooled);
+    }
+
+    #[test]
+    fn classify_peer_split_role_returns_none_for_solo_serve() {
+        let lone = make_test_peer(
+            20,
+            mesh::NodeRole::Host { http_port: 9337 },
+            vec!["Qwen3-8B-Q4_K_M"],
+            vec!["Qwen3-8B-Q4_K_M"],
+            true,
+        );
+        let class = classify_peer_split_role(&lone, std::slice::from_ref(&lone), 16.0);
+        assert!(class.role.is_none());
+        assert!(class.group.is_none());
+    }
+
+    #[test]
+    fn classify_peer_split_role_marks_pipeline_host_and_worker() {
+        let host = make_test_peer(
+            21,
+            mesh::NodeRole::Host { http_port: 9337 },
+            vec!["GLM-4.7-Flash"],
+            vec!["GLM-4.7-Flash"],
+            true,
+        );
+        let worker = make_test_peer(
+            22,
+            mesh::NodeRole::Worker,
+            vec!["GLM-4.7-Flash"],
+            vec![],
+            true,
+        );
+        let peers = vec![host.clone(), worker.clone()];
+
+        let host_class = classify_peer_split_role(&host, &peers, 16.0);
+        assert_eq!(host_class.role.as_deref(), Some("pipeline_host"));
+        let group = host_class.group.expect("split_group populated for host");
+        assert_eq!(group.model, "GLM-4.7-Flash");
+        assert_eq!(group.peer_ids.len(), 2);
+
+        let worker_class = classify_peer_split_role(&worker, &peers, 16.0);
+        assert_eq!(worker_class.role.as_deref(), Some("pipeline_worker"));
+    }
+
+    #[test]
+    fn classify_peer_split_role_marks_moe_shard_for_dual_hosts() {
+        let host_a = make_test_peer(
+            30,
+            mesh::NodeRole::Host { http_port: 9337 },
+            vec!["Qwen3-30B-A3B"],
+            vec!["Qwen3-30B-A3B"],
+            true,
+        );
+        let host_b = make_test_peer(
+            31,
+            mesh::NodeRole::Host { http_port: 9337 },
+            vec!["Qwen3-30B-A3B"],
+            vec!["Qwen3-30B-A3B"],
+            true,
+        );
+        let peers = vec![host_a.clone(), host_b.clone()];
+
+        let class = classify_peer_split_role(&host_a, &peers, 16.0);
+        assert_eq!(class.role.as_deref(), Some("moe_shard"));
+        let shard = class.moe_shard.expect("moe_shard populated for dual host");
+        assert_eq!(shard.model, "Qwen3-30B-A3B");
+        assert_eq!(shard.total_shards, 2);
     }
 
     #[test]
@@ -2240,8 +2883,9 @@ mod tests {
                     )));
                 }
 
-                let request: closedmesh_plugin::OperationRequest = serde_json::from_str(&params_json)
-                    .map_err(|err| Self::error_response(err.to_string()))?;
+                let request: closedmesh_plugin::OperationRequest =
+                    serde_json::from_str(&params_json)
+                        .map_err(|err| Self::error_response(err.to_string()))?;
                 let result_json = match request.name.as_str() {
                     blobstore::PUT_REQUEST_OBJECT_TOOL => {
                         let request: blobstore::PutRequestObjectRequest =
@@ -2314,8 +2958,9 @@ mod tests {
                     )));
                 }
 
-                let request: closedmesh_plugin::OperationRequest = serde_json::from_str(&params_json)
-                    .map_err(|err| Self::error_response(err.to_string()))?;
+                let request: closedmesh_plugin::OperationRequest =
+                    serde_json::from_str(&params_json)
+                        .map_err(|err| Self::error_response(err.to_string()))?;
                 let result_json = match request.name.as_str() {
                     "feed" => {
                         let request: blackboard::FeedRequest =

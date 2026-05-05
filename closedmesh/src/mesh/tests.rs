@@ -3467,7 +3467,8 @@ async fn config_subscribe_wrong_owner_returns_error() -> Result<()> {
 async fn config_subscribe_unowned_node_returns_error() -> Result<()> {
     let client_owner = test_owner_keypair(0x44, 0x45);
 
-    let tmp = std::env::temp_dir().join(format!("closedmesh-cfg-unowned-{}", rand::random::<u64>()));
+    let tmp =
+        std::env::temp_dir().join(format!("closedmesh-cfg-unowned-{}", rand::random::<u64>()));
     std::fs::create_dir_all(tmp.join("client")).ok();
 
     // server has NO owner key (make_test_node, not make_test_node_with_owner)
@@ -3518,7 +3519,8 @@ async fn config_subscribe_unowned_node_returns_error() -> Result<()> {
 async fn config_subscribe_rejects_pinned_snapshot_for_older_peer() -> Result<()> {
     let owner_keypair = test_owner_keypair(0x13, 0x14);
 
-    let tmp = std::env::temp_dir().join(format!("closedmesh-cfg-sub-old-{}", rand::random::<u64>()));
+    let tmp =
+        std::env::temp_dir().join(format!("closedmesh-cfg-sub-old-{}", rand::random::<u64>()));
     std::fs::create_dir_all(tmp.join("server")).ok();
     std::fs::create_dir_all(tmp.join("client")).ok();
 
@@ -3571,6 +3573,7 @@ async fn config_subscribe_rejects_pinned_snapshot_for_older_peer() -> Result<()>
                     ctx_size: Some(8192),
                     gpu_id: Some("pci:0000:65:00.0".into()),
                     parallel: None,
+                    force_split: None,
                 }],
                 plugins: vec![],
             },
@@ -3669,6 +3672,7 @@ async fn config_subscribe_rejects_pinned_snapshot_for_malformed_peer_version() -
                     ctx_size: Some(8192),
                     gpu_id: Some("pci:0000:65:00.0".into()),
                     parallel: None,
+                    force_split: None,
                 }],
                 plugins: vec![],
             },
@@ -3707,8 +3711,10 @@ async fn config_subscribe_rejects_pinned_snapshot_for_malformed_peer_version() -
 async fn config_subscribe_allows_pinned_snapshot_for_same_release_prerelease_peer() -> Result<()> {
     let owner_keypair = test_owner_keypair(0x37, 0x38);
 
-    let tmp =
-        std::env::temp_dir().join(format!("closedmesh-cfg-sub-rc-ver-{}", rand::random::<u64>()));
+    let tmp = std::env::temp_dir().join(format!(
+        "closedmesh-cfg-sub-rc-ver-{}",
+        rand::random::<u64>()
+    ));
     std::fs::create_dir_all(tmp.join("server")).ok();
     std::fs::create_dir_all(tmp.join("client")).ok();
 
@@ -3765,6 +3771,7 @@ async fn config_subscribe_allows_pinned_snapshot_for_same_release_prerelease_pee
                     ctx_size: Some(8192),
                     gpu_id: Some("pci:0000:65:00.0".into()),
                     parallel: None,
+                    force_split: None,
                 }],
                 plugins: vec![],
             },
@@ -3940,6 +3947,7 @@ async fn config_subscribe_closes_when_revision_becomes_pinned_for_malformed_peer
                     ctx_size: Some(8192),
                     gpu_id: Some("pci:0000:65:00.0".into()),
                     parallel: None,
+                    force_split: None,
                 }],
                 plugins: vec![],
             },
@@ -4040,6 +4048,7 @@ async fn config_subscribe_closes_when_revision_becomes_pinned_for_older_peer() -
                     ctx_size: Some(8192),
                     gpu_id: Some("pci:0000:65:00.0".into()),
                     parallel: None,
+                    force_split: None,
                 }],
                 plugins: vec![],
             },
@@ -4141,6 +4150,7 @@ async fn config_subscribe_keeps_stream_open_when_revision_becomes_pinned_for_sam
                     ctx_size: Some(8192),
                     gpu_id: Some("pci:0000:65:00.0".into()),
                     parallel: None,
+                    force_split: None,
                 }],
                 plugins: vec![],
             },
@@ -4171,7 +4181,8 @@ async fn config_push_valid_signature_accepted() -> Result<()> {
 
     let owner_keypair = test_owner_keypair(0x55, 0x56);
 
-    let tmp = std::env::temp_dir().join(format!("closedmesh-cfg-push-ok-{}", rand::random::<u64>()));
+    let tmp =
+        std::env::temp_dir().join(format!("closedmesh-cfg-push-ok-{}", rand::random::<u64>()));
     std::fs::create_dir_all(tmp.join("server")).ok();
     std::fs::create_dir_all(tmp.join("client")).ok();
 
@@ -4260,7 +4271,8 @@ async fn config_push_revision_conflict_rejected() -> Result<()> {
 
     let owner_keypair = test_owner_keypair(0x66, 0x67);
 
-    let tmp = std::env::temp_dir().join(format!("closedmesh-cfg-conflict-{}", rand::random::<u64>()));
+    let tmp =
+        std::env::temp_dir().join(format!("closedmesh-cfg-conflict-{}", rand::random::<u64>()));
     std::fs::create_dir_all(tmp.join("server")).ok();
     std::fs::create_dir_all(tmp.join("client")).ok();
 
@@ -4547,6 +4559,7 @@ fn pinned_gpu_runtime_push_rejects_invalid_pushed_pinned_config_before_apply() {
             ctx_size: Some(8192),
             gpu_id: Some("pci:0000:b3:00.0".into()),
             parallel: None,
+            force_split: None,
         }],
         ..crate::plugin::MeshConfig::default()
     };
@@ -4588,6 +4601,7 @@ fn pinned_gpu_runtime_push_accepts_valid_pushed_pinned_config() {
             ctx_size: Some(8192),
             gpu_id: Some("uuid:GPU-123".into()),
             parallel: None,
+            force_split: None,
         }],
         ..crate::plugin::MeshConfig::default()
     };
@@ -4625,6 +4639,7 @@ fn pinned_gpu_runtime_push_rejects_resolved_gpu_without_backend_device() {
             ctx_size: Some(8192),
             gpu_id: Some("uuid:GPU-123".into()),
             parallel: None,
+            force_split: None,
         }],
         ..crate::plugin::MeshConfig::default()
     };

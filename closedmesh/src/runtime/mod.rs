@@ -638,6 +638,11 @@ struct StartupModelSpec {
     gpu_id: Option<String>,
     config_owned: bool,
     parallel: Option<usize>,
+    /// Per-model `force_split` override from the `[[models]]` block. When
+    /// `Some(true)` this model launches in pipeline-parallel mode regardless
+    /// of whether the host alone can hold it. When `None`, falls back to the
+    /// global `--split` CLI flag for the primary model only.
+    force_split: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -657,6 +662,9 @@ struct StartupModelPlan {
     gpu_id: Option<String>,
     pinned_gpu: Option<StartupPinnedGpuTarget>,
     parallel: Option<usize>,
+    /// Mirror of `StartupModelSpec::force_split` — propagated through model
+    /// resolution so the launch closure can per-model opt into pipeline split.
+    force_split: Option<bool>,
 }
 
 fn resolve_runtime_owner_key_path(cli: &Cli) -> Result<Option<PathBuf>> {
@@ -778,9 +786,7 @@ async fn resolve_join_url(cli: &mut Cli) {
     };
     if !cli.join.is_empty() {
         let _ = emit_event(OutputEvent::Info {
-            message: format!(
-                "--join was supplied explicitly; ignoring --join-url {url}"
-            ),
+            message: format!("--join was supplied explicitly; ignoring --join-url {url}"),
             context: Some("join-url".into()),
         });
         return;
@@ -1328,6 +1334,7 @@ fn build_startup_model_specs(
                 gpu_id: None,
                 config_owned: false,
                 parallel: None,
+                force_split: None,
             });
         }
         for model in &cli.model {
@@ -1338,6 +1345,7 @@ fn build_startup_model_specs(
                 gpu_id: None,
                 config_owned: false,
                 parallel: None,
+                force_split: None,
             });
         }
         if let Some(mmproj) = &cli.mmproj {
@@ -1356,6 +1364,7 @@ fn build_startup_model_specs(
             gpu_id: model.gpu_id.clone(),
             config_owned: true,
             parallel: model.parallel,
+            force_split: model.force_split,
         });
     }
     Ok(specs)
@@ -1383,6 +1392,7 @@ async fn resolve_startup_models(
             gpu_id: spec.gpu_id.clone(),
             pinned_gpu: None,
             parallel: spec.parallel,
+            force_split: spec.force_split,
         });
     }
     Ok(plans)
@@ -2859,7 +2869,15 @@ async fn run_auto(
         .and_then(|m| m.parallel)
         .or(config.gpu.parallel)
         .unwrap_or(4);
-    let force_split = cli.split;
+    // Per-model force_split takes precedence over the global --split CLI flag.
+    // The global flag remains a "force-split everything" convenience for ops;
+    // the per-model field is what the desktop UI writes when a user clicks
+    // "Run on the mesh" for a specific model.
+    let force_split = cli.split
+        || primary_startup_model
+            .as_ref()
+            .and_then(|m| m.force_split)
+            .unwrap_or(false);
     let llama_flavor = cli.llama_flavor;
     let cb_console_port = console_port;
     let model_name_for_cb = model_name.clone();
@@ -3068,6 +3086,7 @@ async fn run_auto(
             let extra_mmproj = extra_model.mmproj_path.clone();
             let extra_ctx_size = extra_model.ctx_size;
             let extra_pinned_gpu = extra_model.pinned_gpu.clone();
+            let extra_force_split = extra_model.force_split.unwrap_or(false);
             let extra_target_tx = target_tx.clone();
             let extra_model_name = extra_name.clone();
             let api_port_extra = api_port;
@@ -3100,7 +3119,7 @@ async fn run_auto(
                         explicit_mmproj: extra_mmproj,
                         draft: None,
                         draft_max: 8,
-                        force_split: false,
+                        force_split: extra_force_split,
                         binary_flavor: extra_llama_flavor,
                         ctx_size_override: extra_ctx_size,
                         pinned_gpu: extra_pinned_gpu,
@@ -4312,6 +4331,7 @@ mod tests {
                 ctx_size: Some(8192),
                 gpu_id: None,
                 parallel: None,
+                force_split: None,
             }],
             ..plugin::MeshConfig::default()
         };
@@ -4336,6 +4356,7 @@ mod tests {
                     ctx_size: Some(8192),
                     gpu_id: None,
                     parallel: None,
+                    force_split: None,
                 },
                 plugin::ModelConfigEntry {
                     model: "bartowski/Qwen2.5-VL/model.gguf".into(),
@@ -4343,6 +4364,7 @@ mod tests {
                     ctx_size: Some(16384),
                     gpu_id: None,
                     parallel: None,
+                    force_split: None,
                 },
             ],
             ..plugin::MeshConfig::default()
@@ -4373,6 +4395,7 @@ mod tests {
                 ctx_size: Some(8192),
                 gpu_id: None,
                 parallel: None,
+                force_split: None,
             }],
             ..plugin::MeshConfig::default()
         };
@@ -4395,6 +4418,7 @@ mod tests {
                 ctx_size: Some(8192),
                 gpu_id: Some("pci:0000:65:00.0".into()),
                 parallel: None,
+                force_split: None,
             }],
             ..plugin::MeshConfig::default()
         };
@@ -4407,6 +4431,7 @@ mod tests {
             gpu_id: specs[0].gpu_id.clone(),
             pinned_gpu: None,
             parallel: None,
+            force_split: None,
         }];
         let gpus = vec![
             synthetic_gpu(0, Some("pci:0000:65:00.0"), Some("CUDA0")),
@@ -4475,6 +4500,7 @@ mod tests {
                 ctx_size: Some(8192),
                 gpu_id: Some("pci:0000:65:00.0".into()),
                 parallel: None,
+                force_split: None,
             }],
             ..plugin::MeshConfig::default()
         };
@@ -4487,6 +4513,7 @@ mod tests {
             gpu_id: specs[0].gpu_id.clone(),
             pinned_gpu: None,
             parallel: None,
+            force_split: None,
         }];
         let gpus = vec![synthetic_gpu(0, Some("pci:0000:65:00.0"), Some("CUDA0"))];
 
@@ -4515,6 +4542,7 @@ mod tests {
             gpu_id: None,
             config_owned: true,
             parallel: None,
+            force_split: None,
         }];
         let mut plans = vec![StartupModelPlan {
             declared_ref: "Qwen3-8B-Q4_K_M".into(),
@@ -4524,6 +4552,7 @@ mod tests {
             gpu_id: None,
             pinned_gpu: None,
             parallel: None,
+            force_split: None,
         }];
         let gpus = vec![synthetic_gpu(0, Some("pci:0000:65:00.0"), Some("CUDA0"))];
 
@@ -4552,6 +4581,7 @@ mod tests {
             gpu_id: Some("uuid:GPU-123".into()),
             config_owned: true,
             parallel: None,
+            force_split: None,
         }];
         let mut plans = vec![StartupModelPlan {
             declared_ref: "Qwen3-8B-Q4_K_M".into(),
@@ -4561,6 +4591,7 @@ mod tests {
             gpu_id: Some("uuid:GPU-123".into()),
             pinned_gpu: None,
             parallel: None,
+            force_split: None,
         }];
         let gpus = vec![synthetic_gpu(3, Some("uuid:GPU-123"), Some("CUDA3"))];
 
@@ -4590,6 +4621,7 @@ mod tests {
             gpu_id: Some("uuid:GPU-123".into()),
             config_owned: true,
             parallel: None,
+            force_split: None,
         }];
         let mut plans = vec![StartupModelPlan {
             declared_ref: "Qwen3-8B-Q4_K_M".into(),
@@ -4599,6 +4631,7 @@ mod tests {
             gpu_id: Some("uuid:GPU-123".into()),
             pinned_gpu: None,
             parallel: None,
+            force_split: None,
         }];
         let gpus = vec![synthetic_gpu(3, Some("uuid:GPU-123"), None)];
 
@@ -4627,6 +4660,7 @@ mod tests {
             gpu_id: Some("pci:0000:b3:00.0".into()),
             config_owned: true,
             parallel: None,
+            force_split: None,
         }];
         let mut plans = vec![StartupModelPlan {
             declared_ref: "Qwen3-8B-Q4_K_M".into(),
@@ -4636,6 +4670,7 @@ mod tests {
             gpu_id: Some("pci:0000:b3:00.0".into()),
             pinned_gpu: None,
             parallel: None,
+            force_split: None,
         }];
         let gpus = vec![synthetic_gpu(0, Some("pci:0000:65:00.0"), Some("CUDA0"))];
 
@@ -4670,6 +4705,7 @@ mod tests {
                 vram_bytes: 24_000_000_000,
             }),
             parallel: None,
+            force_split: None,
         };
 
         let device =
@@ -4693,6 +4729,7 @@ mod tests {
                 vram_bytes: 24_000_000_000,
             }),
             parallel: None,
+            force_split: None,
         };
 
         let device = startup_rpc_backend_device(None, Some(&primary_startup_model)).unwrap();
@@ -4715,6 +4752,7 @@ mod tests {
                 vram_bytes: 24_000_000_000,
             }),
             parallel: None,
+            force_split: None,
         };
 
         let err =
@@ -4740,6 +4778,7 @@ mod tests {
                 vram_bytes: 24_000_000_000,
             }),
             parallel: None,
+            force_split: None,
         };
 
         let device1 =
@@ -4775,6 +4814,7 @@ mod tests {
             gpu_id: None,
             config_owned: false,
             parallel: None,
+            force_split: None,
         }];
 
         assert!(!should_show_serve_config_help(
@@ -5102,6 +5142,7 @@ mod tests {
             ctx_size: None,
             gpu_id: None,
             parallel: Some(1),
+            force_split: None,
         }];
         let gpu_config = GpuConfig::default(); // no parallel set
 
@@ -5130,6 +5171,7 @@ mod tests {
                 ctx_size: None,
                 gpu_id: None,
                 parallel: None, // no override
+                force_split: None,
             },
             ModelConfigEntry {
                 model: "model-b".to_string(),
@@ -5137,6 +5179,7 @@ mod tests {
                 ctx_size: None,
                 gpu_id: None,
                 parallel: Some(3), // only this one has an override
+                force_split: None,
             },
         ];
         let gpu_config = GpuConfig::default();
@@ -5175,6 +5218,7 @@ mod tests {
                 ctx_size: None,
                 gpu_id: None,
                 parallel: None, // missing — should use global fallback
+                force_split: None,
             },
             ModelConfigEntry {
                 model: "second".to_string(),
@@ -5182,6 +5226,7 @@ mod tests {
                 ctx_size: None,
                 gpu_id: None,
                 parallel: Some(2), // explicit override
+                force_split: None,
             },
         ];
         let gpu_config = GpuConfig {

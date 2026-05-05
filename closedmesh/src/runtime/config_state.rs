@@ -355,6 +355,7 @@ mod tests {
                 ctx_size: None,
                 gpu_id: None,
                 parallel: None,
+                force_split: None,
             }],
             plugins: vec![],
         };
@@ -389,6 +390,7 @@ mod tests {
                 ctx_size: None,
                 gpu_id: None,
                 parallel: None,
+                force_split: None,
             }],
             plugins: vec![],
         };
@@ -430,6 +432,7 @@ mod tests {
                 ctx_size: None,
                 gpu_id: None,
                 parallel: None,
+                force_split: None,
             }],
             plugins: vec![],
         };

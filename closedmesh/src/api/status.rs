@@ -177,6 +177,18 @@ pub(super) struct StatusPayload {
     pub(super) routing_metrics: metrics::RoutingMetricsStatusSnapshot,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) first_joined_mesh_ts: Option<u64>,
+    /// This node's current split-role classification, mirroring the same
+    /// field on `PeerPayload`. The desktop dashboard reads `my_split_role`
+    /// to render the live "you're contributing layers X-Y of model Z"
+    /// card.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) my_split_role: Option<String>,
+    /// Pipeline-split group this node currently belongs to, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) my_split_group: Option<SplitGroupPayload>,
+    /// MoE shard this node currently runs, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) my_moe_shard: Option<MoeShardPayload>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -212,6 +224,59 @@ pub(super) struct PeerPayload {
     pub(super) capability: NodeCapabilityPayload,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) first_joined_mesh_ts: Option<u64>,
+    /// Coarse classification of how this peer is currently participating in
+    /// inference for one of the mesh's models. The desktop UI reads this to
+    /// render role badges ("Pipeline host of X", "Layer worker", "MoE shard")
+    /// so users can see when the mesh is operating as a collective rather
+    /// than a bag of independent servers.
+    ///
+    /// Inferred from `role` + `serving_models` + the model's mesh-wide
+    /// fan-out — see [`crate::api::mod::classify_peer_split_role`]. The
+    /// runtime does NOT (yet) propagate live MoE shard membership or
+    /// per-layer assignment over gossip; clients that want layer ranges or
+    /// expert counts should treat those fields as best-effort hints.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) split_role: Option<String>,
+    /// When this peer is participating in pipeline-parallel inference for a
+    /// model, identifies the elected host and the peer set splitting it.
+    /// Always `None` for solo serves and standby peers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) split_group: Option<SplitGroupPayload>,
+    /// When this peer is one of N independent MoE shard nodes for a model,
+    /// names the model and gives the rough shard-of-N count. Per-expert
+    /// indices are intentionally omitted — they're an implementation detail
+    /// and not stable across runtime restarts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) moe_shard: Option<MoeShardPayload>,
+}
+
+/// Pipeline-parallel split group membership. Surfaced on `PeerPayload` and on
+/// the local-node fields of `StatusPayload` whenever an election has placed
+/// this peer in a multi-node serving group.
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct SplitGroupPayload {
+    /// Model being split across the group (e.g. "GLM-4.7-Flash-Q4_K_M").
+    pub(super) model: String,
+    /// Short id of the elected host node — the one running `llama-server`
+    /// and coordinating layer workers via RPC. Matches `peer.id` formatting.
+    pub(super) host_id: String,
+    /// Short ids of all peers in the group (host + workers). The local node
+    /// is included if it's a member.
+    pub(super) peer_ids: Vec<String>,
+    /// Combined VRAM (GB) advertised by every group member. The chat product
+    /// uses this in copy like "split across 3 nodes pooling 72 GB".
+    pub(super) total_group_vram_gb: f64,
+}
+
+/// MoE expert-shard membership for a peer. Each shard node runs an
+/// independent `llama-server` with its own slice of the expert tensor;
+/// there's no cross-node traffic during inference.
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct MoeShardPayload {
+    /// Model being sharded (e.g. "Qwen3-30B-A3B-Q4_K_M").
+    pub(super) model: String,
+    /// Total number of MoE shard nodes in the active deployment.
+    pub(super) total_shards: u32,
 }
 
 /// Wire-friendly view of [`crate::mesh::NodeCapability`] for the status API.
@@ -366,6 +431,54 @@ pub(super) struct MeshModelPayload {
     pub(super) download_command: String,
     pub(super) run_command: String,
     pub(super) auto_command: String,
+    /// Coarse classification of HOW the mesh is currently serving this
+    /// model. One of:
+    /// - `"solo"`        — one node, the model fits there alone
+    /// - `"pipeline"`    — multiple nodes hosting the same dense model
+    ///   together (layer-split via llama.cpp RPC)
+    /// - `"moe"`         — multiple independent MoE shard nodes
+    /// - `"multi_host"`  — multiple nodes serving the same model
+    ///   independently for load balancing (no split)
+    /// - `"cold"`        — no live host yet (model is in catalog only)
+    ///
+    /// Surfaced in the chat product so users can see, per model, when the
+    /// mesh is "behaving as one big computer" vs running redundant copies.
+    pub(super) split_kind: String,
+    /// Structured "does the mesh fit this model" answer for the desktop
+    /// Models page. Replaces the user-facing single-machine `fit_label`
+    /// check that used to say "Won't fit on this Mac" against any model
+    /// the local box couldn't hold solo.
+    pub(super) mesh_fit: MeshFitPayload,
+}
+
+/// Mesh-wide capacity assessment for a single model. Tells the desktop UI
+/// which of three states to render: "solo on this Mac" / "fits on the mesh
+/// (pooled across N nodes)" / "needs more contributors (M GB short)".
+///
+/// The runtime computes this once per model from the live peer set, so the
+/// app doesn't have to reimplement same-backend filtering, RTT eligibility,
+/// or the ~10% headroom multiplier the election planner uses.
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct MeshFitPayload {
+    /// True when at least one peer (or this node) has enough free VRAM to
+    /// hold the model alone.
+    pub(super) fits_on_largest_node: bool,
+    /// True when the eligible peer pool's combined VRAM clears the model's
+    /// load requirement (size × 1.1). Implies the runtime would elect a
+    /// pipeline-split group rather than refusing the request.
+    pub(super) fits_pooled: bool,
+    /// Combined VRAM (GB) of all eligible peers — same backend as the host,
+    /// RTT under the split cap, capability above the model size threshold.
+    /// Equals `mesh_vram_gb` for already-warm models; pre-computed for
+    /// cold models so the UI can show "M of N GB so far" without doing
+    /// the math itself.
+    pub(super) pooled_vram_gb: f64,
+    /// Approximate VRAM (GB) required to load this model with headroom.
+    /// `size_gb × 1.1` matches the dense election planner's threshold.
+    pub(super) needed_vram_gb: f64,
+    /// Number of peers (excluding entry nodes) that are currently eligible
+    /// to participate in a split for this model.
+    pub(super) eligible_peer_count: u32,
 }
 
 pub(super) fn build_runtime_status_payload(
@@ -493,6 +606,9 @@ mod tests {
             gpus: vec![],
             capability: NodeCapabilityPayload::default(),
             first_joined_mesh_ts: None,
+            split_role: None,
+            split_group: None,
+            moe_shard: None,
         };
 
         let json = serde_json::to_string(&peer).expect("serialization failed");
@@ -520,6 +636,9 @@ mod tests {
             gpus: vec![],
             capability: NodeCapabilityPayload::default(),
             first_joined_mesh_ts: None,
+            split_role: None,
+            split_group: None,
+            moe_shard: None,
         };
 
         let json = serde_json::to_string(&peer).expect("serialization failed");
@@ -573,6 +692,9 @@ mod tests {
             routing_affinity: affinity::AffinityStatsSnapshot::default(),
             routing_metrics: metrics::RoutingMetricsStatusSnapshot::default(),
             first_joined_mesh_ts: None,
+            my_split_role: None,
+            my_split_group: None,
+            my_moe_shard: None,
         };
 
         let json = serde_json::to_string(&status).expect("serialization failed");
@@ -620,6 +742,9 @@ mod tests {
             routing_affinity: affinity::AffinityStatsSnapshot::default(),
             routing_metrics: metrics::RoutingMetricsStatusSnapshot::default(),
             first_joined_mesh_ts: None,
+            my_split_role: None,
+            my_split_group: None,
+            my_moe_shard: None,
         };
 
         let json = serde_json::to_string(&status).expect("serialization failed");
@@ -674,6 +799,9 @@ mod tests {
             routing_affinity: affinity::AffinityStatsSnapshot::default(),
             routing_metrics: metrics::RoutingMetricsStatusSnapshot::default(),
             first_joined_mesh_ts: None,
+            my_split_role: None,
+            my_split_group: None,
+            my_moe_shard: None,
         };
 
         let json = serde_json::to_value(&status).expect("serialization failed");
@@ -723,6 +851,9 @@ mod tests {
             routing_affinity: affinity::AffinityStatsSnapshot::default(),
             routing_metrics: metrics::RoutingMetricsStatusSnapshot::default(),
             first_joined_mesh_ts: None,
+            my_split_role: None,
+            my_split_group: None,
+            my_moe_shard: None,
         };
 
         let json = serde_json::to_value(&status).expect("serialization failed");
@@ -751,6 +882,9 @@ mod tests {
             gpus: vec![],
             capability: NodeCapabilityPayload::default(),
             first_joined_mesh_ts: None,
+            split_role: None,
+            split_group: None,
+            moe_shard: None,
         };
 
         let json = serde_json::to_string(&peer).expect("serialization failed");

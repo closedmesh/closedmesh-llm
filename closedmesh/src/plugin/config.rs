@@ -44,6 +44,13 @@ pub struct ModelConfigEntry {
     pub gpu_id: Option<String>,
     #[serde(default)]
     pub parallel: Option<usize>,
+    /// Force pipeline-parallel split for this model even when it would fit on
+    /// the host alone. Surfaced in the desktop UI as "Run on the mesh" — opts
+    /// the model into multi-node inference so contributors share the load
+    /// instead of one box doing all the work. Equivalent to the global
+    /// `--split` CLI flag, but scoped per `[[models]]` block.
+    #[serde(default)]
+    pub force_split: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -358,6 +365,7 @@ ctx_size = 8192
                 ctx_size: None,
                 gpu_id: None,
                 parallel: None,
+                force_split: None,
             }],
             ..MeshConfig::default()
         };
@@ -381,6 +389,7 @@ ctx_size = 8192
                 ctx_size: None,
                 gpu_id: Some("  \t  ".into()),
                 parallel: None,
+                force_split: None,
             }],
             ..MeshConfig::default()
         };
@@ -404,6 +413,7 @@ ctx_size = 8192
                 ctx_size: None,
                 gpu_id: Some("pci:0000:65:00.0".into()),
                 parallel: None,
+                force_split: None,
             }],
             ..MeshConfig::default()
         };
@@ -488,6 +498,7 @@ model = "Qwen3-8B-Q4_K_M"
                 ctx_size: None,
                 gpu_id: None,
                 parallel: None,
+                force_split: None,
             }],
             ..MeshConfig::default()
         };
@@ -513,6 +524,7 @@ model = "Qwen3-8B-Q4_K_M"
                 ctx_size: None,
                 gpu_id: None,
                 parallel: None,
+                force_split: None,
             }],
             ..MeshConfig::default()
         };
@@ -533,6 +545,7 @@ model = "Qwen3-8B-Q4_K_M"
                 ctx_size: None,
                 gpu_id: None,
                 parallel: None,
+                force_split: None,
             }],
             ..MeshConfig::default()
         };
@@ -553,6 +566,7 @@ model = "Qwen3-8B-Q4_K_M"
                 ctx_size: None,
                 gpu_id: None,
                 parallel: None,
+                force_split: None,
             }],
             ..MeshConfig::default()
         };
@@ -581,6 +595,7 @@ model = "Qwen3-8B-Q4_K_M"
                 ctx_size: None,
                 gpu_id: None,
                 parallel: Some(8),
+                force_split: None,
             }],
             ..MeshConfig::default()
         };
@@ -596,6 +611,7 @@ model = "Qwen3-8B-Q4_K_M"
                 ctx_size: None,
                 gpu_id: None,
                 parallel: Some(0),
+                force_split: None,
             }],
             ..MeshConfig::default()
         };
@@ -616,6 +632,7 @@ model = "Qwen3-8B-Q4_K_M"
                 ctx_size: None,
                 gpu_id: None,
                 parallel: None,
+                force_split: None,
             }],
             ..MeshConfig::default()
         };
