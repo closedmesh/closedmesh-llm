@@ -16,7 +16,7 @@ import { Alert, AlertDescription, AlertTitle } from "../../../components/ui/aler
 import { Badge } from "../../../components/ui/badge";
 import { Button } from "../../../components/ui/button";
 import { BrandIcon } from "../../../components/brand-icon";
-import { MeshLlmWordmark } from "../../../components/closedmesh-wordmark";
+import { ClosedmeshWordmark } from "../../../components/closedmesh-wordmark";
 import {
   NavigationMenu,
   NavigationMenuItem,
@@ -153,7 +153,7 @@ export function AppHeader({
           </div>
           <div className="hidden min-w-0 sm:block">
             <div className="truncate text-base font-semibold">
-              <MeshLlmWordmark />
+              <ClosedmeshWordmark />
             </div>
           </div>
         </div>
