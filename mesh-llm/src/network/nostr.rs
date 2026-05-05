@@ -1,8 +1,20 @@
-//! Publish and discover mesh-llm meshes via Nostr relays.
+//! Publish and discover ClosedMesh meshes via Nostr relays.
 //!
-//! A running mesh publishes a replaceable event (kind 31990, d-tag "mesh-llm")
+//! A running mesh publishes a replaceable event (kind 31991, d-tag "closedmesh")
 //! containing its invite token, served models, VRAM, node count, etc.
 //! Other nodes can discover available meshes and auto-join.
+//!
+//! NOTE on the kind/d-tag rename (v0.66.0): the upstream `mesh-llm` project we
+//! forked from publishes on `(kind=31990, d-tag="mesh-llm")`. ClosedMesh ran on
+//! the same channel through v0.65.x, which meant our entry node and any
+//! `--auto` users were silently sharing a discovery surface with the upstream
+//! community pool. We were both visible to them and joinable by them. The
+//! May 2026 incident — strangers showing up on closedmesh.com/status routing
+//! traffic through our entry node — was the symptom. Bumping the kind AND
+//! changing the d-tag (Nostr replaceable events are keyed on
+//! `(pubkey, kind, d-tag)`) gives us a fully disjoint namespace; even if a
+//! future revert puts one back, the other still keeps us isolated.
+//! See also: docker/entrypoint.sh `MESH_PUBLISH` default (now 0).
 
 use anyhow::Result;
 use nostr_sdk::prelude::*;
@@ -10,7 +22,21 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// NIP-89 "Application Handler" kind — used for service advertisements.
-pub const MESH_SERVICE_KIND: u16 = 31990;
+/// Bumped from 31990 (upstream mesh-llm) to 31991 in v0.66.0; see the
+/// module docs for why.
+pub const MESH_SERVICE_KIND: u16 = 31991;
+
+/// Nostr d-tag identifying our discovery channel. Combined with
+/// `MESH_SERVICE_KIND`, this is what `(pubkey, kind, d-tag)` resolves to for
+/// our replaceable listing events. Renamed from `"mesh-llm"` in v0.66.0.
+pub const MESH_DTAG: &str = "closedmesh";
+
+/// Mesh name treated as the "blessed community" alias when ranking meshes
+/// in `--auto` mode. Listings whose `name` equals this are eligible for
+/// auto-join and get the same +300 score bonus as unnamed listings, so
+/// joining a mesh deliberately named `closedmesh` is equivalent to joining
+/// the implicit unnamed default. Pre-v0.66.0 this was `"mesh-llm"`.
+pub const COMMUNITY_MESH_NAME: &str = "closedmesh";
 
 /// Default public relays.
 pub const DEFAULT_RELAYS: &[&str] = &[
@@ -255,14 +281,15 @@ impl Publisher {
     }
 
     /// Publish (or replace) the mesh listing. Uses a replaceable event
-    /// (kind 31990 + d-tag) so each publisher has exactly one listing.
+    /// (kind = `MESH_SERVICE_KIND`, d-tag = `MESH_DTAG`) so each publisher
+    /// has exactly one listing.
     pub async fn publish(&self, listing: &MeshListing, ttl_secs: u64) -> Result<()> {
         let expiration = Timestamp::now().as_secs() + ttl_secs;
         let content = serde_json::to_string(listing)?;
 
         let tags = vec![
-            Tag::custom(TagKind::Custom("d".into()), vec!["mesh-llm".to_string()]),
-            Tag::custom(TagKind::Custom("k".into()), vec!["mesh-llm".to_string()]),
+            Tag::custom(TagKind::Custom("d".into()), vec![MESH_DTAG.to_string()]),
+            Tag::custom(TagKind::Custom("k".into()), vec![MESH_DTAG.to_string()]),
             Tag::custom(
                 TagKind::Custom("expiration".into()),
                 vec![expiration.to_string()],
@@ -792,7 +819,7 @@ pub async fn discover(
         .kind(Kind::Custom(MESH_SERVICE_KIND))
         .custom_tag(
             SingleLetterTag::lowercase(Alphabet::K),
-            "mesh-llm".to_string(),
+            MESH_DTAG.to_string(),
         )
         .limit(100);
 
@@ -891,14 +918,14 @@ pub async fn discover(
 ///
 /// `--auto` joins the default community mesh. Eligible listings are:
 ///   - unnamed (the implicit default), or
-///   - the blessed community name "mesh-llm".
+///   - the blessed community name `COMMUNITY_MESH_NAME` ("closedmesh").
 ///
 /// Any other named mesh is still publicly discoverable on Nostr, but it is
 /// not the default — the user must opt in by name via `--mesh-name`.
 pub fn is_auto_eligible(mesh: &DiscoveredMesh) -> bool {
     match mesh.listing.name.as_deref() {
         None => true,
-        Some(name) => name.eq_ignore_ascii_case("mesh-llm"),
+        Some(name) => name.eq_ignore_ascii_case(COMMUNITY_MESH_NAME),
     }
 }
 
@@ -910,12 +937,11 @@ pub fn score_mesh(mesh: &DiscoveredMesh, _now_secs: u64, last_mesh_id: Option<&s
     let mut score: i64 = 100; // base score — if we can see it, it's alive
 
     // The canonical community mesh is an unnamed listing (`name: None`) — that
-    // is what you get by default when you don't pass `--mesh-name`, and it's
-    // what the public relay shows today. Give it a bonus so it ranks above
-    // anything else in `--auto`. The literal name "mesh-llm" is treated as a
-    // defensive alias for the same thing: nothing in the wild publishes with
-    // that name right now, but older docs and test runs may, and if one ever
-    // appears it should rank alongside unnamed rather than below it.
+    // is what you get by default when you don't pass `--mesh-name`. Give it a
+    // bonus so it ranks above anything else in `--auto`. The literal name
+    // `COMMUNITY_MESH_NAME` is treated as a defensive alias for the same
+    // thing: contributors running with `--mesh-name closedmesh` should rank
+    // alongside unnamed rather than below it.
     //
     // Other named meshes are excluded from `--auto` entirely by
     // `is_auto_eligible`, so they don't get a score adjustment here — when
@@ -923,7 +949,7 @@ pub fn score_mesh(mesh: &DiscoveredMesh, _now_secs: u64, last_mesh_id: Option<&s
     // and any bonus or penalty would skew ranking.
     match mesh.listing.name.as_deref() {
         None => score += 300,
-        Some(n) if n.eq_ignore_ascii_case("mesh-llm") => score += 300,
+        Some(n) if n.eq_ignore_ascii_case(COMMUNITY_MESH_NAME) => score += 300,
         Some(_) => {}
     }
 
@@ -1015,8 +1041,9 @@ pub fn smart_auto_with_self(
 
     // If target name is set, only consider meshes with that exact name.
     // Otherwise `--auto` considers only the community mesh: unnamed listings
-    // plus the blessed name "mesh-llm". Other named meshes are still publicly
-    // discoverable on Nostr but must be opted into by name via `--mesh-name`.
+    // plus the blessed name `COMMUNITY_MESH_NAME`. Other named meshes are
+    // still publicly discoverable on Nostr but must be opted into by name
+    // via `--mesh-name`.
     let candidates: Vec<&DiscoveredMesh> = if let Some(target) = target_name {
         meshes
             .iter()
@@ -1089,13 +1116,21 @@ fn model_tiers() -> Vec<(String, f64)> {
 ///
 /// One model per node. Biggest model that fits with 15% KV cache headroom.
 ///
+/// We bias towards "the largest model people will actually be happy with" at
+/// each tier. The 8B and 14B Qwen3 dense models compose particularly well —
+/// 8B is the floor for coherent multi-turn chat (the 4B/0.6B drafts are too
+/// small to keep a conversation on the rails) and 14B is a clear quality
+/// step up from 8B that still fits a 16 GB unified-memory Mac with KV cache
+/// headroom.
+///
 /// Tiers:
-///   <8GB:    Qwen3-4B (2.5G)
-///   8-24GB:  Qwen3-8B (5G)
-///   24-50GB: Qwen3.5-27B (17G) — vision + text
-///   50-63GB: GLM-4.7-Flash (18G) — 30B MoE, fast, tool calling
+///   <8GB:     Qwen3-4B (2.5G)
+///   8-12GB:   Qwen3-8B (5G)
+///   12-24GB:  Qwen3-14B (9G) — strong dense chat, fits 16 GB Macs
+///   24-50GB:  Qwen3.5-27B (17G) — vision + text
+///   50-63GB:  GLM-4.7-Flash (18G) — 30B MoE, fast, tool calling
 ///   63-179GB: Qwen3-Coder-Next (48G) — frontier coder ~85B
-///   179GB+:  MiniMax-M2.5 (138G) — 456B MoE flagship
+///   179GB+:   MiniMax-M2.5 (138G) — 456B MoE flagship
 pub fn auto_model_pack(vram_gb: f64) -> Vec<String> {
     // Router-only / pure-CPU entry nodes start the runtime with `--max-vram 0`
     // explicitly to mean "I have no GPU; do not elect me as a host." Returning
@@ -1147,6 +1182,14 @@ pub fn auto_model_pack(vram_gb: f64) -> Vec<String> {
             min_vram: 24.0,
             models: &["Qwen3.5-27B-Q4_K_M"],
         },
+        // 12 GB is the floor where Qwen3-14B (9 GB on disk, ~10 GB resident)
+        // fits with the 0.85× usable factor: 12 × 0.85 = 10.2, vs the tiered
+        // 9.9 GB budget after the 1.1× safety multiplier in `model_tiers`.
+        // This lights up 16 GB unified-memory Macs and 16 GB discrete GPUs.
+        Pack {
+            min_vram: 12.0,
+            models: &["Qwen3-14B-Q4_K_M"],
+        },
         Pack {
             min_vram: 8.0,
             models: &["Qwen3-8B-Q4_K_M"],
@@ -1191,6 +1234,7 @@ pub fn demand_seed_models() -> Vec<String> {
         "Qwen3-Coder-Next-Q4_K_M".into(),
         "Qwen3.5-27B-Q4_K_M".into(),
         "GLM-4.7-Flash-Q4_K_M".into(),
+        "Qwen3-14B-Q4_K_M".into(),
         "Qwen3-8B-Q4_K_M".into(),
         "Qwen3-4B-Q4_K_M".into(),
         "Qwen3-0.6B-Q4_K_M".into(),
@@ -1226,9 +1270,25 @@ mod auto_pack_tests {
     }
 
     #[test]
-    fn pack_16gb_single() {
-        let pack = auto_model_pack(16.0);
+    fn pack_11gb_stays_on_8b() {
+        // 11 × 0.85 = 9.35 GB usable, below the ~9.9 GB needed for 14B —
+        // so 11 GB nodes correctly stay on Qwen3-8B.
+        let pack = auto_model_pack(11.0);
         assert_eq!(pack, vec!["Qwen3-8B-Q4_K_M"]);
+    }
+
+    #[test]
+    fn pack_12gb_picks_14b() {
+        let pack = auto_model_pack(12.0);
+        assert_eq!(pack, vec!["Qwen3-14B-Q4_K_M"]);
+    }
+
+    #[test]
+    fn pack_16gb_single() {
+        // 16 GB unified-memory Macs are the most common contributor laptop;
+        // they get the strongest dense model that fits, not the safe 8B.
+        let pack = auto_model_pack(16.0);
+        assert_eq!(pack, vec!["Qwen3-14B-Q4_K_M"]);
     }
 
     #[test]
@@ -1360,12 +1420,13 @@ mod scoring_tests {
     }
 
     #[test]
-    fn score_mesh_llm_alias_matches_unnamed() {
-        // "mesh-llm" is a defensive alias for the community mesh and must
-        // score identically to an unnamed listing with equivalent stats.
+    fn score_community_alias_matches_unnamed() {
+        // `COMMUNITY_MESH_NAME` is a defensive alias for the community mesh
+        // and must score identically to an unnamed listing with equivalent
+        // stats.
         let unnamed = make_mesh(None, Some("u"), &["m1"], 2, 24_000_000_000, 0, 0);
         let alias = make_mesh(
-            Some("mesh-llm"),
+            Some(COMMUNITY_MESH_NAME),
             Some("a"),
             &["m1"],
             2,
@@ -1406,13 +1467,29 @@ mod scoring_tests {
     #[test]
     fn other_named_mesh_not_auto_eligible() {
         let bobs = make_mesh(Some("bobs-cluster"), Some("x"), &[], 1, 0, 0, 0);
-        let community = make_mesh(Some("mesh-llm"), Some("c"), &[], 1, 0, 0, 0);
-        let community_caps = make_mesh(Some("MESH-LLM"), Some("c2"), &[], 1, 0, 0, 0);
+        let community = make_mesh(Some(COMMUNITY_MESH_NAME), Some("c"), &[], 1, 0, 0, 0);
+        // Case-insensitive match on the alias.
+        let community_caps = make_mesh(
+            Some(&COMMUNITY_MESH_NAME.to_uppercase()),
+            Some("c2"),
+            &[],
+            1,
+            0,
+            0,
+            0,
+        );
         let unnamed = make_mesh(None, Some("u"), &[], 1, 0, 0, 0);
+        // The previous upstream alias must NOT be eligible — this is the
+        // entire point of the v0.66.0 namespace switch.
+        let upstream_alias = make_mesh(Some("mesh-llm"), Some("up"), &[], 1, 0, 0, 0);
         assert!(!is_auto_eligible(&bobs));
         assert!(is_auto_eligible(&community));
         assert!(is_auto_eligible(&community_caps));
         assert!(is_auto_eligible(&unnamed));
+        assert!(
+            !is_auto_eligible(&upstream_alias),
+            "the literal 'mesh-llm' must not be auto-eligible after the rename",
+        );
     }
 
     #[test]
@@ -1672,15 +1749,15 @@ mod smart_auto_tests {
 
     #[test]
     fn smart_auto_both_community_aliases_eligible() {
-        // Both unnamed listings and the "mesh-llm" alias are eligible for
-        // `--auto` and score equally on name. With other factors equal they
-        // tie at the same score; what matters here is that both appear as
-        // candidates and that `"mesh-llm"` is no longer penalised relative
+        // Both unnamed listings and the `COMMUNITY_MESH_NAME` alias are
+        // eligible for `--auto` and score equally on name. With other factors
+        // equal they tie at the same score; what matters here is that both
+        // appear as candidates and that the alias is not penalised relative
         // to unnamed.
         let meshes = vec![
             make_mesh(None, "ccc", &["Qwen3-8B-Q4_K_M"], 2, 24_000_000_000, 0, 0),
             make_mesh(
-                Some("mesh-llm"),
+                Some(COMMUNITY_MESH_NAME),
                 "aaa",
                 &["Qwen3-8B-Q4_K_M"],
                 2,
@@ -1694,7 +1771,7 @@ mod smart_auto_tests {
         let alias_score = score_mesh(&meshes[1], now, None);
         assert_eq!(
             unnamed_score, alias_score,
-            "None and 'mesh-llm' should score equally as community aliases",
+            "None and the community alias should score equally",
         );
         match smart_auto(&meshes, 8.0, None) {
             AutoDecision::Join { candidates } => {
@@ -1707,9 +1784,9 @@ mod smart_auto_tests {
     #[test]
     fn smart_auto_excludes_other_named_meshes() {
         // Without --mesh-name, --auto must only consider the community mesh
-        // (unnamed or name == "mesh-llm"). Other named meshes — even though
-        // they are publicly discoverable on Nostr — should never appear as
-        // candidates unless the user targets them by name.
+        // (unnamed or name == `COMMUNITY_MESH_NAME`). Other named meshes —
+        // even though they are publicly discoverable on Nostr — should never
+        // appear as candidates unless the user targets them by name.
         let meshes = vec![
             make_mesh(
                 Some("bobs-cluster"),
@@ -1742,10 +1819,10 @@ mod smart_auto_tests {
 
     #[test]
     fn smart_auto_larger_unnamed_beats_smaller_alias() {
-        // Both unnamed and "mesh-llm" are eligible with the same name bonus.
-        // With capacity as the tiebreaker, the larger unnamed mesh wins —
-        // which is what we want, since unnamed is the canonical identity
-        // of the public community mesh.
+        // Both unnamed and `COMMUNITY_MESH_NAME` are eligible with the same
+        // name bonus. With capacity as the tiebreaker, the larger unnamed
+        // mesh wins — which is what we want, since unnamed is the canonical
+        // identity of the public community mesh.
         let meshes = vec![
             make_mesh(
                 None,
@@ -1757,7 +1834,7 @@ mod smart_auto_tests {
                 0,
             ),
             make_mesh(
-                Some("mesh-llm"),
+                Some(COMMUNITY_MESH_NAME),
                 "alias-1",
                 &["Qwen3-8B-Q4_K_M"],
                 2,
@@ -1802,7 +1879,7 @@ mod smart_auto_tests {
     fn smart_auto_target_name_filters() {
         let meshes = vec![
             make_mesh(
-                Some("mesh-llm"),
+                Some(COMMUNITY_MESH_NAME),
                 "aaa",
                 &["Qwen3-8B-Q4_K_M"],
                 3,

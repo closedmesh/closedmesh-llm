@@ -3,7 +3,19 @@ use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-pub const MESH_SERVICE_KIND: u16 = 31990;
+/// NIP-89 "Application Handler" kind. MUST stay in lockstep with
+/// `mesh_llm::network::nostr::MESH_SERVICE_KIND`. Bumped from 31990 to 31991
+/// in v0.66.0 to leave the upstream `mesh-llm` namespace; see the
+/// corresponding doc block in `mesh-llm/src/network/nostr.rs`.
+pub const MESH_SERVICE_KIND: u16 = 31991;
+
+/// Nostr d-tag identifying the ClosedMesh discovery channel. MUST match
+/// `mesh_llm::network::nostr::MESH_DTAG`.
+pub const MESH_DTAG: &str = "closedmesh";
+
+/// Blessed community alias for `--auto`. MUST match
+/// `mesh_llm::network::nostr::COMMUNITY_MESH_NAME`.
+pub const COMMUNITY_MESH_NAME: &str = "closedmesh";
 
 pub const DEFAULT_RELAYS: &[&str] = &[
     "wss://relay.damus.io",
@@ -94,8 +106,8 @@ impl Publisher {
         let content = serde_json::to_string(listing)?;
 
         let tags = vec![
-            Tag::custom(TagKind::Custom("d".into()), vec!["mesh-llm".to_string()]),
-            Tag::custom(TagKind::Custom("k".into()), vec!["mesh-llm".to_string()]),
+            Tag::custom(TagKind::Custom("d".into()), vec![MESH_DTAG.to_string()]),
+            Tag::custom(TagKind::Custom("k".into()), vec![MESH_DTAG.to_string()]),
             Tag::custom(
                 TagKind::Custom("expiration".into()),
                 vec![expiration.to_string()],
@@ -233,7 +245,7 @@ pub async fn discover(
         .kind(Kind::Custom(MESH_SERVICE_KIND))
         .custom_tag(
             SingleLetterTag::lowercase(Alphabet::K),
-            "mesh-llm".to_string(),
+            MESH_DTAG.to_string(),
         )
         .limit(100);
 
@@ -309,7 +321,7 @@ pub fn score_mesh(mesh: &DiscoveredMesh, _now_secs: u64, last_mesh_id: Option<&s
     let mut score: i64 = 100;
 
     if let Some(ref name) = mesh.listing.name {
-        if name.eq_ignore_ascii_case("mesh-llm") {
+        if name.eq_ignore_ascii_case(COMMUNITY_MESH_NAME) {
             score += 300;
         } else {
             score -= 200;
@@ -623,7 +635,7 @@ mod scoring_tests {
     #[test]
     fn score_community_mesh_bonus() {
         let mesh = make_mesh(
-            Some("mesh-llm"),
+            Some(COMMUNITY_MESH_NAME),
             Some("abc"),
             &["Qwen3-8B-Q4_K_M"],
             3,
@@ -909,7 +921,7 @@ mod smart_auto_tests {
     fn smart_auto_prefers_community_mesh() {
         let meshes = vec![
             make_mesh(
-                Some("mesh-llm"),
+                Some(COMMUNITY_MESH_NAME),
                 "aaa",
                 &["Qwen3-8B-Q4_K_M"],
                 3,
@@ -961,7 +973,7 @@ mod smart_auto_tests {
     fn smart_auto_target_name_filters() {
         let meshes = vec![
             make_mesh(
-                Some("mesh-llm"),
+                Some(COMMUNITY_MESH_NAME),
                 "aaa",
                 &["Qwen3-8B-Q4_K_M"],
                 3,

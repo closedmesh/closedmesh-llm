@@ -1,5 +1,6 @@
 use mesh_client::network::nostr::{
     score_mesh, smart_auto, AutoDecision, DiscoveredMesh, MeshFilter, MeshListing,
+    COMMUNITY_MESH_NAME,
 };
 
 fn make_listing(
@@ -34,7 +35,7 @@ fn make_listing(
 #[test]
 fn score_mesh_with_synthetic_listing() {
     let mesh = make_listing(
-        Some("mesh-llm"),
+        Some(COMMUNITY_MESH_NAME),
         Some("abc"),
         &["Qwen3-8B-Q4_K_M"],
         3,
@@ -132,7 +133,7 @@ fn smart_auto_start_new_when_empty() {
 fn smart_auto_join_community_mesh() {
     let meshes = vec![
         make_listing(
-            Some("mesh-llm"),
+            Some(COMMUNITY_MESH_NAME),
             Some("aaa"),
             &["Qwen3-8B-Q4_K_M"],
             3,
