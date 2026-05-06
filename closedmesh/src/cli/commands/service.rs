@@ -134,19 +134,58 @@ mod darwin {
             .args(["bootout", &full_target])
             .output();
 
-        let status = Command::new("launchctl")
-            .args(["bootstrap", &target])
-            .arg(&plist)
-            .status()
-            .context("failed to invoke launchctl")?;
-        if !status.success() {
-            return Err(anyhow!(
-                "launchctl bootstrap failed with exit code {:?}",
-                status.code()
-            ));
+        // macOS's `launchctl bootout` returns immediately, but the
+        // underlying unload is queued. A `bootstrap` issued in the next
+        // ~1 s reliably fails with EIO ("Bootstrap failed: 5: Input/output
+        // error") because launchd still considers the previous instance
+        // loaded. The desktop app already retries with backoff for its own
+        // bounce path; mirror that here so anyone running `service start`
+        // from the CLI (or via the dashboard's "Set as startup" flow that
+        // shells out to it) gets the same robustness.
+        //
+        // Three attempts spaced 0 s / 2 s / 4 s. Anything still failing
+        // after ~6 s of accumulated wait is almost certainly a real
+        // plist / permissions problem and we should surface it.
+        let backoff = [
+            std::time::Duration::from_secs(0),
+            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(4),
+        ];
+        let mut last_code: Option<i32> = None;
+        for (i, wait) in backoff.iter().enumerate() {
+            if !wait.is_zero() {
+                std::thread::sleep(*wait);
+            }
+            let status = Command::new("launchctl")
+                .args(["bootstrap", &target])
+                .arg(&plist)
+                .status()
+                .context("failed to invoke launchctl")?;
+            if status.success() {
+                if i > 0 {
+                    eprintln!(
+                        "✓ ClosedMesh service started (label: {SERVICE_LABEL_DARWIN}, attempt {})",
+                        i + 1,
+                    );
+                } else {
+                    eprintln!(
+                        "✓ ClosedMesh service started (label: {SERVICE_LABEL_DARWIN})"
+                    );
+                }
+                return Ok(());
+            }
+            last_code = status.code();
+            // Only the EIO race is worth retrying. Any other exit code is
+            // a real configuration error and a retry would just delay the
+            // failure surfacing to the user.
+            if last_code != Some(5) {
+                break;
+            }
         }
-        eprintln!("✓ ClosedMesh service started (label: {SERVICE_LABEL_DARWIN})");
-        Ok(())
+        Err(anyhow!(
+            "launchctl bootstrap failed with exit code {:?}",
+            last_code
+        ))
     }
 
     pub(super) fn stop() -> Result<()> {
