@@ -269,7 +269,7 @@ for i in $(seq 1 "$MAX_INFERENCE_ATTEMPTS"); do
     HOST_BODY=$(echo "$HOST_RESPONSE" | sed '$d')
 
     if [ "$HOST_HTTP_CODE" = "200" ]; then
-        HOST_READY=$(echo "$HOST_BODY" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['choices'][0]['message']['content'])" 2>/dev/null || echo "")
+        HOST_READY=$(echo "$HOST_BODY" | python3 -c "import sys,json; m=json.load(sys.stdin)['choices'][0]['message']; print((m.get('content') or m.get('reasoning_content') or '').strip())" 2>/dev/null || echo "")
         if [ -n "$HOST_READY" ]; then
             echo "  ✅ Host direct inference ready in attempt $i: $HOST_READY"
             break
@@ -329,7 +329,7 @@ for attempt in $(seq 1 "$MAX_INFERENCE_ATTEMPTS"); do
     BODY=$(echo "$RESPONSE" | sed '$d')
 
     if [ "$HTTP_CODE" = "200" ]; then
-        CONTENT=$(echo "$BODY" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['choices'][0]['message']['content'])" 2>/dev/null || echo "")
+        CONTENT=$(echo "$BODY" | python3 -c "import sys,json; m=json.load(sys.stdin)['choices'][0]['message']; print((m.get('content') or m.get('reasoning_content') or '').strip())" 2>/dev/null || echo "")
         if [ -n "$CONTENT" ]; then
             echo "  ✅ Response (attempt $attempt): $CONTENT"
             break
@@ -376,7 +376,7 @@ if ! RESPONSE2=$(curl -s --max-time 60 "http://localhost:${HOST_API}/v1/chat/com
     exit 1
 fi
 
-CONTENT2=$(echo "$RESPONSE2" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['choices'][0]['message']['content'])" 2>/dev/null || echo "")
+CONTENT2=$(echo "$RESPONSE2" | python3 -c "import sys,json; m=json.load(sys.stdin)['choices'][0]['message']; print((m.get('content') or m.get('reasoning_content') or '').strip())" 2>/dev/null || echo "")
 if [ -z "$CONTENT2" ]; then
     echo "❌ Empty response from host"
     exit 1

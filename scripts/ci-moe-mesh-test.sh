@@ -235,7 +235,11 @@ for attempt in $(seq 1 "$MAX_INFERENCE_ATTEMPTS"); do
     BODY=$(echo "$RESPONSE" | sed '$d')
 
     if [ "$HTTP_CODE" = "200" ]; then
-        CONTENT=$(echo "$BODY" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['choices'][0]['message']['content'])" 2>/dev/null || echo "")
+        # Accept either `content` or `reasoning_content` — the Q2_K MoE model
+        # used here is tiny enough that it spends its 16-token budget on the
+        # reasoning channel and emits empty `content` for prompts that trip
+        # its think mode. We're testing mesh round-trip, not output quality.
+        CONTENT=$(echo "$BODY" | python3 -c "import sys,json; m=json.load(sys.stdin)['choices'][0]['message']; print((m.get('content') or m.get('reasoning_content') or '').strip())" 2>/dev/null || echo "")
         if [ -n "$CONTENT" ]; then
             echo "  ✅ Node A inference (attempt $attempt): $CONTENT"
             break
@@ -279,7 +283,7 @@ for attempt in $(seq 1 "$MAX_INFERENCE_ATTEMPTS"); do
     BODY=$(echo "$RESPONSE" | sed '$d')
 
     if [ "$HTTP_CODE" = "200" ]; then
-        CONTENT_B=$(echo "$BODY" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['choices'][0]['message']['content'])" 2>/dev/null || echo "")
+        CONTENT_B=$(echo "$BODY" | python3 -c "import sys,json; m=json.load(sys.stdin)['choices'][0]['message']; print((m.get('content') or m.get('reasoning_content') or '').strip())" 2>/dev/null || echo "")
         if [ -n "$CONTENT_B" ]; then
             echo "  ✅ Node B inference (attempt $attempt): $CONTENT_B"
             break
@@ -388,7 +392,7 @@ for attempt in $(seq 1 "$MAX_INFERENCE_ATTEMPTS"); do
     BODY=$(echo "$RESPONSE" | sed '$d')
 
     if [ "$HTTP_CODE" = "200" ]; then
-        CONTENT_C=$(echo "$BODY" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['choices'][0]['message']['content'])" 2>/dev/null || echo "")
+        CONTENT_C=$(echo "$BODY" | python3 -c "import sys,json; m=json.load(sys.stdin)['choices'][0]['message']; print((m.get('content') or m.get('reasoning_content') or '').strip())" 2>/dev/null || echo "")
         if [ -n "$CONTENT_C" ]; then
             echo "  ✅ Client inference (attempt $attempt): $CONTENT_C"
             break
