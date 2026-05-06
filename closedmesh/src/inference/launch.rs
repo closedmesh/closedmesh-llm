@@ -1477,7 +1477,14 @@ pub async fn start_llama_server(
             // caught by CI if this gate hadn't quietly skipped CPU runs.
             args.push("-md".to_string());
             args.push(draft_path.to_string_lossy().to_string());
-            if local_device != "CPU" {
+            // Only pin the draft model to a specific GPU when the runtime
+            // has actually pinned the base model to one (`selected_gpu`
+            // is what gates `--device` for the base — we mirror that).
+            // Otherwise we'd emit e.g. `--device-draft MTL0` on a CI
+            // runner whose `MTL0` is reported by the binary's device
+            // probe but isn't actually usable, and llama-server bails
+            // with `invalid device: MTL0`.
+            if selected_gpu.is_some() && local_device != "CPU" {
                 args.push("-ngld".to_string());
                 args.push("99".to_string());
                 args.push("--device-draft".to_string());
