@@ -106,9 +106,10 @@ jobs:
       # `--spec-draft-*` flag surface fail in CI rather than silently brick
       # every install with a draft model configured. See May 2026 incident.
       - name: Smoke test (with speculative decoding)
-        env:
-          CLOSEDMESH_DRAFT_MODEL: ~/.models/${{ env.MODEL_FILE }}
         run: |
+          # Note: `~` is not expanded inside GHA `env:` values, so set the
+          # env var here in the run script where bash does the expansion.
+          export CLOSEDMESH_DRAFT_MODEL="$HOME/.models/$MODEL_FILE"
           scripts/ci-smoke-test.sh \
             "${{ inputs.mesh_binary_target }}" \
             llama.cpp/build/bin \

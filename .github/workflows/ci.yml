@@ -534,9 +534,10 @@ jobs:
       # with a draft model stuck at `loading` forever).
       - name: Smoke test (with speculative decoding)
         if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ui == 'true' }}
-        env:
-          CLOSEDMESH_DRAFT_MODEL: ~/.models/${{ env.MODEL_FILE }}
         run: |
+          # `~` is not expanded inside GHA `env:` values, so set the env
+          # var here in the run script where bash does the expansion.
+          export CLOSEDMESH_DRAFT_MODEL="$HOME/.models/$MODEL_FILE"
           scripts/ci-smoke-test.sh \
             target/debug/closedmesh \
             llama.cpp/build/bin \
