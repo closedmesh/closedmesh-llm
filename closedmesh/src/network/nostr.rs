@@ -1405,13 +1405,20 @@ mod scoring_tests {
 
     #[test]
     fn other_named_mesh_not_auto_eligible() {
+        // The blessed community name is `closedmesh` (per `is_auto_eligible`).
+        // We exercise case-insensitive matching with `CLOSEDMESH`, and confirm
+        // that the historical `mesh-llm` name is now treated as just another
+        // named mesh (not auto-eligible) — the rebrand walked away from that
+        // channel and named-mesh joining is opt-in via --mesh-name.
         let bobs = make_mesh(Some("bobs-cluster"), Some("x"), &[], 1, 0, 0, 0);
         let community = make_mesh(Some("closedmesh"), Some("c"), &[], 1, 0, 0, 0);
-        let community_caps = make_mesh(Some("MESH-LLM"), Some("c2"), &[], 1, 0, 0, 0);
+        let community_caps = make_mesh(Some("CLOSEDMESH"), Some("c2"), &[], 1, 0, 0, 0);
+        let legacy_mesh_llm = make_mesh(Some("mesh-llm"), Some("c3"), &[], 1, 0, 0, 0);
         let unnamed = make_mesh(None, Some("u"), &[], 1, 0, 0, 0);
         assert!(!is_auto_eligible(&bobs));
         assert!(is_auto_eligible(&community));
         assert!(is_auto_eligible(&community_caps));
+        assert!(!is_auto_eligible(&legacy_mesh_llm));
         assert!(is_auto_eligible(&unnamed));
     }
 
