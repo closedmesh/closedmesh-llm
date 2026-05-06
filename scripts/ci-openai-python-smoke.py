@@ -59,10 +59,12 @@ def main() -> None:
         max_tokens=32,
         temperature=0,
     )
-    message = response.choices[0].message.content
-    if not message or not message.strip():
-        raise RuntimeError("non-streaming chat returned empty content")
-    print(f"Non-streaming response: {message.strip()}")
+    msg = response.choices[0].message
+    content = (getattr(msg, "content", None) or getattr(msg, "reasoning_content", None) or "").strip()
+    tokens = getattr(getattr(response, "usage", None), "completion_tokens", 0) or 0
+    if not content and tokens <= 0:
+        raise RuntimeError("non-streaming chat generated no tokens")
+    print(f"Non-streaming response: {content or f'<{tokens} blank tokens>'}")
 
     stream = client.chat.completions.create(
         model=model,

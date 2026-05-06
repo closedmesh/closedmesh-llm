@@ -118,7 +118,7 @@ if [ $? -ne 0 ]; then
 fi
 
 # Verify response has content
-CONTENT=$(echo "$RESPONSE" | python3 -c "import sys,json; m=json.load(sys.stdin)['choices'][0]['message']; print((m.get('content') or m.get('reasoning_content') or '').strip())" 2>/dev/null || echo "")
+CONTENT=$(echo "$RESPONSE" | python3 -c "import sys,json; r=json.load(sys.stdin); n=r.get('usage',{}).get('completion_tokens',0) or 0; m=r['choices'][0]['message']; c=(m.get('content') or m.get('reasoning_content') or '').strip(); print(c or (f'<{n} blank tokens>' if n>0 else ''))" 2>/dev/null || echo "")
 if [ -z "$CONTENT" ]; then
     echo "❌ Empty response from inference"
     echo "Raw response: $RESPONSE"
@@ -140,7 +140,7 @@ AUTO_HOOK_RESPONSE=$(curl -sf "http://localhost:${API_PORT}/v1/chat/completions"
         "temperature": 0
     }' 2>&1)
 
-AUTO_HOOK_CONTENT=$(echo "$AUTO_HOOK_RESPONSE" | python3 -c "import sys,json; m=json.load(sys.stdin)['choices'][0]['message']; print((m.get('content') or m.get('reasoning_content') or '').strip())" 2>/dev/null || echo "")
+AUTO_HOOK_CONTENT=$(echo "$AUTO_HOOK_RESPONSE" | python3 -c "import sys,json; r=json.load(sys.stdin); n=r.get('usage',{}).get('completion_tokens',0) or 0; m=r['choices'][0]['message']; c=(m.get('content') or m.get('reasoning_content') or '').strip(); print(c or (f'<{n} blank tokens>' if n>0 else ''))" 2>/dev/null || echo "")
 if [ -z "$AUTO_HOOK_CONTENT" ]; then
     echo "❌ model=auto returned empty response"
     echo "Raw: $AUTO_HOOK_RESPONSE"

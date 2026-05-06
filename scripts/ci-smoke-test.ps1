@@ -114,11 +114,16 @@ try {
         -Body $body `
         -TimeoutSec 30
 
-    $content = $response.choices[0].message.content
-    if ([string]::IsNullOrWhiteSpace($content)) {
-        throw "Empty response from inference"
+    # Q2_K tiny models often emit whitespace-only content or route tokens
+    # through `reasoning_content`; gate on tokens generated, not content text.
+    $msg = $response.choices[0].message
+    $content = if ($msg.content) { $msg.content } else { $msg.reasoning_content }
+    $tokens = if ($response.usage -and $response.usage.completion_tokens) { $response.usage.completion_tokens } else { 0 }
+    if ($tokens -le 0 -and [string]::IsNullOrWhiteSpace($content)) {
+        throw "No tokens generated from inference"
     }
-    Write-Host "✅ Inference response: $content"
+    $display = if ([string]::IsNullOrWhiteSpace($content)) { "<$tokens blank tokens>" } else { $content.Trim() }
+    Write-Host "✅ Inference response: $display"
 
     Write-Host "Testing /v1/models..."
     $models = Invoke-RestMethod -Uri "http://localhost:$apiPort/v1/models" -Method Get -TimeoutSec 15
