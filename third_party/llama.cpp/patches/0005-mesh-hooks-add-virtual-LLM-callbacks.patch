@@ -1,4 +1,4 @@
-From 2f2eb75fda5675085886b5d95b649bfc3541c446 Mon Sep 17 00:00:00 2001
+From a4f9e60f449917942db7ed43ac65fbb6aa3a1433 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sun, 26 Apr 2026 08:25:17 +1000
 Subject: [PATCH 5/6] mesh hooks: add virtual LLM callbacks
@@ -16,10 +16,10 @@ Subject: [PATCH 5/6] mesh hooks: add virtual LLM callbacks
  create mode 100644 tools/server/server-mesh-hook.h
 
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 85d84e5c..dc96849c 100644
+index 55ec9389b..1134bf4b4 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
-@@ -3023,6 +3023,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -3009,6 +3009,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
              params.endpoint_slots = value;
          }
      ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_ENDPOINT_SLOTS"));
@@ -41,10 +41,10 @@ index 85d84e5c..dc96849c 100644
          {"--slot-save-path"}, "PATH",
          "path to save slot kv cache (default: disabled)",
 diff --git a/common/common.h b/common/common.h
-index f19ff608..54b65da3 100644
+index f428c302f..b19e52602 100644
 --- a/common/common.h
 +++ b/common/common.h
-@@ -600,6 +600,10 @@ struct common_params {
+@@ -620,6 +620,10 @@ struct common_params {
      bool webui_mcp_proxy = false;
      std::string webui_config_json;
  
@@ -56,7 +56,7 @@ index f19ff608..54b65da3 100644
      bool endpoint_slots   = true;
      bool endpoint_props   = false; // only control POST requests, not GET
 diff --git a/tools/server/server-common.cpp b/tools/server/server-common.cpp
-index 21c843c0..dac14490 100644
+index 21c843c0d..dac14490f 100644
 --- a/tools/server/server-common.cpp
 +++ b/tools/server/server-common.cpp
 @@ -992,6 +992,18 @@ json oaicompat_chat_params_parse(
@@ -92,7 +92,7 @@ index 21c843c0..dac14490 100644
                  }
  
 diff --git a/tools/server/server-common.h b/tools/server/server-common.h
-index 4681f9c5..dd15e6b6 100644
+index 4681f9c51..dd15e6b67 100644
 --- a/tools/server/server-common.h
 +++ b/tools/server/server-common.h
 @@ -201,6 +201,9 @@ public:
@@ -114,7 +114,7 @@ index 4681f9c5..dd15e6b6 100644
      int  reasoning_budget = -1;
      std::string reasoning_budget_message;
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 08ff1e36..cdc2229a 100644
+index 4b28033d9..bad5feb60 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -5,6 +5,7 @@
@@ -125,7 +125,7 @@ index 08ff1e36..cdc2229a 100644
  
  #include "build-info.h"
  #include "common.h"
-@@ -129,6 +130,9 @@ struct server_slot {
+@@ -130,6 +131,9 @@ struct server_slot {
      // state
      slot_state state = SLOT_STATE_IDLE;
  
@@ -135,7 +135,7 @@ index 08ff1e36..cdc2229a 100644
      server_prompt prompt;
  
      void prompt_save(server_prompt_cache & prompt_cache) const {
-@@ -225,6 +229,9 @@ struct server_slot {
+@@ -226,6 +230,9 @@ struct server_slot {
  
          // clear alora start
          alora_invocation_start = -1;
@@ -145,7 +145,7 @@ index 08ff1e36..cdc2229a 100644
      }
  
      void init_sampler() const {
-@@ -913,6 +920,14 @@ private:
+@@ -918,6 +925,14 @@ private:
  
              SLT_INF(slot, "new slot, n_ctx = %d\n", slot.n_ctx);
  
@@ -160,7 +160,7 @@ index 08ff1e36..cdc2229a 100644
              slot.callback_on_release = [this](int id_slot) {
                  queue_tasks.pop_deferred_task(id_slot);
              };
-@@ -1050,6 +1065,7 @@ private:
+@@ -1064,6 +1079,7 @@ private:
                  /* tmpls                 */ std::move(chat_templates),
                  /* allow_image           */ mctx ? mtmd_support_vision(mctx) : false,
                  /* allow_audio           */ mctx ? mtmd_support_audio (mctx) : false,
@@ -168,7 +168,7 @@ index 08ff1e36..cdc2229a 100644
                  /* enable_thinking       */ enable_thinking,
                  /* reasoning_budget      */ params_base.sampling.reasoning_budget_tokens,
                  /* reasoning_budget_msg  */ params_base.sampling.reasoning_budget_message,
-@@ -1327,6 +1343,68 @@ private:
+@@ -1341,6 +1357,68 @@ private:
              slot.smpl.reset();
          }
  
@@ -237,7 +237,7 @@ index 08ff1e36..cdc2229a 100644
          slot.task = std::make_unique<const server_task>(std::move(task));
  
          slot.state = slot.task->is_child()
-@@ -2899,6 +2977,109 @@ private:
+@@ -2914,6 +2992,109 @@ private:
                      // prompt evaluated for next-token prediction
                      slot.state = SLOT_STATE_GENERATING;
  
@@ -347,7 +347,7 @@ index 08ff1e36..cdc2229a 100644
                      if (slot.can_speculate()) {
                          common_speculative_begin(slot.spec.get(), slot.prompt.tokens.get_text_tokens());
                      }
-@@ -2918,6 +3099,96 @@ private:
+@@ -2933,6 +3114,96 @@ private:
  
                  common_sampler_accept(slot.smpl.get(), id, true);
  
@@ -446,7 +446,7 @@ index 08ff1e36..cdc2229a 100644
  
 diff --git a/tools/server/server-mesh-hook.h b/tools/server/server-mesh-hook.h
 new file mode 100644
-index 00000000..8022b800
+index 000000000..8022b8004
 --- /dev/null
 +++ b/tools/server/server-mesh-hook.h
 @@ -0,0 +1,350 @@
@@ -801,10 +801,10 @@ index 00000000..8022b800
 +    return h;
 +}
 diff --git a/tools/server/server-task.cpp b/tools/server/server-task.cpp
-index 4c341d7c..3b16ff97 100644
+index 45e5168fa..b4b6901bd 100644
 --- a/tools/server/server-task.cpp
 +++ b/tools/server/server-task.cpp
-@@ -277,6 +277,18 @@ task_params server_task::params_from_json_cmpl(
+@@ -265,6 +265,18 @@ task_params server_task::params_from_json_cmpl(
      params.t_max_predict_ms = json_value(data,       "t_max_predict_ms",   defaults.t_max_predict_ms);
      params.response_fields  = json_value(data,       "response_fields",    std::vector<std::string>());
  
@@ -824,7 +824,7 @@ index 4c341d7c..3b16ff97 100644
      params.sampling.top_p              = json_value(data, "top_p",               defaults.sampling.top_p);
      params.sampling.min_p              = json_value(data, "min_p",               defaults.sampling.min_p);
 diff --git a/tools/server/server-task.h b/tools/server/server-task.h
-index 289e1fb8..b0a7657c 100644
+index 289e1fb8d..b0a7657c5 100644
 --- a/tools/server/server-task.h
 +++ b/tools/server/server-task.h
 @@ -84,6 +84,13 @@ struct task_params {
@@ -842,5 +842,5 @@ index 289e1fb8..b0a7657c 100644
      int32_t embd_normalize = 2; // (-1=none, 0=max absolute int16, 1=taxicab, 2=Euclidean/L2, >2=p-norm)
  
 -- 
-2.50.1 (Apple Git-155)
+2.39.3 (Apple Git-145)
 

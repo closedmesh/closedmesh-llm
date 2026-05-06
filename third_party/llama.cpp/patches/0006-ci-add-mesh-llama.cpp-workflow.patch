@@ -1,4 +1,4 @@
-From e250c75183bfba57f8b55e5f2666ec56334ec965 Mon Sep 17 00:00:00 2001
+From 933db2439ff5a853b7ec898ec15d9f36f7423bff Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sun, 26 Apr 2026 08:25:17 +1000
 Subject: [PATCH 6/6] ci: add mesh llama.cpp workflow
@@ -10,7 +10,7 @@ Subject: [PATCH 6/6] ci: add mesh llama.cpp workflow
 
 diff --git a/.github/workflows/mesh-ci.yml b/.github/workflows/mesh-ci.yml
 new file mode 100644
-index 00000000..2731c099
+index 000000000..2731c0996
 --- /dev/null
 +++ b/.github/workflows/mesh-ci.yml
 @@ -0,0 +1,71 @@
@@ -86,5 +86,5 @@ index 00000000..2731c099
 +            test -x "build/bin/$bin" && echo "ok: $bin"
 +          done
 -- 
-2.50.1 (Apple Git-155)
+2.39.3 (Apple Git-145)
 

@@ -1,4 +1,4 @@
-From 588d82dd8482f0241a69dc9008d21e539b65722c Mon Sep 17 00:00:00 2001
+From a513ae14dc0ece990c1d63a94f3864993d8a66bd Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sun, 26 Apr 2026 08:25:16 +1000
 Subject: [PATCH 1/6] rpc: optimize local GGUF tensor loading
@@ -11,7 +11,7 @@ Subject: [PATCH 1/6] rpc: optimize local GGUF tensor loading
  4 files changed, 231 insertions(+), 16 deletions(-)
 
 diff --git a/ggml/include/ggml-rpc.h b/ggml/include/ggml-rpc.h
-index 6fcf5a43..02417ab1 100644
+index 6fcf5a433..02417ab13 100644
 --- a/ggml/include/ggml-rpc.h
 +++ b/ggml/include/ggml-rpc.h
 @@ -27,6 +27,11 @@ GGML_BACKEND_API void ggml_backend_rpc_get_device_memory(const char * endpoint,
@@ -27,7 +27,7 @@ index 6fcf5a43..02417ab1 100644
  GGML_BACKEND_API ggml_backend_reg_t ggml_backend_rpc_add_server(const char * endpoint);
  
 diff --git a/ggml/src/ggml-rpc/ggml-rpc.cpp b/ggml/src/ggml-rpc/ggml-rpc.cpp
-index 2ded7397..d67c9f68 100644
+index 1cb8f563d..271180efa 100644
 --- a/ggml/src/ggml-rpc/ggml-rpc.cpp
 +++ b/ggml/src/ggml-rpc/ggml-rpc.cpp
 @@ -3,6 +3,7 @@
@@ -65,7 +65,7 @@ index 2ded7397..d67c9f68 100644
  #pragma pack(pop)
  
  // RPC data structures
-@@ -482,6 +496,27 @@ static enum ggml_status ggml_backend_rpc_buffer_init_tensor(ggml_backend_buffer_
+@@ -458,6 +472,27 @@ static enum ggml_status ggml_backend_rpc_buffer_init_tensor(ggml_backend_buffer_
  static void ggml_backend_rpc_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
      ggml_backend_rpc_buffer_context * ctx = (ggml_backend_rpc_buffer_context *)buffer->context;
      rpc_tensor rpc_tensor = serialize_tensor(tensor);
@@ -93,7 +93,7 @@ index 2ded7397..d67c9f68 100644
      if (size > HASH_THRESHOLD) {
          rpc_msg_set_tensor_hash_req request;
          request.tensor = rpc_tensor;
-@@ -621,7 +656,6 @@ static size_t ggml_backend_rpc_buffer_type_get_alloc_size(ggml_backend_buffer_ty
+@@ -597,7 +632,6 @@ static size_t ggml_backend_rpc_buffer_type_get_alloc_size(ggml_backend_buffer_ty
  
      if (rpc_get) {
          ggml_backend_rpc_buffer_type_context * buft_ctx = (ggml_backend_rpc_buffer_type_context *)buft->context;
@@ -101,7 +101,7 @@ index 2ded7397..d67c9f68 100644
  
          rpc_msg_get_alloc_size_req request = {
              /*.device =*/ buft_ctx->device,
-@@ -634,12 +668,38 @@ static size_t ggml_backend_rpc_buffer_type_get_alloc_size(ggml_backend_buffer_ty
+@@ -610,12 +644,38 @@ static size_t ggml_backend_rpc_buffer_type_get_alloc_size(ggml_backend_buffer_ty
              request.srcs[i] = serialize_tensor(tensor->src[i]);
          }
  
@@ -145,7 +145,7 @@ index 2ded7397..d67c9f68 100644
      }
  
      return ggml_nbytes(tensor);
-@@ -849,6 +909,7 @@ public:
+@@ -825,6 +885,7 @@ public:
      bool buffer_clear(const rpc_msg_buffer_clear_req & request);
      bool set_tensor(const std::vector<uint8_t> & input);
      bool set_tensor_hash(const rpc_msg_set_tensor_hash_req & request, rpc_msg_set_tensor_hash_rsp & response);
@@ -153,7 +153,7 @@ index 2ded7397..d67c9f68 100644
      bool get_tensor(const rpc_msg_get_tensor_req & request, std::vector<uint8_t> & response);
      bool copy_tensor(const rpc_msg_copy_tensor_req & request, rpc_msg_copy_tensor_rsp & response);
      bool graph_compute(const std::vector<uint8_t> & input);
-@@ -857,6 +918,9 @@ public:
+@@ -833,6 +894,9 @@ public:
      bool get_alloc_size(const rpc_msg_get_alloc_size_req & request, rpc_msg_get_alloc_size_rsp & response);
      bool get_device_memory(const rpc_msg_get_device_memory_req & request, rpc_msg_get_device_memory_rsp & response);
  
@@ -163,7 +163,7 @@ index 2ded7397..d67c9f68 100644
      struct stored_graph {
          std::vector<uint8_t>   buffer;
          ggml_cgraph          * graph;
-@@ -873,6 +937,8 @@ private:
+@@ -849,6 +913,8 @@ private:
  
      std::vector<ggml_backend_t> backends;
      const char * cache_dir;
@@ -172,7 +172,7 @@ index 2ded7397..d67c9f68 100644
      std::unordered_set<ggml_backend_buffer_t> buffers;
      // store the last computed graph for each backend
      std::vector<stored_graph> stored_graphs;
-@@ -1169,6 +1235,95 @@ bool rpc_server::set_tensor_hash(const rpc_msg_set_tensor_hash_req & request, rp
+@@ -1145,6 +1211,95 @@ bool rpc_server::set_tensor_hash(const rpc_msg_set_tensor_hash_req & request, rp
      return true;
  }
  
@@ -268,7 +268,7 @@ index 2ded7397..d67c9f68 100644
  bool rpc_server::init_tensor(const rpc_msg_init_tensor_req & request) {
      struct ggml_init_params params {
          /*.mem_size   =*/ ggml_tensor_overhead(),
-@@ -1442,8 +1597,9 @@ rpc_server::~rpc_server() {
+@@ -1418,8 +1573,9 @@ rpc_server::~rpc_server() {
  }
  
  static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const char * cache_dir,
@@ -279,7 +279,7 @@ index 2ded7397..d67c9f68 100644
      uint8_t cmd;
      if (!sock->recv_data(&cmd, 1)) {
          return;
-@@ -1700,6 +1856,20 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
+@@ -1676,6 +1832,20 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
                  }
                  break;
              }
@@ -300,7 +300,7 @@ index 2ded7397..d67c9f68 100644
              default: {
                  GGML_LOG_ERROR("Unknown command: %d\n", cmd);
                  return;
-@@ -1708,8 +1878,9 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
+@@ -1684,8 +1854,9 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
      }
  }
  
@@ -312,7 +312,7 @@ index 2ded7397..d67c9f68 100644
      if (n_devices == 0 || devices == nullptr) {
          fprintf(stderr, "Invalid arguments to ggml_backend_rpc_start_server\n");
          return;
-@@ -1721,6 +1892,7 @@ void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir
+@@ -1697,6 +1868,7 @@ void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir
          RPC_PROTO_PATCH_VERSION);
      printf("  endpoint       : %s\n", endpoint);
      printf("  local cache    : %s\n", cache_dir ? cache_dir : "n/a");
@@ -320,7 +320,7 @@ index 2ded7397..d67c9f68 100644
      printf("Devices:\n");
      for (size_t i = 0; i < n_devices; i++) {
          auto dev = devices[i];
-@@ -1771,7 +1943,7 @@ void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir
+@@ -1747,7 +1919,7 @@ void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir
          }
          printf("Accepted client connection\n");
          fflush(stdout);
@@ -329,7 +329,7 @@ index 2ded7397..d67c9f68 100644
          printf("Client connection closed\n");
          fflush(stdout);
      }
-@@ -1781,6 +1953,17 @@ void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir
+@@ -1757,6 +1929,17 @@ void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir
      }
  }
  
@@ -347,7 +347,7 @@ index 2ded7397..d67c9f68 100644
  // device interface
  
  struct ggml_backend_rpc_device_context {
-@@ -1912,6 +2095,9 @@ static void * ggml_backend_rpc_get_proc_address(ggml_backend_reg_t reg, const ch
+@@ -1888,6 +2071,9 @@ static void * ggml_backend_rpc_get_proc_address(ggml_backend_reg_t reg, const ch
      if (std::strcmp(name, "ggml_backend_rpc_start_server") == 0) {
          return (void *)ggml_backend_rpc_start_server;
      }
@@ -358,10 +358,10 @@ index 2ded7397..d67c9f68 100644
  
      GGML_UNUSED(reg);
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index 9e2a13cb..eb75384d 100644
+index 9a5802e32..6281e4cb1 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
-@@ -8334,6 +8334,13 @@ ggml_backend_dev_t llama_model::dev_output() const {
+@@ -1823,6 +1823,13 @@ ggml_backend_dev_t llama_model::dev_output() const {
  
  template<typename F>
  static bool buft_supported(ggml_backend_buffer_type_t buft, ggml_backend_dev_t dev, F & fn) {
@@ -376,7 +376,7 @@ index 9e2a13cb..eb75384d 100644
          /*.mem_size   =*/ ggml_tensor_overhead()*8,
          /*.mem_buffer =*/ NULL,
 diff --git a/tools/rpc/rpc-server.cpp b/tools/rpc/rpc-server.cpp
-index 03ab78e5..14910caf 100644
+index 08e680391..a8bedf9c4 100644
 --- a/tools/rpc/rpc-server.cpp
 +++ b/tools/rpc/rpc-server.cpp
 @@ -175,6 +175,7 @@ struct rpc_server_params {
@@ -437,5 +437,5 @@ index 03ab78e5..14910caf 100644
      return 0;
  }
 -- 
-2.50.1 (Apple Git-155)
+2.39.3 (Apple Git-145)
 
