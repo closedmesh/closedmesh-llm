@@ -7,9 +7,9 @@ use std::process::Command;
 use std::time::Instant;
 
 use crate::inference::moe;
-use crate::process_util::HideConsole;
 use crate::models::{self, catalog};
 use crate::network::router;
+use crate::process_util::HideConsole;
 use crate::system::benchmark_prompts::{self, PromptCorpusEntry, PromptCorpusSummary};
 
 #[derive(Clone, Debug)]

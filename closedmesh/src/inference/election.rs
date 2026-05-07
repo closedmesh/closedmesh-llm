@@ -5,7 +5,6 @@
 //! Every mesh change: kill llama-server, re-elect, winner starts fresh.
 //! closedmesh owns :api_port and proxies to the right host by model name.
 
-use crate::process_util::HideConsole;
 use crate::cli::output::{
     emit_event, MoeAnalysisProgressSummary, MoeDistributionSummary, MoeStatusSummary, MoeSummary,
     OutputEvent,
@@ -14,6 +13,7 @@ use crate::inference::{launch, moe};
 use crate::mesh;
 use crate::models;
 use crate::network::tunnel;
+use crate::process_util::HideConsole;
 use crate::system::hardware;
 use launch::{BinaryFlavor, SplitMode};
 use mesh::NodeRole;

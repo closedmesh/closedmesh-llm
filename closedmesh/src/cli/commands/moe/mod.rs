@@ -19,8 +19,8 @@ use crate::cli::moe::{HfJobArgs, MoeAnalyzeCommand, MoeCommand};
 use crate::cli::terminal_progress::start_spinner;
 use crate::cli::Cli;
 use crate::inference::moe;
-use crate::process_util::HideConsole;
 use crate::models;
+use crate::process_util::HideConsole;
 use crate::system::moe_planner::{self, MoePlanArgs};
 
 use formatters::moe_plan_formatter;

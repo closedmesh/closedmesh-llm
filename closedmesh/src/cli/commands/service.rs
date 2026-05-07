@@ -169,9 +169,7 @@ mod darwin {
                         i + 1,
                     );
                 } else {
-                    eprintln!(
-                        "✓ ClosedMesh service started (label: {SERVICE_LABEL_DARWIN})"
-                    );
+                    eprintln!("✓ ClosedMesh service started (label: {SERVICE_LABEL_DARWIN})");
                 }
                 return Ok(());
             }
