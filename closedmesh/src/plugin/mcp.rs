@@ -28,6 +28,7 @@ use tokio::sync::Mutex;
 
 use crate::plugin::stapler;
 use crate::plugin::{self, PluginEndpointSummary, PluginManager, PluginRpcBridge, RpcResult};
+use crate::process_util::HideConsole;
 
 #[derive(Clone)]
 enum ToolTarget {
@@ -181,6 +182,7 @@ impl ExternalMcpClient {
             ExternalMcpTransport::Stdio { command, args } => {
                 let mut child = Command::new(command);
                 child.args(args);
+                child.hide_console();
                 let transport = TokioChildProcess::new(child).with_context(|| {
                     format!(
                         "Spawn external MCP endpoint '{}:{}' with command '{}'",

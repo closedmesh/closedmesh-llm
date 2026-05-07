@@ -2,6 +2,7 @@ use crate::cli::output::{emit_event, OutputEvent};
 use crate::cli::Cli;
 use crate::mesh;
 use crate::network::{nostr, router};
+use crate::process_util::HideConsole;
 use anyhow::{Context, Result};
 use std::cmp::Reverse;
 
@@ -228,6 +229,7 @@ pub(crate) async fn check_mesh(
                 .args(["client", "--auto", "--port", &port.to_string()])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
+                .hide_console()
                 .spawn()
                 .context("Failed to start closedmesh node")?,
         );

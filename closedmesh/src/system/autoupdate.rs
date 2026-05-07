@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::{Cli, Command};
 use crate::inference::launch;
+use crate::process_util::HideConsole;
 use crate::system::release_target::{CanonicalArch, CanonicalOs, ReleaseTarget};
 use crate::VERSION;
 
@@ -648,6 +649,7 @@ fn extract_tar_archive(archive: &Path, extracted: &Path) -> Result<()> {
         .arg("-C")
         .arg(extracted)
         .arg("--strip-components=1")
+        .hide_console()
         .status()
         .with_context(|| format!("Failed to extract {}", archive.display()))?;
     anyhow::ensure!(status.success(), "tar extraction failed");
@@ -933,6 +935,7 @@ fn finish_bundle_install(
         .arg("Bypass")
         .arg("-File")
         .arg(&script)
+        .hide_console()
         .spawn()
         .with_context(|| format!("Failed to launch Windows updater {}", script.display()))?;
 

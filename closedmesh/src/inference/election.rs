@@ -5,6 +5,7 @@
 //! Every mesh change: kill llama-server, re-elect, winner starts fresh.
 //! closedmesh owns :api_port and proxies to the right host by model name.
 
+use crate::process_util::HideConsole;
 use crate::cli::output::{
     emit_event, MoeAnalysisProgressSummary, MoeDistributionSummary, MoeStatusSummary, MoeSummary,
     OutputEvent,
@@ -1268,6 +1269,7 @@ fn ensure_full_analyze_ranking(
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .hide_console()
         .spawn()?;
     let stdout_relay = child.stdout.take().map(|stdout| {
         spawn_moe_analyze_log_relay(stdout, model_name.to_string(), Arc::clone(&progress))
@@ -1473,6 +1475,7 @@ fn run_micro_analyze_ranking(
         if matches!(options.micro_layer_scope, moe::MoeMicroLayerScope::All) {
             command.arg("--all-layers");
         }
+        command.hide_console();
         let output = command.output()?;
         if !output.status.success() {
             if let Ok(mut state) = progress.lock() {

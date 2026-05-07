@@ -19,6 +19,7 @@ use crate::cli::moe::{HfJobArgs, MoeAnalyzeCommand, MoeCommand};
 use crate::cli::terminal_progress::start_spinner;
 use crate::cli::Cli;
 use crate::inference::moe;
+use crate::process_util::HideConsole;
 use crate::models;
 use crate::system::moe_planner::{self, MoePlanArgs};
 
@@ -253,6 +254,7 @@ async fn run_analyze_micro(
             .args(&command[1..])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .hide_console()
             .output()
             .with_context(|| {
                 format!(
@@ -668,6 +670,7 @@ fn run_analyzer_command(command: &[String], log_path: &Path, label: &str) -> Res
         .args(&command[1..])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .hide_console()
         .output()
         .with_context(|| format!("Run {}", command[0]))?;
     spinner.finish();

@@ -4,6 +4,9 @@
 #[cfg(any(target_os = "windows", target_os = "linux", test))]
 use serde_json::Value;
 
+#[allow(unused_imports)] // only the windows arm of HideConsole has effect
+use crate::process_util::HideConsole;
+
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct GpuFacts {
     pub index: usize,
@@ -495,7 +498,10 @@ pub fn parse_windows_total_physical_memory(output: &str) -> Option<u64> {
 }
 
 fn detect_hostname() -> Option<String> {
-    let out = std::process::Command::new("hostname").output().ok()?;
+    let out = std::process::Command::new("hostname")
+        .hide_console()
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -535,6 +541,7 @@ fn try_tegrastats_ram() -> Option<u64> {
 fn powershell_output(script: &str) -> Option<String> {
     let output = std::process::Command::new("powershell")
         .args(["-NoProfile", "-Command", script])
+        .hide_console()
         .output()
         .ok()?;
     if !output.status.success() {
@@ -823,6 +830,7 @@ impl Collector for DefaultCollector {
             let nvidia_names = if want_gpu_info {
                 std::process::Command::new("nvidia-smi")
                     .args(["--query-gpu=name", "--format=csv,noheader"])
+                    .hide_console()
                     .output()
                     .ok()
                     .and_then(|out| {
@@ -844,6 +852,7 @@ impl Collector for DefaultCollector {
             let nvidia_vram = if want_vram {
                 std::process::Command::new("nvidia-smi")
                     .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+                    .hide_console()
                     .output()
                     .ok()
                     .and_then(|out| {
@@ -1021,6 +1030,7 @@ fn backend_device_for_name_for_platform(
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn detect_nvidia_identities() -> Vec<(Option<String>, Option<String>)> {
     let out = match std::process::Command::new("nvidia-smi")
+        .hide_console()
         .args(["--query-gpu=pci.bus_id,uuid", "--format=csv,noheader"])
         .output()
     {

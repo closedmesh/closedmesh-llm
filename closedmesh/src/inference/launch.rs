@@ -11,6 +11,7 @@ use tokio::net::TcpListener;
 use tokio::process::Command;
 
 use crate::cli::output::{emit_event, OutputEvent};
+use crate::process_util::HideConsole;
 
 /// llama.cpp split mode for distributing tensors across devices.
 ///
@@ -765,6 +766,7 @@ fn parse_available_devices(output: &str) -> Vec<String> {
 fn probe_available_devices(binary: &Path) -> Vec<String> {
     let Ok(output) = std::process::Command::new(binary)
         .args(["-d", "__closedmesh_probe_invalid__", "-p", "0"])
+        .hide_console()
         .output()
     else {
         return Vec::new();
@@ -869,7 +871,11 @@ fn ensure_selected_gpu_capacity(
 }
 
 fn command_has_output(command: &str, args: &[&str]) -> bool {
-    let Ok(output) = std::process::Command::new(command).args(args).output() else {
+    let Ok(output) = std::process::Command::new(command)
+        .args(args)
+        .hide_console()
+        .output()
+    else {
         return false;
     };
     output.status.success()
@@ -944,7 +950,12 @@ pub async fn start_rpc_server(
             runtime.dir().to_string_lossy().to_string(),
         )
         .stdout(std::process::Stdio::from(rpc_log_file))
-        .stderr(std::process::Stdio::from(rpc_log_file2));
+        .stderr(std::process::Stdio::from(rpc_log_file2))
+        // Suppress the per-rpc-server console window on Windows. See
+        // crate::process_util — without this every model the runtime
+        // hosts on this node opens a persistent black box on the user's
+        // screen, and a multi-shard MoE host would stack one per shard.
+        .hide_console();
     prepend_child_library_paths(&mut command, &rpc_server.path);
 
     let mut child = command.spawn().with_context(|| {
@@ -1119,6 +1130,7 @@ fn send_signal_if_matches(
         match command
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
+            .hide_console()
             .status()
         {
             Ok(status) if status.success() => SignalOutcome::Sent,
@@ -1531,7 +1543,12 @@ pub async fn start_llama_server(
             runtime.dir().to_string_lossy().to_string(),
         )
         .stdout(std::process::Stdio::from(log_file))
-        .stderr(std::process::Stdio::from(log_file2));
+        .stderr(std::process::Stdio::from(log_file2))
+        // Suppress the per-llama-server console window on Windows. See
+        // rpc-server above and crate::process_util — same problem,
+        // amplified because llama-server is the longest-lived child the
+        // runtime owns (lives for the entire model session).
+        .hide_console();
     prepend_child_library_paths(&mut command, &llama_server.path);
 
     let mut child = command.spawn().with_context(|| {
@@ -1748,6 +1765,7 @@ fn detect_device() -> String {
         .args(["--interval", "1"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+        .hide_console()
         .spawn()
     {
         let _ = child.kill();
@@ -1793,6 +1811,7 @@ fn has_rocm_backend() -> bool {
 fn command_succeeds(command: &str, args: &[&str]) -> bool {
     std::process::Command::new(command)
         .args(args)
+        .hide_console()
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)

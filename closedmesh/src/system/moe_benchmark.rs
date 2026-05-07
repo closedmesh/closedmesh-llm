@@ -7,6 +7,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use crate::inference::moe;
+use crate::process_util::HideConsole;
 use crate::models::{self, catalog};
 use crate::network::router;
 use crate::system::benchmark_prompts::{self, PromptCorpusEntry, PromptCorpusSummary};
@@ -654,6 +655,7 @@ fn ensure_full_analyze_ranking(
             "-ngl",
             "99",
         ])
+        .hide_console()
         .output()
         .with_context(|| format!("Run {} for {}", analyze_bin.display(), model.path.display()))?;
 
@@ -986,6 +988,7 @@ fn run_micro_analyze_export(
     if all_layers {
         command.arg("--all-layers");
     }
+    command.hide_console();
 
     let output = command
         .output()

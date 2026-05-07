@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::process_util::HideConsole;
 use crate::system::hardware::HardwareSurvey;
 
 #[cfg(test)]
@@ -328,6 +329,7 @@ pub fn run_benchmark(binary: &Path, timeout: Duration) -> Option<Vec<BenchmarkOu
         .arg("--json")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .hide_console()
         .spawn()
     {
         Ok(c) => c,

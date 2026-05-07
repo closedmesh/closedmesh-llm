@@ -16,6 +16,8 @@ use std::sync::Arc;
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+use crate::process_util::HideConsole;
+
 pub(crate) struct ExternalPlugin {
     spec: ExternalPluginSpec,
     instance_id: String,
@@ -180,6 +182,7 @@ impl ExternalPlugin {
         child.stdout(std::process::Stdio::null());
         child.stderr(std::process::Stdio::inherit());
         child.kill_on_drop(true);
+        child.hide_console();
 
         let child = child.spawn().with_context(|| {
             format!(

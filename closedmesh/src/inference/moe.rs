@@ -10,6 +10,8 @@ use clap::ValueEnum;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+use crate::process_util::HideConsole;
+
 pub use crate::models::gguf::{detect_moe, scan_gguf_compact_meta, GgufMoeInfo};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -825,6 +827,7 @@ pub fn run_split(
             "-o",
             &output_path.to_string_lossy(),
         ])
+        .hide_console()
         .status()
         .map_err(|e| anyhow::anyhow!("Failed to run {}: {e}", split_bin.display()))?;
 

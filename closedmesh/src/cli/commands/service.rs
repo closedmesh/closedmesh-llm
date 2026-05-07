@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::cli::ServiceCommand;
+use crate::process_util::HideConsole;
 
 const SERVICE_LABEL_DARWIN: &str = "dev.closedmesh.closedmesh";
 const SERVICE_NAME_LINUX: &str = "closedmesh";
@@ -378,6 +379,7 @@ mod windows {
     fn schtasks_query_ok() -> Result<bool> {
         let output = Command::new("schtasks")
             .args(["/Query", "/TN", SERVICE_NAME_WINDOWS])
+            .hide_console()
             .output()
             .context("failed to invoke schtasks")?;
         Ok(output.status.success())
@@ -392,6 +394,7 @@ mod windows {
         }
         let status = Command::new("schtasks")
             .args(["/Run", "/TN", SERVICE_NAME_WINDOWS])
+            .hide_console()
             .status()
             .context("failed to invoke schtasks")?;
         if !status.success() {
@@ -407,6 +410,7 @@ mod windows {
     pub(super) fn stop() -> Result<()> {
         let status = Command::new("schtasks")
             .args(["/End", "/TN", SERVICE_NAME_WINDOWS])
+            .hide_console()
             .status()
             .context("failed to invoke schtasks")?;
         if !status.success() {
@@ -422,6 +426,7 @@ mod windows {
     pub(super) fn status() -> Result<()> {
         let output = Command::new("schtasks")
             .args(["/Query", "/TN", SERVICE_NAME_WINDOWS, "/FO", "LIST", "/V"])
+            .hide_console()
             .output()
             .context("failed to invoke schtasks")?;
         if !output.status.success() {
