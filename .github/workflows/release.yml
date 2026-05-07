@@ -595,11 +595,13 @@ jobs:
         if: always()
         run: sccache --show-stats || true
 
-  # Windows: build the closedmesh.exe binary in CUDA and Vulkan flavors so the
-  # closedmesh.com installer (install.ps1) has something to download. We do
-  # NOT build the upstream closedmesh bundle on Windows yet — that flow includes
-  # llama-server/rpc-server packaging which still hits the disabled-llama.cpp-
-  # CUDA path. Closedmesh's binary is downloaded standalone by install.ps1.
+  # Windows: build closedmesh.exe in CUDA and Vulkan flavors. We don't
+  # compile llama.cpp itself here yet — the CMake / disabled-CUDA path
+  # is still gnarly on windows-latest — so release-closedmesh.ps1
+  # bundles the matching rpc-server.exe / llama-server.exe + DLL set
+  # by downloading ggml-org/llama.cpp's official Windows release at
+  # packaging time. The result is still a self-contained bundle the
+  # desktop app can fetch and unpack with `tar -xf`.
   build_windows:
     name: Build Windows ${{ matrix.flavor_label }}
     if: ${{ needs.prepare_release.outputs.skip_gpu_bundles != 'true' }}
