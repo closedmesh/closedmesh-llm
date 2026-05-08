@@ -884,6 +884,67 @@ fn command_has_output(command: &str, args: &[&str]) -> bool {
             .any(|line| !line.trim().is_empty())
 }
 
+/// Probe `rpc-server -h` and return true iff the help text mentions
+/// `--gguf`. Result is memoised per-binary-path because rpc-server
+/// prints help to stderr almost instantly but spawning it on every
+/// model load is still wasteful. The cache lives only as long as the
+/// closedmesh process, so a runtime upgrade that lays down a new
+/// rpc-server.exe at the same path is automatically picked up by the
+/// next process start.
+///
+/// Why we need this: see the long-form comment in `start_rpc_server`.
+/// TL;DR — the Windows release pipeline currently vendors the
+/// upstream-unpatched rpc-server.exe from ggml-org's b9041 build,
+/// which does not advertise `--gguf`. Without this probe every model
+/// load on Windows hits "error: unknown argument: --gguf" and
+/// rpc-server exits before listening.
+fn rpc_server_supports_gguf_flag(rpc_server_path: &Path) -> bool {
+    use std::sync::Mutex;
+    use std::sync::OnceLock;
+
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<std::path::PathBuf, bool>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+
+    if let Ok(guard) = cache.lock() {
+        if let Some(&supported) = guard.get(rpc_server_path) {
+            return supported;
+        }
+    }
+
+    let supported = probe_rpc_server_supports_gguf(rpc_server_path);
+
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(rpc_server_path.to_path_buf(), supported);
+    }
+
+    supported
+}
+
+fn probe_rpc_server_supports_gguf(rpc_server_path: &Path) -> bool {
+    // `-h` exits 0 and prints the supported flags to stderr (line
+    // shape: `  -m, --gguf PATH        local GGUF model file ...`).
+    let Ok(output) = std::process::Command::new(rpc_server_path)
+        .arg("-h")
+        .hide_console()
+        .output()
+    else {
+        // If we can't even spawn the binary, fall back to the
+        // optimistic assumption (pass --gguf, let the launch fail
+        // loudly) rather than silently degrading every load forever.
+        // The common case for "couldn't spawn rpc-server" is "user
+        // has no helpers installed", which produces its own actionable
+        // error elsewhere.
+        return true;
+    };
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    combined.contains("--gguf")
+}
+
 /// Start a local rpc-server and return a handle holding its PID and port.
 /// Picks an available port automatically.
 /// If `gguf_path` is provided, passes `--gguf` so the server loads weights from the local file.
@@ -933,12 +994,42 @@ pub async fn start_rpc_server(
         port.to_string(),
     ];
     if let Some(path) = gguf_path {
-        args.push("--gguf".to_string());
-        args.push(path.to_string_lossy().to_string());
-        tracing::info!(
-            "rpc-server will load weights from local GGUF: {}",
-            path.display()
-        );
+        // The `--gguf PATH` flag is added by our local
+        // third_party/llama.cpp/patches/0001-rpc-optimize-local-GGUF-tensor-loading.patch.
+        // closedmesh.exe always tries to use it because zero-transfer
+        // tensor loading is a meaningful speedup on local-only RPC.
+        // BUT: scripts/release-closedmesh.ps1 currently bundles the
+        // *unpatched* rpc-server.exe / llama-server.exe straight from
+        // ggml-org/llama.cpp's official Windows release (b9041) — see
+        // the comment block at the top of that script. The Windows
+        // build doesn't compile llama.cpp from our patched .deps/ tree
+        // yet, so any user on a closedmesh-windows-* runtime ZIP gets
+        // an rpc-server that doesn't recognise `--gguf` and exits
+        // immediately with `error: unknown argument: --gguf`.
+        //
+        // Guard the flag behind a runtime probe (`rpc-server.exe -h`
+        // dumps the supported options to stderr). When the binary
+        // doesn't advertise --gguf we degrade gracefully to plain RPC
+        // — slower (tensors transit the loopback socket instead of
+        // being mmap'd from disk) but functional. Once the Windows CI
+        // builds llama.cpp from the patched source, this branch
+        // becomes dead code naturally.
+        if rpc_server_supports_gguf_flag(&rpc_server.path) {
+            args.push("--gguf".to_string());
+            args.push(path.to_string_lossy().to_string());
+            tracing::info!(
+                "rpc-server will load weights from local GGUF: {}",
+                path.display()
+            );
+        } else {
+            tracing::warn!(
+                "rpc-server at {} does not support --gguf (likely an unpatched upstream \
+                 binary from a closedmesh-llm release built before the Windows CI compiles \
+                 llama.cpp from source). Falling back to network tensor transfer for this \
+                 load — functional but slower than zero-transfer.",
+                rpc_server.path.display()
+            );
+        }
     }
 
     let mut command = Command::new(&rpc_server.path);
