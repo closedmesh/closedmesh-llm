@@ -790,7 +790,10 @@ fn resolve_split_binary(bin_dir: &Path) -> anyhow::Result<PathBuf> {
     // binary. `Path::exists()` does NOT auto-append `.exe` on Windows, so
     // include both names in the candidate list.
     let exe = std::env::consts::EXE_SUFFIX;
-    let names = [format!("llama-moe-split{exe}"), "llama-moe-split".to_string()];
+    let names = [
+        format!("llama-moe-split{exe}"),
+        "llama-moe-split".to_string(),
+    ];
     let prefixes = [
         bin_dir.to_path_buf(),
         bin_dir.join("../llama.cpp/build/bin"),
