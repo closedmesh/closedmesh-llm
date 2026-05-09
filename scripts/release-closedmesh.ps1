@@ -112,6 +112,23 @@ try {
     Copy-Item $rpcSrc.FullName (Join-Path $stage 'rpc-server.exe')
     Copy-Item $srvSrc.FullName (Join-Path $stage 'llama-server.exe')
 
+    # llama-moe-analyze.exe / llama-moe-split.exe are ClosedMesh-only
+    # tools (see third_party/llama.cpp/patches/0003-…) and therefore not
+    # part of any ggml-org/llama.cpp release. They are built locally
+    # from the patched llama.cpp source by build-moe-helpers-windows.ps1
+    # and dropped into .deps/llama.cpp/build/bin/. Without them
+    # closedmesh.exe falls into MoE-split-mode for MoE GGUFs, fails to
+    # find the helper, and never serves the model — see logs of the
+    # form "moe-split failed: llama-moe-split not found in <bin>".
+    $moeBuildDir = Join-Path $repoRoot '.deps\llama.cpp\build\bin'
+    foreach ($moeBin in @('llama-moe-analyze.exe', 'llama-moe-split.exe')) {
+        $moeSrc = Join-Path $moeBuildDir $moeBin
+        if (-not (Test-Path -PathType Leaf $moeSrc)) {
+            throw "release-closedmesh: $moeBin not found at $moeSrc. Run scripts/build-moe-helpers-windows.ps1 first (CI: see release.yml::build_windows)."
+        }
+        Copy-Item -Force $moeSrc (Join-Path $stage $moeBin)
+    }
+
     # Drop every DLL the llama.cpp build ships. rpc-server / llama-server
     # LoadLibrary() a fan-out of ggml-*.dll variants (ggml-base, ggml-cpu-
     # <isa>, ggml-vulkan / ggml-cuda, llama, llama-common, libomp140, …).
