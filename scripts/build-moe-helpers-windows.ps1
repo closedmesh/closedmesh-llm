@@ -36,6 +36,74 @@ function Invoke-Native {
     }
 }
 
+function Resolve-CommandPath {
+    param([string]$Name)
+    $cmd = Get-Command $Name -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($cmd) { return $cmd.Source }
+    return $null
+}
+
+function Import-CmdEnvironment {
+    param([Parameter(Mandatory=$true)][string]$CommandLine)
+    $output = & cmd.exe /s /c "$CommandLine && set"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to initialize Windows build environment with command: $CommandLine"
+    }
+    foreach ($line in $output) {
+        if ($line -match '^(?<name>[^=]+)=(?<value>.*)$') {
+            Set-Item -Path "env:$($Matches.name)" -Value $Matches.value
+        }
+    }
+}
+
+# Inline copy of build-windows.ps1::Ensure-MsvcToolchain. windows-latest
+# ships MinGW (`C:\mingw64\bin\c++.exe`) on $env:PATH; if we don't activate
+# MSVC first, CMake happily picks the MinGW gcc/g++ and then chokes on
+# /DPATH_MAX=4096 (MSVC syntax) with `linker input file not found`.
+function Ensure-MsvcToolchain {
+    if ((Resolve-CommandPath "cl") -and (Resolve-CommandPath "link")) {
+        return
+    }
+
+    $programFilesX86 = ${env:ProgramFiles(x86)}
+    $vswhereCandidates = @()
+    if ($programFilesX86) { $vswhereCandidates += (Join-Path $programFilesX86 "Microsoft Visual Studio\Installer\vswhere.exe") }
+    if ($env:ProgramFiles) { $vswhereCandidates += (Join-Path $env:ProgramFiles "Microsoft Visual Studio\Installer\vswhere.exe") }
+    $vswhereFromPath = Resolve-CommandPath "vswhere"
+    if ($vswhereFromPath) { $vswhereCandidates += $vswhereFromPath }
+
+    $vcvars64 = $null
+    $vswhere = $vswhereCandidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique -First 1
+    if ($vswhere) {
+        $installationPathOutput = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1
+        $installationPath = if ($installationPathOutput) { $installationPathOutput.Trim() } else { "" }
+        if ($installationPath) {
+            $candidate = Join-Path $installationPath "VC\Auxiliary\Build\vcvars64.bat"
+            if (Test-Path $candidate) { $vcvars64 = $candidate }
+        }
+    }
+
+    if (-not $vcvars64) {
+        $searchRoots = @($programFilesX86, $env:ProgramFiles) | Where-Object { $_ } | Select-Object -Unique
+        foreach ($searchRoot in $searchRoots) {
+            $candidate = Get-ChildItem -Path $searchRoot -Filter vcvars64.bat -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -like '*Microsoft Visual Studio*VC\Auxiliary\Build\vcvars64.bat' } |
+                Select-Object -First 1
+            if ($candidate) { $vcvars64 = $candidate.FullName; break }
+        }
+    }
+
+    if (-not $vcvars64 -or -not (Test-Path $vcvars64)) {
+        throw "Visual Studio Build Tools with vcvars64.bat were not found on this runner."
+    }
+
+    Import-CmdEnvironment "`"$vcvars64`" >nul"
+
+    if (-not (Resolve-CommandPath "cl")) {
+        throw "MSVC toolchain initialization completed, but cl.exe is still not on PATH."
+    }
+}
+
 function Prepare-PatchedLlama {
     $pinFile     = Join-Path $repoRoot "third_party\llama.cpp\upstream.txt"
     $patchDir    = Join-Path $repoRoot "third_party\llama.cpp\patches"
@@ -77,6 +145,7 @@ function Prepare-PatchedLlama {
     }
 }
 
+Ensure-MsvcToolchain
 Prepare-PatchedLlama
 
 $cmakeArgs = @(
@@ -95,7 +164,7 @@ $cmakeArgs = @(
     "-DGGML_BUILD_TESTS=OFF"
 )
 
-if (Get-Command ninja -ErrorAction SilentlyContinue) {
+if (Resolve-CommandPath "ninja") {
     $cmakeArgs = @("-G", "Ninja") + $cmakeArgs
 }
 
