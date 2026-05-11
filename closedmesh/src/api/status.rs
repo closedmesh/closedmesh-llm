@@ -456,8 +456,11 @@ pub(super) struct MeshModelPayload {
 /// (pooled across N nodes)" / "needs more contributors (M GB short)".
 ///
 /// The runtime computes this once per model from the live peer set, so the
-/// app doesn't have to reimplement same-backend filtering, RTT eligibility,
-/// or the ~10% headroom multiplier the election planner uses.
+/// app doesn't have to reimplement RTT eligibility or the ~10% headroom
+/// multiplier the election planner uses. Backends are not filtered: as of
+/// v0.66.13, cross-backend pipeline splits (e.g. Metal host + CUDA worker)
+/// are eligible — see `build_dense_launch_plan` and the ROADMAP entry on
+/// "Mixed-backend pipeline-parallel".
 #[derive(Clone, Debug, Serialize)]
 pub(super) struct MeshFitPayload {
     /// True when at least one peer (or this node) has enough free VRAM to
@@ -467,8 +470,8 @@ pub(super) struct MeshFitPayload {
     /// load requirement (size × 1.1). Implies the runtime would elect a
     /// pipeline-split group rather than refusing the request.
     pub(super) fits_pooled: bool,
-    /// Combined VRAM (GB) of all eligible peers — same backend as the host,
-    /// RTT under the split cap, capability above the model size threshold.
+    /// Combined VRAM (GB) of all eligible peers — RTT under the split cap,
+    /// capability above the model size threshold; backend no longer gated.
     /// Equals `mesh_vram_gb` for already-warm models; pre-computed for
     /// cold models so the UI can show "M of N GB so far" without doing
     /// the math itself.

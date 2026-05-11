@@ -175,30 +175,32 @@ fn build_dense_launch_plan(
     force_split: bool,
     model_name: &str,
     model_peers: &[mesh::PeerInfo],
-    local_backend: Option<mesh::Backend>,
 ) -> DenseLaunchPlan {
     let min_vram = (model_bytes as f64 * 1.1) as u64;
     if !force_split && my_vram >= min_vram {
         return DenseLaunchPlan::Solo;
     }
 
+    // Mixed-backend pipeline-parallel is now allowed (v0.66.13). llama.cpp's
+    // rpc-server serialises tensors over the wire, so layers 0..N can compute
+    // on the host's backend (e.g. Metal) and N+1.. on a worker's (e.g. CUDA)
+    // without the host needing matching local kernels. The conversion + TCP
+    // overhead makes mixed-backend splits noticeably slower than same-backend
+    // ones, but functionally correct — and "your Mac + your friend's RTX
+    // laptop" is exactly the heterogeneous-mesh use case we ship for. We
+    // previously filtered cross-backend peers out here as a conservatism the
+    // ROADMAP flagged as deferred work; in practice the conservatism made
+    // every Apple+CUDA pair fall back to a no-fit solo run on whichever side
+    // the planner picked, which surfaces to users as `Compute error` 500s
+    // from llama.cpp the moment a token is decoded against an mmap-fallback
+    // model that doesn't fit in the elected host's VRAM. Honesty beats
+    // pessimism: try the split, let llama.cpp fail loudly if a specific
+    // weight format isn't routable.
     let mut candidates: Vec<_> = model_peers
         .iter()
         .filter(|p| matches!(p.role, NodeRole::Worker) || p.is_assigned_model(model_name))
         .filter(|p| !matches!(p.role, NodeRole::Client))
         .filter(|p| !matches!(p.rtt_ms, Some(rtt) if rtt > mesh::MAX_SPLIT_RTT_MS))
-        // Backend-affinity for pipeline-parallel: in v1 we only split a model
-        // across peers whose acceleration backend matches the host's. Mixing
-        // Metal+CUDA layer-by-layer is technically possible inside llama.cpp's
-        // rpc-server but introduces tensor-format conversion costs and is
-        // explicitly out of scope here. Peers that haven't gossiped a
-        // capability yet (legacy versions) get a default `Backend::Cpu` and
-        // are therefore only co-elected with CPU hosts, which is the safe
-        // failure mode.
-        .filter(|p| match local_backend {
-            None => true,
-            Some(target) => p.capability.backend == target,
-        })
         .collect();
     candidates.sort_by_key(|p| (p.rtt_ms.unwrap_or(u32::MAX), p.id));
 
@@ -1802,7 +1804,6 @@ pub async fn election_loop(
             force_split,
             &model_name,
             &model_peers,
-            Some(node.local_backend().await),
         );
 
         // Splitting decision: only split when forced OR when the model
@@ -3098,7 +3099,6 @@ async fn start_llama(
         force_split,
         model_name,
         model_peers,
-        Some(node.local_backend().await),
     );
     let worker_ids = match launch_plan {
         DenseLaunchPlan::Solo => {
@@ -3349,7 +3349,7 @@ mod tests {
             make_dense_peer(id_d, 30, Some(40), model),
         ];
 
-        let plan = build_dense_launch_plan(60, 100, false, model, &peers, None);
+        let plan = build_dense_launch_plan(60, 100, false, model, &peers);
         assert_eq!(
             plan,
             DenseLaunchPlan::Split {
@@ -3394,7 +3394,6 @@ mod tests {
             false,
             model,
             std::slice::from_ref(&peer),
-            None,
         );
 
         assert_eq!(
@@ -3429,8 +3428,8 @@ mod tests {
         let mut with_spare = base.clone();
         with_spare.push(make_dense_peer(id_d, 50, Some(70), model));
 
-        let base_plan = build_dense_launch_plan(60, 100, false, model, &base, None);
-        let spare_plan = build_dense_launch_plan(60, 100, false, model, &with_spare, None);
+        let base_plan = build_dense_launch_plan(60, 100, false, model, &base);
+        let spare_plan = build_dense_launch_plan(60, 100, false, model, &with_spare);
 
         assert_eq!(base_plan.running_plan(), spare_plan.running_plan());
         assert_eq!(
@@ -3457,8 +3456,8 @@ mod tests {
             make_dense_peer(id_d, 30, Some(30), model),
         ];
 
-        let initial_plan = build_dense_launch_plan(50, 100, false, model, &initial, None);
-        let survivor_plan = build_dense_launch_plan(50, 100, false, model, &survivors, None);
+        let initial_plan = build_dense_launch_plan(50, 100, false, model, &initial);
+        let survivor_plan = build_dense_launch_plan(50, 100, false, model, &survivors);
 
         assert_eq!(
             initial_plan.running_plan(),
@@ -3484,7 +3483,7 @@ mod tests {
             make_dense_peer(id_c, 40, Some(mesh::MAX_SPLIT_RTT_MS + 1), model),
         ];
 
-        let plan = build_dense_launch_plan(50, 100, false, model, &peers, None);
+        let plan = build_dense_launch_plan(50, 100, false, model, &peers);
         assert_eq!(
             plan,
             DenseLaunchPlan::WaitingForCapacity {
@@ -3495,33 +3494,44 @@ mod tests {
         );
     }
 
+    /// Verifies that the dense launch planner now elects cross-backend peers
+    /// (Metal host + CUDA worker, in this case) as workers in a pipeline-
+    /// parallel split. Earlier versions filtered them out behind a same-
+    /// backend gate which silently turned every Mac+RTX-laptop pair into a
+    /// no-fit solo run on whichever side the planner picked, with the only
+    /// user-visible signal being a `Compute error` 500 from llama.cpp at the
+    /// first decoded token. Mixed-backend pipeline-parallel is supported by
+    /// llama.cpp's `rpc-server` (with serialisation overhead) so we now let
+    /// it through; see the `Mixed-backend pipeline-parallel` section in
+    /// ROADMAP.md and the comment in `build_dense_launch_plan`.
     #[test]
-    fn dense_launch_plan_backend_affinity_excludes_mismatched_peers() {
+    fn dense_launch_plan_includes_cross_backend_peers() {
         let model = "dense";
-        let id_metal = make_id(2);
         let id_cuda = make_id(3);
-        let mut metal_peer = make_dense_peer(id_metal, 60, Some(10), model);
-        metal_peer.capability = mesh::NodeCapability {
-            backend: mesh::Backend::Metal,
-            ..mesh::NodeCapability::default()
-        };
-        let mut cuda_peer = make_dense_peer(id_cuda, 60, Some(20), model);
+        // Local Metal host has 50 vram; model is 150 (min_vram=165) so it
+        // does not fit solo. The only candidate worker is a CUDA peer with
+        // 60 vram. Pre-fix this would have been WaitingForCapacity (the
+        // backend filter dropped the only peer); post-fix the planner
+        // elects the cross-backend peer and the group reaches min_vram.
+        let mut cuda_peer = make_dense_peer(id_cuda, 200, Some(20), model);
         cuda_peer.capability = mesh::NodeCapability {
             backend: mesh::Backend::Cuda,
             ..mesh::NodeCapability::default()
         };
-        let peers = vec![metal_peer, cuda_peer];
+        let peers = vec![cuda_peer];
 
-        // Local host is Metal — should only pick the Metal peer, never the CUDA one.
-        let plan =
-            build_dense_launch_plan(50, 100, false, model, &peers, Some(mesh::Backend::Metal));
+        let plan = build_dense_launch_plan(50, 150, false, model, &peers);
         let DenseLaunchPlan::Split { worker_ids, .. } = plan else {
-            panic!("expected Split plan, got {:?}", plan);
+            panic!(
+                "expected Split plan, got {:?} — the cross-backend filter must \
+                 not gate the election (this is the fix for the Mac+RTX-laptop \
+                 heterogeneous-mesh case)",
+                plan
+            );
         };
-        assert!(worker_ids.contains(&id_metal));
         assert!(
-            !worker_ids.contains(&id_cuda),
-            "backend-affinity should exclude CUDA peer when host is Metal"
+            worker_ids.contains(&id_cuda),
+            "cross-backend peer (CUDA worker for a Metal host) must be elected"
         );
     }
 

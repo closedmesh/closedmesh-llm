@@ -1320,9 +1320,11 @@ impl Node {
         ))
     }
 
-    /// Resolved acceleration backend for this node, used by the pipeline-parallel
-    /// host election to keep all participants on the same backend in v1.
-    /// See `closedmesh-llm/ROADMAP.md` "Mixed-backend pipeline-parallel".
+    /// Resolved acceleration backend for this node. No longer used as a
+    /// pipeline-parallel co-election filter (cross-backend splits are
+    /// supported as of v0.66.13 — see `build_dense_launch_plan`), but kept
+    /// as a generic accessor for diagnostics and future cost-aware routing.
+    #[allow(dead_code)]
     pub async fn local_backend(&self) -> Backend {
         self.local_node_capability()
             .await
