@@ -406,6 +406,27 @@ mod windows {
     }
 
     pub(super) fn stop() -> Result<()> {
+        // `schtasks /End` only signals the wscript launcher and the cmd
+        // wrapper above it; the actual `closedmesh.exe` runtime (and its
+        // child `rpc-server.exe` / `llama-server.exe`) is reparented to
+        // the host and keeps running. From the user's perspective they
+        // clicked "Quit ClosedMesh", the GUI vanished, and the entry
+        // node continued seeing their machine for the next 5–30 minutes
+        // (until the laptop lid closed, Modern Standby suspended it,
+        // and the entry's heartbeat watchdog evicted on timeout).
+        //
+        // Match the startup-side `stop_runtime_aggressively_windows`
+        // hygiene: schtasks /End for the polite path, sleep so the
+        // process tree has a chance to wind down on its own, then
+        // taskkill /F /T per image as the safety net for orphaned
+        // children. We exclude our own PID via `/FI "PID ne …"` so
+        // that running `closedmesh service stop` from a console attached
+        // to closedmesh.exe (the CLI subcommand is part of the same
+        // binary) doesn't kill the process executing the command before
+        // the response writes back. taskkill returns non-zero when no
+        // matching process is running, which is the *expected* path on
+        // a cleanly-shut-down system, so we don't propagate that as an
+        // error — the schtasks step is the one whose status we trust.
         let status = Command::new("schtasks")
             .args(["/End", "/TN", SERVICE_NAME_WINDOWS])
             .hide_console()
@@ -417,6 +438,18 @@ mod windows {
                 status.code()
             ));
         }
+
+        std::thread::sleep(std::time::Duration::from_millis(800));
+
+        let self_pid = std::process::id();
+        let pid_filter = format!("PID ne {self_pid}");
+        for image in ["llama-server.exe", "rpc-server.exe", "closedmesh.exe"] {
+            let _ = Command::new("taskkill")
+                .args(["/F", "/T", "/IM", image, "/FI", &pid_filter])
+                .hide_console()
+                .output();
+        }
+
         eprintln!("✓ ClosedMesh service stopped");
         Ok(())
     }
