@@ -340,6 +340,36 @@
     "mmproj": null
   },
   {
+    "name": "Mixtral-8x7B-Instruct-v0.1-Q4_K_M",
+    "file": "Mixtral-8x7B-Instruct-v0.1.Q4_K_M.gguf",
+    "url": "https://huggingface.co/mradermacher/Mixtral-8x7B-Instruct-v0.1-GGUF/resolve/main/Mixtral-8x7B-Instruct-v0.1.Q4_K_M.gguf",
+    "size": "28.5GB",
+    "description": "Mixtral 8x7B MoE, 8 experts top-2 (canonical 8-expert quant from mradermacher; avoids the weird 6-expert third-party Q5 quants that fail llama-moe-split)",
+    "draft": null,
+    "moe": {
+      "n_expert": 8,
+      "n_expert_used": 2,
+      "min_experts_per_node": 4
+    },
+    "extra_files": [],
+    "mmproj": null
+  },
+  {
+    "name": "Mixtral-8x7B-Instruct-v0.1-Q5_K_M",
+    "file": "Mixtral-8x7B-Instruct-v0.1.Q5_K_M.gguf",
+    "url": "https://huggingface.co/mradermacher/Mixtral-8x7B-Instruct-v0.1-GGUF/resolve/main/Mixtral-8x7B-Instruct-v0.1.Q5_K_M.gguf",
+    "size": "33.3GB",
+    "description": "Mixtral 8x7B MoE at Q5_K_M, 8 experts top-2 (canonical 8-expert quant from mradermacher; avoids the weird 6-expert third-party Q5 quants that fail llama-moe-split)",
+    "draft": null,
+    "moe": {
+      "n_expert": 8,
+      "n_expert_used": 2,
+      "min_experts_per_node": 4
+    },
+    "extra_files": [],
+    "mmproj": null
+  },
+  {
     "name": "Mixtral-8x22B-Instruct-Q4_K_M",
     "file": "Mixtral-8x22B-Instruct-Q4_K_M.gguf",
     "url": "https://registry.ollama.ai/v2/library/mixtral/blobs/sha256:f3329ad0c787f4f73cab99e8c877bb76403060561dd0caa318127683c87bbcb4",
