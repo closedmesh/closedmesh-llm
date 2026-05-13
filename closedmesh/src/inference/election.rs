@@ -131,6 +131,65 @@ pub fn should_be_host_for_model(
     true
 }
 
+/// Maximum time a peer may sit "elected but not actually serving" before the
+/// rest of the cohort gives up on it and excludes it from host candidacy.
+///
+/// Picked at 30 s because the host-role transition happens *after*
+/// `start_llama` returns (i.e. after llama-server has bound its port and the
+/// loading proxy is up), but *before* the model finishes loading into VRAM.
+/// On the slowest paths we measured (~25 GB GGUF on a cold-cache Mac
+/// unified-memory box, mmap warming included), the role flip lands at
+/// ≤ 12 s. Doubling for safety gets us 30. Anything longer and we should be
+/// looking at a stuck peer, not an honest-but-slow one.
+pub const HOST_CLAIM_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Filter a peer set down to those that can still credibly become host for
+/// this model. The election picks the highest-fast-memory peer, but if that
+/// peer is reachable in gossip and still does not advertise `NodeRole::Host`
+/// after `HOST_CLAIM_GRACE`, every other node defers to a peer that will
+/// never actually take the role and the cohort deadlocks. This filter lets
+/// the loop drop those peers from host candidacy after their grace expires;
+/// they remain perfectly usable as pipeline workers (the cohort capacity
+/// total and worker selection do NOT use this filter — see issue #9).
+///
+/// A peer is viable iff:
+///   1. It currently advertises `NodeRole::Host { .. }` for any model
+///      (already serving — definitely a real candidate), OR
+///   2. We have observed it for less than `HOST_CLAIM_GRACE` (still inside
+///      its grace window — give it time).
+///
+/// Peers we have observed for `>= HOST_CLAIM_GRACE` that are NOT yet hosting
+/// are dropped. Once such a peer eventually does flip to `NodeRole::Host`,
+/// branch (1) re-admits it on the next election round — the exclusion is
+/// not sticky beyond the actual misbehavior.
+///
+/// `first_observed` is owned by the election loop; it stamps each peer the
+/// first time it shows up in `model_peers` and never updates that stamp.
+/// Using `peer.last_seen` here would be wrong — gossip refreshes it on
+/// every heartbeat, so a stuck peer would appear "freshly seen" forever.
+///
+/// Pure function: temporal state (`now`, `first_observed`) is supplied by
+/// the caller, which makes this trivially unit-testable without a clock
+/// mock. See the regression tests below for the v0.66.18 deadlock shape.
+pub fn viable_host_candidates(
+    model_peers: &[mesh::PeerInfo],
+    first_observed: &std::collections::HashMap<iroh::EndpointId, std::time::Instant>,
+    now: std::time::Instant,
+    grace: std::time::Duration,
+) -> Vec<mesh::PeerInfo> {
+    model_peers
+        .iter()
+        .filter(|p| {
+            if matches!(p.role, NodeRole::Host { .. }) {
+                return true;
+            }
+            let first = first_observed.get(&p.id).copied().unwrap_or(now);
+            now.saturating_duration_since(first) < grace
+        })
+        .cloned()
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum DenseLaunchPlan {
     Solo,
@@ -1698,6 +1757,11 @@ pub async fn election_loop(
     let mut current_local_port: Option<u16> = None;
     let mut llama_process: Option<launch::InferenceServerProcess> = None;
     let mut backend_proxy: Option<crate::network::openai::backend::BackendProxyHandle> = None;
+    // Per-loop timestamp map for the host-claim grace check. Stamped on
+    // first sighting of each peer, never updated. See `viable_host_candidates`
+    // and issue #9 for why `peer.last_seen` would be wrong here.
+    let mut first_observed: std::collections::HashMap<iroh::EndpointId, std::time::Instant> =
+        std::collections::HashMap::new();
 
     // Initial settle
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -1828,6 +1892,22 @@ pub async fn election_loop(
             .filter(|p| p.is_assigned_model(&model_name))
             .cloned()
             .collect();
+
+        // Stamp first-seen for any newly-observed peer. We use this for the
+        // host-claim grace check below — see `viable_host_candidates` and
+        // issue #9. Stamping happens BEFORE filtering so that even a peer
+        // that we will immediately exclude (e.g. on reconnect after a long
+        // absence) gets a fresh grace window.
+        let now = std::time::Instant::now();
+        for peer in &model_peers {
+            first_observed.entry(peer.id).or_insert(now);
+        }
+        // Garbage-collect entries for peers that have left the cohort, so
+        // a peer that drops and rejoins later gets a fresh grace window.
+        first_observed.retain(|id, _| model_peers.iter().any(|p| &p.id == id));
+
+        let host_candidates =
+            viable_host_candidates(&model_peers, &first_observed, now, HOST_CLAIM_GRACE);
         let desired_launch = build_dense_launch_plan(
             local_launch_vram,
             model_bytes,
@@ -1845,7 +1925,17 @@ pub async fn election_loop(
         let i_am_host = if requires_split {
             // Distributed mode: elect one host from the model group using the
             // same advertised node capacity every peer observes through gossip.
-            should_be_host_for_model(node.id(), my_vram, &model_peers)
+            // Election runs over `host_candidates` rather than `model_peers`
+            // — this is what lets the cohort auto-heal when an elected peer
+            // is reachable in gossip but never claims `NodeRole::Host`
+            // (mixed-version mesh, stuck launch, or adversarial peer; see
+            // issue #9 and the May 13 2026 v0.66.18 → v0.66.20 deadlock).
+            //
+            // Cohort capacity (`build_dense_launch_plan` above) and worker
+            // selection (the `else` branch below) DO NOT use this filter —
+            // a peer that is unviable as host can still be a perfectly good
+            // pipeline worker.
+            should_be_host_for_model(node.id(), my_vram, &host_candidates)
         } else if model_peers.is_empty() {
             // No other node serving this model — we must host
             true
@@ -2108,13 +2198,19 @@ pub async fn election_loop(
             // (peer compares fast memory but worker compares inflated)
             // and produces a split-brain deadlock with no traffic
             // routed anywhere.
-            let host_peer = model_peers
+            //
+            // We pick from `host_candidates` (grace-filtered), not
+            // `model_peers`, for the same reason the host arm does — if
+            // the locally-elected host has timed out, we must NOT keep
+            // routing requests to a peer that will never claim the role.
+            // See issue #9.
+            let host_peer = host_candidates
                 .iter()
                 .filter(|p| !matches!(p.role, NodeRole::Client))
                 .max_by_key(|p| (p.fast_memory_bytes(), p.id));
 
             if let Some(host) = host_peer {
-                if should_be_host_for_model(host.id, host.fast_memory_bytes(), &model_peers) {
+                if should_be_host_for_model(host.id, host.fast_memory_bytes(), &host_candidates) {
                     update_targets(
                         &node,
                         &model_name,
@@ -2138,7 +2234,20 @@ pub async fn election_loop(
             on_change(false, false);
         }
 
-        // Wait for next peer change OR llama-server death
+        // Wait for next peer change OR llama-server death OR
+        // host-claim grace timer.
+        //
+        // The grace timer is what unblocks the cohort when an elected
+        // peer is reachable in gossip but never claims `NodeRole::Host`.
+        // Without it, `peer_rx.changed()` would never fire (the stuck
+        // peer keeps gossiping the same role) and the cohort would wait
+        // forever. With it, we wake up at most every `HOST_CLAIM_GRACE /
+        // 2` and re-evaluate candidate viability. See issue #9.
+        //
+        // `grace / 2` (15 s by default) bounds the worst-case extra
+        // latency between "candidate's grace expires" and "we notice and
+        // re-elect": we either hit the timer first, or we hit it shortly
+        // after, but never wait longer than `1.5 * grace`.
         tokio::select! {
             res = peer_rx.changed() => {
                 if res.is_err() { break; }
@@ -2171,6 +2280,12 @@ pub async fn election_loop(
                 last_running_plan = None;
                 update_targets(&node, &model_name, InferenceTarget::None, &target_tx).await;
                 on_change(false, false);
+            }
+            _ = tokio::time::sleep(HOST_CLAIM_GRACE / 2) => {
+                // Tick: re-evaluate candidate viability on the next loop
+                // iteration. If the elected host has now exceeded its
+                // grace, the next call to `viable_host_candidates` will
+                // exclude it and the runner-up takes over.
             }
             res = stop_rx.changed() => {
                 if res.is_err() || stop_requested(&stop_rx) {
@@ -3537,6 +3652,211 @@ mod tests {
              this assertion documents the broken comparison and exists so \
              that if anyone ever wires inflated vram back into the host arg \
              we surface the asymmetry in CI rather than in the field"
+        );
+    }
+
+    /// Issue #9 / v0.66.18 → v0.66.20 mixed-version deadlock regression.
+    ///
+    /// Setup mirrors the May 13 production cohort: peer A is the *local*
+    /// maximum on fast memory and would be elected as host by every other
+    /// peer in the cohort, but A is running an old runtime that uses the
+    /// inflated `vram_bytes` metric and therefore never claims
+    /// `NodeRole::Host`. Pre-fix every other peer routes inference to A
+    /// forever and chat 503s. Post-fix `viable_host_candidates` drops A
+    /// from the candidate set after `HOST_CLAIM_GRACE`, the runner-up B
+    /// self-elects on the next iteration, and the cohort recovers.
+    #[test]
+    fn host_claim_timeout_falls_back_to_runner_up_when_top_candidate_never_claims() {
+        let model = "DeepSeek-R1-Distill-70B-Q4_K_M";
+        let id_a = make_id(1);
+        let id_b = make_id(2);
+
+        let mut a = make_dense_peer(id_a, 32 * 1024 * 1024 * 1024, None, model);
+        a.role = NodeRole::Worker; // never claims Host
+        let mut b = make_dense_peer(id_b, 16 * 1024 * 1024 * 1024, None, model);
+        b.role = NodeRole::Worker;
+        let peers = vec![a.clone(), b.clone()];
+
+        let t0 = std::time::Instant::now();
+        let mut first_observed = std::collections::HashMap::new();
+        first_observed.insert(id_a, t0);
+        first_observed.insert(id_b, t0);
+
+        // Inside the grace window: A is still a viable candidate.
+        let inside = t0 + HOST_CLAIM_GRACE / 2;
+        let candidates = viable_host_candidates(&peers, &first_observed, inside, HOST_CLAIM_GRACE);
+        assert!(
+            candidates.iter().any(|p| p.id == id_a),
+            "during grace, A must remain a candidate so honest-but-slow \
+             elected hosts get time to actually start llama-server"
+        );
+        // B (running new code) defers to A.
+        let b_fast = b.fast_memory_bytes();
+        assert!(
+            !should_be_host_for_model(id_b, b_fast, &candidates),
+            "during grace, B must defer to A — pinning the honest-cohort \
+             behavior we don't want to regress"
+        );
+
+        // Past the grace window: A is excluded, B self-elects.
+        let after = t0 + HOST_CLAIM_GRACE + std::time::Duration::from_secs(1);
+        let candidates = viable_host_candidates(&peers, &first_observed, after, HOST_CLAIM_GRACE);
+        assert!(
+            !candidates.iter().any(|p| p.id == id_a),
+            "after grace, A (still NodeRole::Worker, never claimed Host) \
+             must be filtered out — this is what unblocks the v0.66.18 \
+             mixed-version deadlock"
+        );
+        assert!(
+            should_be_host_for_model(id_b, b_fast, &candidates),
+            "after grace and A's exclusion, B must self-elect as the new \
+             local maximum — this is the auto-heal path for issue #9"
+        );
+    }
+
+    /// If the previously-stuck candidate eventually does claim
+    /// `NodeRole::Host` (e.g. their slow-loading model finished, or the
+    /// mixed-version peer was upgraded), the cohort must accept them
+    /// back as a host candidate. The exclusion is grace-conditional, not
+    /// permanent.
+    #[test]
+    fn host_role_transition_returns_candidate_to_eligibility() {
+        let model = "DeepSeek-R1-Distill-70B-Q4_K_M";
+        let id_a = make_id(1);
+        let id_b = make_id(2);
+
+        // Same shape as the deadlock test but A is now claiming Host.
+        let mut a = make_dense_peer(id_a, 32 * 1024 * 1024 * 1024, None, model);
+        a.role = NodeRole::Host { http_port: 9337 };
+        let mut b = make_dense_peer(id_b, 16 * 1024 * 1024 * 1024, None, model);
+        b.role = NodeRole::Worker;
+        let peers = vec![a.clone(), b.clone()];
+
+        let t0 = std::time::Instant::now();
+        let mut first_observed = std::collections::HashMap::new();
+        first_observed.insert(id_a, t0);
+        first_observed.insert(id_b, t0);
+
+        // Even WAY past the grace window, an active host stays viable
+        // because branch (1) of `viable_host_candidates` (role == Host)
+        // bypasses the grace check entirely.
+        let way_after = t0 + HOST_CLAIM_GRACE * 100;
+        let candidates =
+            viable_host_candidates(&peers, &first_observed, way_after, HOST_CLAIM_GRACE);
+        assert!(
+            candidates.iter().any(|p| p.id == id_a),
+            "an active Host must always be a viable candidate, \
+             regardless of grace window"
+        );
+        let b_fast = b.fast_memory_bytes();
+        assert!(
+            !should_be_host_for_model(id_b, b_fast, &candidates),
+            "B must defer to the actively-serving host A even long after \
+             A's original grace would have expired"
+        );
+    }
+
+    /// Pin the existing peer-prune auto-heal: when the host literally
+    /// disappears from gossip (laptop closes, network drops, app quits),
+    /// the surviving cohort re-elects immediately. This already worked
+    /// pre-fix; the test exists so the new candidate-filter logic does
+    /// not accidentally hide gossip drops behind a 30-second timer.
+    #[test]
+    fn peer_disappearing_from_gossip_triggers_immediate_re_election() {
+        let model = "DeepSeek-R1-Distill-70B-Q4_K_M";
+        let id_a = make_id(1);
+        let id_b = make_id(2);
+
+        let mut a = make_dense_peer(id_a, 32 * 1024 * 1024 * 1024, None, model);
+        a.role = NodeRole::Host { http_port: 9337 };
+        let mut b = make_dense_peer(id_b, 16 * 1024 * 1024 * 1024, None, model);
+        b.role = NodeRole::Worker;
+
+        let t0 = std::time::Instant::now();
+        let mut first_observed = std::collections::HashMap::new();
+        first_observed.insert(id_a, t0);
+        first_observed.insert(id_b, t0);
+
+        // Phase 1: A is hosting, B defers. Standard cohort.
+        let peers_with_a = vec![a.clone(), b.clone()];
+        let candidates =
+            viable_host_candidates(&peers_with_a, &first_observed, t0, HOST_CLAIM_GRACE);
+        let b_fast = b.fast_memory_bytes();
+        assert!(!should_be_host_for_model(id_b, b_fast, &candidates));
+
+        // Phase 2: A disappears from gossip. The election loop calls
+        // peers() again and gets back a list without A. Even with A still
+        // in `first_observed` (we haven't garbage-collected yet inside
+        // this test, but the loop does), the candidate filter only sees
+        // peers actually in the supplied slice — so A is gone immediately,
+        // not after 30s.
+        let peers_without_a = vec![b.clone()];
+        let candidates =
+            viable_host_candidates(&peers_without_a, &first_observed, t0, HOST_CLAIM_GRACE);
+        assert_eq!(
+            candidates.len(),
+            1,
+            "candidate filter must respect peer disappearance — a peer not \
+             in `model_peers` cannot magically reappear in the candidate \
+             list, otherwise we would block re-election after a host drops"
+        );
+        assert!(
+            should_be_host_for_model(id_b, b_fast, &candidates),
+            "with A gone from gossip, B becomes the local max immediately \
+             — pinning the existing peer-prune auto-heal behavior"
+        );
+    }
+
+    /// Adversary scenario: a malicious or buggy peer self-attests an
+    /// absurdly large fast-memory budget so it always wins the local
+    /// election, but never claims `NodeRole::Host`. The grace timer
+    /// neutralizes the attack — after 30s, the lying peer is excluded
+    /// and an honest peer takes over. This is the architectural
+    /// resilience property the user explicitly asked for ("imagine if
+    /// somebody with bad intentions want to block the good honest
+    /// nodes").
+    #[test]
+    fn lying_peer_with_huge_fast_memory_is_excluded_after_grace() {
+        let model = "DeepSeek-R1-Distill-70B-Q4_K_M";
+        let id_attacker = make_id(99);
+        let id_honest = make_id(1);
+
+        // Attacker claims 1 PB of fast memory but never claims Host.
+        let mut attacker =
+            make_dense_peer(id_attacker, 1024 * 1024 * 1024 * 1024 * 1024, None, model);
+        attacker.role = NodeRole::Worker;
+        let mut honest = make_dense_peer(id_honest, 16 * 1024 * 1024 * 1024, None, model);
+        honest.role = NodeRole::Worker;
+        let peers = vec![attacker.clone(), honest.clone()];
+
+        let t0 = std::time::Instant::now();
+        let mut first_observed = std::collections::HashMap::new();
+        first_observed.insert(id_attacker, t0);
+        first_observed.insert(id_honest, t0);
+
+        // Pre-grace: attacker dominates, honest defers (this is the
+        // unavoidable window — we MUST give honest peers time to start
+        // llama-server, so a 30s window of vulnerability is the cost).
+        let candidates = viable_host_candidates(&peers, &first_observed, t0, HOST_CLAIM_GRACE);
+        let honest_fast = honest.fast_memory_bytes();
+        assert!(!should_be_host_for_model(
+            id_honest,
+            honest_fast,
+            &candidates
+        ));
+
+        // Post-grace: attacker is excluded, honest takes over.
+        let after = t0 + HOST_CLAIM_GRACE + std::time::Duration::from_secs(1);
+        let candidates = viable_host_candidates(&peers, &first_observed, after, HOST_CLAIM_GRACE);
+        assert!(
+            !candidates.iter().any(|p| p.id == id_attacker),
+            "after grace, the lying peer must be excluded — single \
+             malicious node cannot indefinitely block the cohort"
+        );
+        assert!(
+            should_be_host_for_model(id_honest, honest_fast, &candidates),
+            "honest peer takes over once attacker is filtered out — \
+             this is the resilience property the mesh promises"
         );
     }
 
