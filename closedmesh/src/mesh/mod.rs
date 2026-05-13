@@ -778,22 +778,54 @@ impl PeerInfo {
     /// Bytes of fast memory on this peer — the GPU/unified-memory budget
     /// only, NOT inflated with a RAM-offload allowance.
     ///
-    /// Reads `capability.vram_total_mb` (a per-peer, capability-advertised
-    /// figure populated from `nvidia-smi --query-gpu=memory.total`,
-    /// `recommendedMaxWorkingSetSize` on Apple Silicon, etc.). Falls back
-    /// to `vram_bytes` for peers on protocol versions that didn't carry
-    /// the capability block — those are necessarily older Linux/Windows
-    /// peers whose `vram_bytes` was inflated with RAM offload, so the
-    /// fallback over-counts on purpose. Tests that build `PeerInfo`
-    /// directly without populating the capability rely on this fallback.
+    /// MUST stay symmetric with [`Node::fast_memory_bytes`] — every peer
+    /// in the mesh runs the same election logic, and if one node thinks
+    /// "I have less fast memory than my peer" while its peer thinks the
+    /// opposite, both defer and the pipeline deadlocks (no host elected,
+    /// every node parks in the worker branch). The macOS split-mode CI
+    /// test hit exactly this on every run between 2911efb6 and the
+    /// patch that introduced this comment.
     ///
-    /// See `Node::fast_memory_bytes()` for the regression context.
+    /// The math we mirror:
+    ///   * `Node::fast_memory_bytes` returns `gpu_vram_total_bytes`, which
+    ///     at construction is clamped to `vram_bytes` — see
+    ///     `Node::new_mesh_node`'s `gpu_vram_total_bytes.min(vram)`. On
+    ///     Apple Silicon `hw.gpu_vram = [hw.memsize]` (raw system RAM,
+    ///     ~7.5 GB on the GitHub macos-latest runner) but `hw.vram_bytes`
+    ///     is the macOS GPU budget (~5.6 GB), so the clamp pulls fast
+    ///     memory down to the budget.
+    ///   * Without the same clamp here, peers see each other reporting
+    ///     7.5 GB (raw memsize gossiped via `capability.vram_total_mb`)
+    ///     while themselves reporting 5.6 GB locally — an asymmetric
+    ///     "everyone else has more memory" deadlock that's invisible
+    ///     unless you instrument the election.
+    ///
+    /// Inputs available here:
+    ///   * `capability.vram_total_mb` — populated from
+    ///     `parse_legacy_vram_mb(gpu_vram_str)`; on macOS that's raw
+    ///     `hw.memsize`, on NVIDIA Linux it's `nvidia-smi memory.total`,
+    ///     i.e. GPU-only without RAM offload.
+    ///   * `vram_bytes` (gossiped from the sender's `Node::vram_bytes`,
+    ///     which equals `hw.vram_bytes` capped by `--max-vram`):
+    ///       - macOS:    GPU budget (smaller than memsize)
+    ///       - NVIDIA:   GPU + 0.75 * RAM-offload (larger than GPU)
+    ///       - CPU-only: 0.75 * system RAM
+    ///
+    /// Taking `min(cap_bytes, vram_bytes)` produces the right answer on
+    /// every platform:
+    ///   * macOS:  min(memsize, budget)   = budget   ← matches `Node`
+    ///   * NVIDIA: min(GPU, GPU+RAM)      = GPU      ← matches `Node`
+    ///   * CPU:    cap=0, fall through    = vram_bytes (RAM-only budget)
     pub fn fast_memory_bytes(&self) -> u64 {
-        let cap_bytes = self.capability.vram_total_mb.saturating_mul(1024 * 1024);
-        if cap_bytes > 0 {
-            cap_bytes
-        } else {
-            self.vram_bytes
+        let cap_bytes = self
+            .capability
+            .vram_total_mb
+            .saturating_mul(1024 * 1024);
+        match (cap_bytes, self.vram_bytes) {
+            (0, 0) => 0,
+            (0, vram) => vram,
+            (cap, 0) => cap,
+            (cap, vram) => cap.min(vram),
         }
     }
 
@@ -4638,6 +4670,8 @@ pub use visibility::{
 // unused-import warning rather than dropping the export — removing it
 // would force any future caller to reach through a private re-export.
 #[allow(unused_imports)]
+pub use visibility::MeshVisibilityState;
+#[allow(unused_imports)]
 use gossip::{apply_transitive_ann, peer_meaningfully_changed};
 #[allow(unused_imports)]
 use heartbeat::{
@@ -4646,8 +4680,6 @@ use heartbeat::{
 pub(crate) use heartbeat::{
     moe_recovery_ready_at, peer_is_eligible_for_active_moe, resolve_peer_down,
 };
-#[allow(unused_imports)]
-pub use visibility::MeshVisibilityState;
 
 #[cfg(test)]
 mod tests;

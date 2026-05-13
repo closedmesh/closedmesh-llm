@@ -139,6 +139,113 @@ async fn fast_memory_bytes_falls_back_to_vram_bytes_when_no_discrete_gpu() {
     assert_eq!(s.fast_memory_bytes(), 7_500_000_000);
 }
 
+/// Regression for the second wave of the May 13 2026 split-mode CI
+/// failure — same symptom (every peer parks in the worker branch, no
+/// host elected, `Split mesh failed to form within 180s`) but a
+/// different cause than the previous test.
+///
+/// On the macOS-latest GitHub runners (Apple Silicon, ~7 GB unified
+/// memory):
+///   * `hw.gpu_vram = [hw.memsize]`        ≈ 7,516,192,768 bytes (raw)
+///   * `hw.vram_bytes`                     ≈ 5.6 GB (`derive_macos_gpu_budget`)
+///   * `Node::new_mesh_node` clamps:       `gpu_vram_total_bytes = min(7.5 GB, 5.6 GB) = 5.6 GB`
+///   * `Node::fast_memory_bytes()`         → 5.6 GB ✓
+///
+/// But the same node, viewed through gossip by its peer, exposes
+/// `capability.vram_total_mb` populated from `parse_legacy_vram_mb` of
+/// the `hw.gpu_vram` legacy string (~7.5 GB raw memsize). Pre-fix,
+/// `peer.fast_memory_bytes()` returned that 7.5 GB cap_bytes verbatim
+/// — so each peer saw the OTHER as 7.5 GB while seeing itself as
+/// 5.6 GB locally. `should_be_host_for_model` then concluded "peer
+/// has more memory than me" on BOTH sides simultaneously and the
+/// election deadlocked.
+///
+/// The fix mirrors the local clamp on the peer side:
+/// `peer.fast_memory_bytes() = min(cap_bytes, vram_bytes)` — taking
+/// the smaller of "raw GPU/unified-memory total" and "usable budget"
+/// matches `Node::fast_memory_bytes()` exactly on macOS, while also
+/// staying correct on NVIDIA Linux where the inequality reverses
+/// (cap = real GPU, vram_bytes = inflated with RAM offload).
+#[test]
+fn peer_fast_memory_bytes_clamps_to_vram_bytes_on_apple_silicon_shape() {
+    use crate::mesh::PeerInfo;
+
+    let memsize = 7_516_192_768u64; // 7 GB Apple runner, sysctl hw.memsize
+    let budget = 6_012_954_214u64; // ~5.6 GB derive_macos_gpu_budget output
+    let mut peer = make_test_peer_info(make_test_endpoint_id(7));
+    peer.vram_bytes = budget;
+    peer.capability = super::NodeCapability {
+        backend: super::Backend::Metal,
+        vram_total_mb: memsize / (1024 * 1024), // 7168
+        vram_free_mb: memsize / (1024 * 1024),
+        ..super::NodeCapability::default()
+    };
+    let p: &PeerInfo = &peer;
+
+    let cap_bytes = peer.capability.vram_total_mb * 1024 * 1024;
+    assert!(
+        cap_bytes > budget,
+        "test setup invariant: cap_bytes ({cap_bytes}) must exceed vram_bytes ({budget}) \
+         to reproduce the macOS asymmetry — otherwise the clamp is a no-op and the test \
+         doesn't pin down the regression"
+    );
+
+    assert_eq!(
+        p.fast_memory_bytes(),
+        budget,
+        "peer.fast_memory_bytes() must clamp the raw memsize-derived cap_bytes down to \
+         the gossiped vram_bytes budget — this is the symmetry that lets \
+         should_be_host_for_model pick a single winner instead of deadlocking the mesh"
+    );
+}
+
+/// NVIDIA-shape sanity: the clamp must not regress the Linux/Windows
+/// discrete-GPU path. On a 16 GB GPU + ~32 GB host RAM box the
+/// inequality is reversed (`cap < vram_bytes`), so the min returns
+/// the GPU figure — which is exactly what the dense launch planner
+/// wants for the Solo gate.
+#[test]
+fn peer_fast_memory_bytes_returns_gpu_only_when_vram_bytes_is_inflated() {
+    use crate::mesh::PeerInfo;
+
+    let gpu_bytes = 16u64 * 1024 * 1024 * 1024;
+    let inflated = gpu_bytes + (32u64 * 1024 * 1024 * 1024 * 75 / 100); // 0.75 RAM offload
+    let mut peer = make_test_peer_info(make_test_endpoint_id(8));
+    peer.vram_bytes = inflated;
+    peer.capability = super::NodeCapability {
+        backend: super::Backend::Cuda,
+        vram_total_mb: gpu_bytes / (1024 * 1024),
+        vram_free_mb: gpu_bytes / (1024 * 1024),
+        ..super::NodeCapability::default()
+    };
+    let p: &PeerInfo = &peer;
+
+    assert_eq!(
+        p.fast_memory_bytes(),
+        gpu_bytes,
+        "Linux NVIDIA peers must keep reporting GPU-only fast memory, not the \
+         RAM-offload-inflated total — otherwise the dense planner Solo gate goes \
+         back to claiming a 16 GB GPU can host a 70 B model from mmap-faulted RAM"
+    );
+}
+
+/// CPU-only fallback: when the peer's capability block reports
+/// `vram_total_mb = 0` (legacy or true CPU node) we fall through to
+/// `vram_bytes`, which is `0.75 * system RAM` on Linux and the macOS
+/// budget on Mac. This must not regress to 0.
+#[test]
+fn peer_fast_memory_bytes_falls_back_to_vram_bytes_when_capability_is_empty() {
+    use crate::mesh::PeerInfo;
+
+    let ram_budget = 24u64 * 1024 * 1024 * 1024;
+    let mut peer = make_test_peer_info(make_test_endpoint_id(9));
+    peer.vram_bytes = ram_budget;
+    peer.capability = super::NodeCapability::default(); // backend = Cpu, vram_total_mb = 0
+    let p: &PeerInfo = &peer;
+
+    assert_eq!(p.fast_memory_bytes(), ram_budget);
+}
+
 #[tokio::test]
 async fn local_request_metrics_snapshot_tracks_accepted_and_completed_requests() {
     let node = make_test_node(super::NodeRole::Worker)
