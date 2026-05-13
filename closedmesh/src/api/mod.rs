@@ -1301,62 +1301,6 @@ impl MeshApi {
         node_state.node_status_alias().to_string()
     }
 
-    /// Pipeline-parallel split is "healthy" iff every member of the
-    /// split_group is itself in `NodeState::Serving`. Until then, the
-    /// elected `pipeline_host` has nothing to actually route — its
-    /// workers haven't loaded their layer ranges, so any chat request
-    /// to that model would fall through to a llama.cpp error or hang.
-    ///
-    /// Pre-v0.66.18 the runtime would still flip the host's state to
-    /// `Serving` the moment its own portion of the model was up, even
-    /// when its workers were stuck loading 8 GB worth of a 70B model
-    /// on a Laptop 4070 (which is never going to finish). That made
-    /// the public `/status` page advertise e.g.
-    /// "LYU · 16 GB VRAM · serving DeepSeek-R1-Distill-70B" for
-    /// hours while every actual inference request would 503. This
-    /// gate moves the truth to the wire payload so the website, the
-    /// SDK consumer, and any future client get a truthful snapshot.
-    ///
-    /// Returns `true` when the peer is a `pipeline_host` and at
-    /// least one cohort peer (other peer with the same model in
-    /// `is_assigned_model`) is NOT itself in `NodeState::Serving`.
-    /// Returns `false` for solo serves, standby peers, healthy
-    /// pipelines, and non-pipeline split modes (MoE, multi_host).
-    fn pipeline_host_degraded(peer: &mesh::PeerInfo, all_peers: &[mesh::PeerInfo]) -> bool {
-        // Solo serve: only meaningful if the peer is a Host AND at least
-        // one other peer is also assigned the same model. Walk the
-        // peer's hosted/serving model list and check each one.
-        let candidate_models: Vec<&str> = peer
-            .serving_models
-            .iter()
-            .map(String::as_str)
-            .chain(peer.hosted_models.iter().map(String::as_str))
-            .collect();
-
-        for model in candidate_models {
-            // Only gate when this peer routes the model (i.e. is the
-            // pipeline_host). Workers don't need gating here — their
-            // own state is already accurate.
-            if !peer.routes_http_model(model) {
-                continue;
-            }
-            let cohort: Vec<&mesh::PeerInfo> = all_peers
-                .iter()
-                .filter(|p| p.id != peer.id && p.is_assigned_model(model))
-                .collect();
-            if cohort.is_empty() {
-                continue; // solo serve for this model
-            }
-            // Pipeline cohort exists. Every member must be serving.
-            for c in cohort {
-                if Self::derive_peer_state(c) != NodeState::Serving {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
     fn derive_peer_state(peer: &mesh::PeerInfo) -> NodeState {
         fn has_nonempty_models(models: &[String]) -> bool {
             models.iter().any(|model| !model.trim().is_empty())
@@ -1540,22 +1484,22 @@ impl MeshApi {
             .iter()
             .map(|p| {
                 let split_classification = classify_peer_split_role(p, &all_peers, my_vram_gb);
-                // Truth gate: if this peer is the elected pipeline_host
-                // for a model whose workers haven't all come up yet, it
-                // can't actually serve anything. Downgrade `state` to
-                // Loading and clear `hosted_models` so downstream
-                // consumers (chat router, /v1/models, public status
-                // page) don't mistake intent for capability. We keep
-                // `serving_models` populated because that's the "trying
-                // to load X" signal — used by the dashboard to show
-                // "Awaiting workers" rather than just "Loading".
-                let pipeline_degraded = Self::pipeline_host_degraded(p, &all_peers);
-                let mut peer_state = Self::derive_peer_state(p);
-                let mut peer_hosted_models = p.hosted_models.clone();
-                if pipeline_degraded && peer_state == NodeState::Serving {
-                    peer_state = NodeState::Loading;
-                    peer_hosted_models.clear();
-                }
+                // No "pipeline_host_degraded" wire-level downgrade here —
+                // a healthy pipeline split has the host in
+                // `NodeState::Serving` and every worker in
+                // `NodeState::Loading` (workers run only `rpc-server`
+                // and never reach Serving by design). The previous gate
+                // treated workers' Loading state as "the host is
+                // degraded", cleared the host's `hosted_models` on the
+                // wire, and broke every legitimate split. The
+                // split-brain case it was trying to address is already
+                // handled honestly by the `host.is_none()` branch in
+                // `classify_peer_split_role` / `classify_local_split_role`,
+                // which returns `role=None` when no peer in the cohort
+                // has graduated to `NodeRole::Host`. The host's own
+                // `derive_peer_state` already returns Loading until its
+                // llama-server is ready, which is the correct truth
+                // signal — no wire-level mutation needed.
                 PeerPayload {
                     id: p.id.fmt_short().to_string(),
                     owner: build_ownership_payload(&p.owner_summary),
@@ -1564,13 +1508,13 @@ impl MeshApi {
                         mesh::NodeRole::Host { .. } => "Host".into(),
                         mesh::NodeRole::Client => "Client".into(),
                     },
-                    state: peer_state,
+                    state: Self::derive_peer_state(p),
                     models: p.models.clone(),
                     available_models: p.available_models.clone(),
                     requested_models: p.requested_models.clone(),
                     vram_gb: p.vram_bytes as f64 / 1e9,
                     serving_models: p.serving_models.clone(),
-                    hosted_models: peer_hosted_models,
+                    hosted_models: p.hosted_models.clone(),
                     hosted_models_known: p.hosted_models_known,
                     version: p.version.clone(),
                     rtt_ms: p.rtt_ms,
@@ -1619,7 +1563,7 @@ impl MeshApi {
         let mesh_id = node.mesh_id().await;
 
         let has_local_worker_activity = has_local_processes || !my_hosted_models.is_empty();
-        let mut node_state = Self::derive_local_node_state(
+        let node_state = Self::derive_local_node_state(
             is_client,
             effective_is_host,
             effective_llama_ready,
@@ -1632,6 +1576,13 @@ impl MeshApi {
         // shows up in the peer list — so we feed it through the same logic
         // and end up with the same split_role / split_group fields populated
         // for the dashboard.
+        //
+        // No local-node "pipeline_host_degraded" wire downgrade — see the
+        // peer-loop above for the same reasoning. The split-brain case is
+        // handled by `classify_local_split_role`'s `host.is_none()` arm,
+        // and `derive_local_node_state` already only returns Serving when
+        // `llama_ready` is true and the local runtime is actually hosting
+        // the model.
         let self_split = classify_local_split_role(
             node_id.as_str(),
             effective_is_host,
@@ -1642,48 +1593,6 @@ impl MeshApi {
             &all_peers,
         );
 
-        // Truth gate for the local node: same logic as the peer gate. If
-        // this runtime is the elected pipeline_host for a model and any
-        // cohort peer isn't yet `Serving`, the local node has nothing to
-        // route. Downgrade `node_state` and blank the wire-level
-        // `hosted_models` so `/v1/models` and downstream catalog
-        // consumers don't mistake intent for capability. The dashboard's
-        // `my_hosted_models` (returned to the local UI) is preserved
-        // separately by reading the live `node.hosted_models()` — only
-        // the wire payload is downgraded.
-        let local_pipeline_degraded = matches!(self_split.role.as_deref(), Some("pipeline_host"))
-            && {
-                // Walk the cohort: every other peer assigned to any of our
-                // hosted/serving models must itself be Serving. Mirrors
-                // `pipeline_host_degraded` for the local-node case.
-                let mut degraded = false;
-                let candidate_models: Vec<&str> = my_serving_models
-                    .iter()
-                    .map(String::as_str)
-                    .chain(my_hosted_models.iter().map(String::as_str))
-                    .collect();
-                'outer: for model in candidate_models {
-                    let cohort: Vec<&mesh::PeerInfo> = all_peers
-                        .iter()
-                        .filter(|p| p.is_assigned_model(model))
-                        .collect();
-                    if cohort.is_empty() {
-                        continue;
-                    }
-                    for c in cohort {
-                        if Self::derive_peer_state(c) != NodeState::Serving {
-                            degraded = true;
-                            break 'outer;
-                        }
-                    }
-                }
-                degraded
-            };
-        let mut wire_hosted_models = my_hosted_models.clone();
-        if local_pipeline_degraded && node_state == NodeState::Serving {
-            node_state = NodeState::Loading;
-            wire_hosted_models.clear();
-        }
         let node_status = Self::derive_node_status(node_state);
 
         StatusPayload {
@@ -1702,7 +1611,7 @@ impl MeshApi {
             available_models: my_available_models,
             requested_models: my_requested_models,
             serving_models: my_serving_models,
-            hosted_models: wire_hosted_models,
+            hosted_models: my_hosted_models,
             draft_name,
             api_port,
             my_vram_gb,
@@ -2449,22 +2358,29 @@ mod tests {
         assert_eq!(worker_class.role.as_deref(), Some("pipeline_worker"));
     }
 
+    /// Healthy pipeline-split shape: a host in `Serving` and a worker in
+    /// `Loading` (workers run only `rpc-server`; they never reach `Serving`
+    /// by design — that's not a deadlock signal). The peer payload built
+    /// for the host MUST keep `state=Serving` and `hosted_models=[model]`
+    /// so chat clients can route to it; the worker's `state=Loading` is
+    /// the truthful steady-state, not "the pipeline is degraded".
+    ///
+    /// Regression: an earlier "honesty gate" treated the worker's
+    /// `Loading` as "host degraded", cleared the host's `hosted_models`
+    /// on the wire, and broke every legitimate split — most visibly
+    /// `scripts/ci-split-test.sh`, where Node C tried to find a routable
+    /// host via `peer.role == "Host" && model in peer.hosted_models` and
+    /// gave up after 60 s because we were lying about the host. See the
+    /// CI failure on commit 0fa439c8 for the trace.
     #[test]
-    fn pipeline_host_degraded_when_worker_is_loading() {
-        // Regression: the May 13 2026 incident. LYU was elected
-        // pipeline_host for DeepSeek-R1-Distill-70B but its worker had
-        // empty `hosted_models` (still loading). The runtime kept
-        // reporting LYU as state=Serving and listing the model in
-        // /v1/models. This test pins the truthful behaviour: the
-        // degraded host is reported as degraded.
-        let host = make_test_peer(
+    fn peer_payload_keeps_host_serving_when_worker_is_loading() {
+        let host_serving = make_test_peer(
             41,
             mesh::NodeRole::Host { http_port: 9337 },
             vec!["DeepSeek-R1-Distill-70B"],
             vec!["DeepSeek-R1-Distill-70B"],
             true,
         );
-        // Worker still loading: empty hosted_models, non-empty serving_models.
         let worker_loading = make_test_peer(
             42,
             mesh::NodeRole::Worker,
@@ -2472,48 +2388,27 @@ mod tests {
             vec![],
             true,
         );
-        let peers = vec![host.clone(), worker_loading.clone()];
 
-        assert!(MeshApi::pipeline_host_degraded(&host, &peers));
-        // Worker isn't a pipeline_host so it's not "degraded" by this gate.
-        assert!(!MeshApi::pipeline_host_degraded(&worker_loading, &peers));
-    }
-
-    #[test]
-    fn pipeline_host_not_degraded_when_all_workers_serving() {
-        let host = make_test_peer(
-            51,
-            mesh::NodeRole::Host { http_port: 9337 },
-            vec!["BigModel"],
-            vec!["BigModel"],
-            true,
+        // The host must continue to derive as `Serving` even though its
+        // cohort worker is still `Loading` — that's the literal shape of
+        // a healthy pipeline-parallel run.
+        assert_eq!(
+            MeshApi::derive_peer_state(&host_serving),
+            NodeState::Serving
         );
-        // Worker fully up: both serving_models AND hosted_models populated.
-        let worker_up = make_test_peer(
-            52,
-            mesh::NodeRole::Worker,
-            vec!["BigModel"],
-            vec!["BigModel"],
-            true,
+        assert_eq!(
+            MeshApi::derive_peer_state(&worker_loading),
+            NodeState::Loading
         );
-        let peers = vec![host.clone(), worker_up.clone()];
 
-        assert!(!MeshApi::pipeline_host_degraded(&host, &peers));
-    }
-
-    #[test]
-    fn pipeline_host_not_degraded_for_solo_serve() {
-        // No cohort = solo. Should never be considered degraded even
-        // though there are no workers at all.
-        let host = make_test_peer(
-            61,
-            mesh::NodeRole::Host { http_port: 9337 },
-            vec!["SmallModel"],
-            vec!["SmallModel"],
-            true,
+        // No wire-level mutation of the host's `hosted_models` here, by
+        // construction: we assert against `host_serving.hosted_models`
+        // directly to pin down the contract that the wire payload keeps
+        // its source-of-truth field intact.
+        assert_eq!(
+            host_serving.hosted_models,
+            vec!["DeepSeek-R1-Distill-70B".to_string()]
         );
-        let peers = vec![host.clone()];
-        assert!(!MeshApi::pipeline_host_degraded(&host, &peers));
     }
 
     #[test]
