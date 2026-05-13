@@ -9,7 +9,7 @@
 
 <p align="center">
   <strong>The peer-to-peer inference runtime that powers ClosedMesh.</strong><br/>
-  Pool spare GPU capacity across machines you own. Expose the result as one OpenAI-compatible API at <code>localhost:9337/v1</code>.
+  Run real open-weight models end-to-end on the hardware you already own — Apple Silicon Macs, NVIDIA / AMD / Intel boxes — and expose the result as one OpenAI-compatible API at <code>localhost:9337/v1</code>.
 </p>
 
 <p align="center">
@@ -21,14 +21,20 @@
 
 ---
 
-ClosedMesh LLM is the open-source inference engine behind [ClosedMesh](https://closedmesh.com) — a private LLM product for teams that don't want to send their conversations to a third-party LLM API. The chat product runs in the browser. The runtime in this repo runs on the machines you already own and stitches them together into a single addressable inference pool.
+ClosedMesh LLM is the open-source inference engine behind [ClosedMesh](https://closedmesh.com) — a private LLM product for teams and individuals that don't want to send their conversations to a third-party LLM API. The chat product runs in the browser. The runtime in this repo runs on the machines you already own and presents them as one OpenAI-compatible API.
 
-If a model fits on one machine, it runs there. If it doesn't, ClosedMesh LLM automatically spreads the work:
+The design principle: **the unit of work is a session, not a token.** On residential and laptop-class networks, per-token cross-machine traffic is fatal — RTTs are 20–200 ms, bandwidth is variable, and any architecture that puts the network on the per-token critical path collapses to <1 t/s. So we don't:
 
-- Dense models use **pipeline parallelism** — layers split across nodes proportional to VRAM.
-- MoE models use **expert sharding** — experts split across nodes with zero cross-node inference traffic.
-- Models can **collaborate during inference** — a text-only model consults a vision peer, an uncertain model gets a second opinion from a different architecture.
-- Every node exposes the same local API at `http://localhost:9337/v1`.
+- **Replication is the default.** If a model fits on one machine, it runs there end-to-end at full quality. The mesh's job is to find the best peer for each session, not to stitch weights across slow links.
+- **Speculative decoding is the multi-peer mode that pays off.** A small fast draft peer proposes 4–8 tokens; a larger verifier peer accepts them in one batched forward pass. The network hop amortises across many tokens, both peers earn for the same session.
+- **Models can collaborate during inference.** A text-only model consults a vision peer for image captions; an uncertain model gets a second opinion from a different architecture; small models nudge a stuck verifier out of repetition loops. The caller sees one seamless response.
+- **Every node exposes the same local API** at `http://localhost:9337/v1`.
+
+For the rare model that doesn't fit on any single peer (Llama 3.1 405B, DeepSeek-V3, very large MoEs), the runtime can fall back to pipeline parallelism or MoE expert sharding across multiple peers. Those modes are documented in the [Power-user / no-single-peer-fits fallbacks](#power-user--no-single-peer-fits-fallbacks) section below — they exist for completeness, not as the headline experience. Real-world decode rates on residential links cap out below 1 t/s for those modes; we don't recommend running them as a daily driver.
+
+### Apple Silicon is the hero hardware
+
+M-series unified memory turns a $2.5–4.5k laptop into a 30B–70B-capable inference box at speeds Windows GPU setups at the same price can't match. An M3 Pro 18 GB serves Qwen 3 8B comfortably; an M4 Pro / Max 36–48 GB serves Qwen 3 14B and 30B-A3B MoE; an M4 Max / Ultra 64–128 GB serves Llama 3.3 70B and 100B+ MoEs end-to-end. CUDA / ROCm / Vulkan boxes happily join too, and excel in different niches (an RTX 4090 24 GB is the best 32–70B GPU-only host, gaming PCs run smaller models faster, etc.).
 
 ## How this repo fits into the ClosedMesh product
 
@@ -130,33 +136,32 @@ Use only pinnable `Stable ID` / `stable_id` values from `closedmesh gpus` for pi
 
 ## How it works
 
-ClosedMesh LLM keeps the user-facing surface simple: talk to `localhost:9337`, pick a model, and let the mesh decide how to serve it.
+ClosedMesh LLM keeps the user-facing surface simple: talk to `localhost:9337`, pick a model, and let the mesh decide how to serve it. The decision tree, in order:
 
-- **Model fits on one machine?** It runs solo, full speed, no network overhead.
-- **Dense model too big?** Pipeline parallelism — layers split across nodes.
-- **MoE model too big?** Expert parallelism — experts split across nodes, zero cross-node traffic during inference.
-- **Mixed hardware?** Capability matching ensures requests only go to nodes that can actually serve them.
+1. **One peer fits the model?** Run it solo on that peer, end-to-end, full speed, zero per-token network overhead. This is the default and the case the runtime is optimised for.
+2. **Two peers can pair via speculative decoding?** Run a small fast draft model on one peer and a larger verifier on another peer. The draft proposes 4–8 tokens, the verifier accepts them in one batched forward pass. Both peers earn for the same session, the network hop amortises across many tokens, and acceptance rates of 70–80 % give a meaningful throughput win on residential WAN.
+3. **Multi-model collaboration?** A text-only model silently consults a vision peer for image captions; an uncertain model gets a second opinion from a different architecture; a stuck verifier gets nudged out of a repetition loop. The caller sees one seamless response — they don't know multiple models collaborated. See [closedmesh/docs/VIRTUAL_LLM.md](closedmesh/docs/VIRTUAL_LLM.md).
+4. **Multi-model serving** — different peers serve different models simultaneously. The API proxy peeks at the `model` field in each request and routes to the right peer via QUIC tunnel. `/v1/models` lists everything advertised by the mesh.
+5. **Demand-aware rebalancing** — a unified demand map tracks which models the mesh wants (from `--model` flags, API requests, and gossip). Demand signals propagate across peers and decay via TTL. Standby peers auto-promote to serve unserved models with active demand, or rebalance when one model is significantly hotter than others.
+6. **Capability matching** — requests only go to peers whose backend (Metal / CUDA / ROCm / Vulkan / CPU) and VRAM can actually serve the model. Offline peers are routed around automatically.
 
-If a node has enough VRAM, it always runs the full model. Splitting only happens when it has to.
+### Latency design
 
-**Pipeline parallelism** — for dense models that don't fit on one machine, layers are distributed across nodes proportional to VRAM. llama-server runs on the highest-VRAM node and coordinates via RPC. Each rpc-server loads only its assigned layers from local disk. Latency-aware: peers are selected by lowest RTT first, with an 80ms hard cap — high-latency nodes stay in the mesh as API clients but don't participate in splits.
+HTTP streaming is latency-tolerant; per-token RPC is latency-multiplied. So `llama-server` always runs on the same box as the GPU, and the mesh tunnels the HTTP request to that box — cross-network latency only affects time-to-first-token, not per-token throughput. **Per-token traffic stays inside one machine** for the default replication path, which is what makes residential and laptop-class hardware viable as inference peers in the first place. Speculative decoding is the deliberate exception: it sends 4–8 candidate tokens per network hop, so the per-hop overhead amortises over the batch.
 
-**MoE expert parallelism** — Mixture-of-Experts models (Qwen3-MoE, GLM, OLMoE, Mixtral, DeepSeek — increasingly the best-performing architectures) are auto-detected from the GGUF header. The mesh reads expert routing statistics to identify which experts matter most, then assigns each node an overlapping shard: a shared core of critical experts replicated everywhere, plus unique experts distributed across nodes. Each node gets a standalone GGUF with the full trunk + its expert subset and runs its own independent llama-server — zero cross-node traffic during inference. Sessions are hash-routed to nodes for KV cache locality.
+### Throughput optimisations
 
-**Multi-model** — different nodes serve different models simultaneously. The API proxy peeks at the `model` field in each request and routes to the right node via QUIC tunnel. `/v1/models` lists everything available.
+- **Zero-transfer GGUF loading** — `SET_TENSOR_GGUF` tells rpc-server to read weights from local disk. Dropped model load from 111 s → 5 s.
+- **Speculative decoding** — local draft model proposes tokens, the verifier accepts them in one batched forward pass. +38 % throughput on code (75 % acceptance) when both peers are local; positive even across residential WAN at expected RTTs.
+- **RPC round-trip reduction** — cached `get_alloc_size`, skip GGUF lookups for intermediates. Per-token round-trips: 558 → 8 (used by the fallback splits below).
+- **Direct server-to-server transfers** — intermediate tensors pushed directly between rpc-servers via TCP, not relayed through the client (also used by the fallback splits).
 
-**Demand-aware rebalancing** — a unified demand map tracks which models the mesh wants (from `--model` flags, API requests, and gossip). Demand signals propagate infectiously across all nodes and decay naturally via TTL. Standby nodes auto-promote to serve unserved models with active demand, or rebalance when one model is significantly hotter than others.
+### Power-user / no-single-peer-fits fallbacks
 
-**Inter-model collaboration** — models on the mesh help each other during inference. When a text-only model receives an image, it silently consults a vision model for a caption and generates from that. When a small model is uncertain, it races two peers for a second opinion and injects the winner's answer as context. The caller sees one seamless response — they don't know multiple models collaborated. See [closedmesh/docs/VIRTUAL_LLM.md](closedmesh/docs/VIRTUAL_LLM.md).
+For models that genuinely don't fit on any single peer (Llama 3.1 405B, DeepSeek-V3, very large dense models), the runtime can still split the model across multiple peers. **These modes are not recommended as a daily driver on residential WAN** — RTTs in the 20–200 ms range push per-token decode rates well below 1 t/s — but they exist for completeness, controlled LAN setups, and "I want to see my 405B run somehow" moments.
 
-**Latency design** — HTTP streaming is latency-tolerant; RPC is latency-multiplied. llama-server always runs on the same box as the GPU. The mesh tunnels HTTP, so cross-network latency only affects time-to-first-token, not per-token throughput. RPC only crosses the network for pipeline splits where the model physically doesn't fit on one machine.
-
-### Network optimizations
-
-- **Zero-transfer GGUF loading** — `SET_TENSOR_GGUF` tells rpc-server to read weights from local disk. Dropped model load from 111s → 5s.
-- **RPC round-trip reduction** — cached `get_alloc_size`, skip GGUF lookups for intermediates. Per-token round-trips: 558 → 8.
-- **Direct server-to-server transfers** — intermediate tensors pushed directly between rpc-servers via TCP, not relayed through the client.
-- **Speculative decoding** — draft model runs locally on the host, proposes tokens verified in one batched forward pass. +38% throughput on code (75% acceptance).
+- **Pipeline parallelism** (dense models). Layers are distributed across peers proportional to per-peer VRAM. `llama-server` runs on the highest-VRAM peer and coordinates via RPC; each `rpc-server` loads only its assigned layers from local disk. Latency-aware peer selection: lowest-RTT peers first, 80 ms hard cap — higher-latency peers stay in the mesh as API clients but don't participate in splits.
+- **MoE expert sharding** (Mixture-of-Experts models — Qwen3-MoE, GLM, OLMoE, Mixtral, DeepSeek). Auto-detected from the GGUF header. The mesh reads expert routing statistics to identify which experts matter most, then assigns each peer an overlapping shard: a shared core of critical experts replicated everywhere, plus unique experts distributed across peers. Each peer gets a standalone GGUF with the full trunk + its expert subset and runs its own independent `llama-server` — zero cross-peer traffic during inference. Sessions are hash-routed to peers for KV cache locality. With `overlap=1` (the default for two peers), each peer holds a complete-enough expert set to serve sessions end-to-end, so this mode is in practice a special case of replication and remains viable.
 
 ## Service mode
 

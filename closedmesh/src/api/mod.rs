@@ -276,6 +276,25 @@ fn classify_peer_split_role(
         };
     }
 
+    // Honesty gate: if NO peer in the cohort has graduated to `NodeRole::Host`
+    // for this model AND the peer being classified isn't a Host either, then
+    // there is no actual pipeline split in progress — the election simply
+    // hasn't converged. The old code fell through to `host_id = peer.id` and
+    // labelled the peer `pipeline_worker`, producing the "I'm a worker for
+    // myself" payload that powered every "Awaiting workers" / "You're holding
+    // part of the model" lie on the dashboard while three boxes deadlocked
+    // each electing themselves. See docs/closedmesh-llm/STRATEGY.md §2 — the
+    // pipeline-split mode is the most common source of false-positive UI
+    // claims, and we want the classifier to refuse to invent a topology that
+    // doesn't exist.
+    if host.is_none() && !peer.routes_http_model(model) {
+        return PeerSplitClassification {
+            role: None,
+            group: None,
+            moe_shard: None,
+        };
+    }
+
     // We have ≥1 co-serving peer for `model`. The host of that model is the
     // anchor of the split group (if any). Build the SplitGroup payload.
     let mut peer_ids: Vec<String> = std::iter::once(peer.id.fmt_short().to_string())
@@ -508,6 +527,23 @@ fn classify_local_split_role(
     };
 
     if cohort.is_empty() {
+        return PeerSplitClassification {
+            role: None,
+            group: None,
+            moe_shard: None,
+        };
+    }
+
+    // Honesty gate (mirror of `classify_peer_split_role`): when the cohort is
+    // non-empty (multiple peers all advertise interest in the same model) but
+    // NO peer has graduated to `NodeRole::Host` for it AND we ourselves are
+    // not host, the pipeline-host election has not converged. Don't fabricate
+    // a split-group payload with `host_id = self_id` and label ourselves as
+    // `pipeline_worker` — that's the lie that lets the dashboard claim
+    // "you're holding part of the model" while the rpc-server is actually
+    // idle waiting for a host that will never connect.
+    let any_host_for_model = all_peers.iter().any(|p| p.routes_http_model(model));
+    if !any_host_for_model && !is_host {
         return PeerSplitClassification {
             role: None,
             group: None,
@@ -1265,6 +1301,62 @@ impl MeshApi {
         node_state.node_status_alias().to_string()
     }
 
+    /// Pipeline-parallel split is "healthy" iff every member of the
+    /// split_group is itself in `NodeState::Serving`. Until then, the
+    /// elected `pipeline_host` has nothing to actually route — its
+    /// workers haven't loaded their layer ranges, so any chat request
+    /// to that model would fall through to a llama.cpp error or hang.
+    ///
+    /// Pre-v0.66.18 the runtime would still flip the host's state to
+    /// `Serving` the moment its own portion of the model was up, even
+    /// when its workers were stuck loading 8 GB worth of a 70B model
+    /// on a Laptop 4070 (which is never going to finish). That made
+    /// the public `/status` page advertise e.g.
+    /// "LYU · 16 GB VRAM · serving DeepSeek-R1-Distill-70B" for
+    /// hours while every actual inference request would 503. This
+    /// gate moves the truth to the wire payload so the website, the
+    /// SDK consumer, and any future client get a truthful snapshot.
+    ///
+    /// Returns `true` when the peer is a `pipeline_host` and at
+    /// least one cohort peer (other peer with the same model in
+    /// `is_assigned_model`) is NOT itself in `NodeState::Serving`.
+    /// Returns `false` for solo serves, standby peers, healthy
+    /// pipelines, and non-pipeline split modes (MoE, multi_host).
+    fn pipeline_host_degraded(peer: &mesh::PeerInfo, all_peers: &[mesh::PeerInfo]) -> bool {
+        // Solo serve: only meaningful if the peer is a Host AND at least
+        // one other peer is also assigned the same model. Walk the
+        // peer's hosted/serving model list and check each one.
+        let candidate_models: Vec<&str> = peer
+            .serving_models
+            .iter()
+            .map(String::as_str)
+            .chain(peer.hosted_models.iter().map(String::as_str))
+            .collect();
+
+        for model in candidate_models {
+            // Only gate when this peer routes the model (i.e. is the
+            // pipeline_host). Workers don't need gating here — their
+            // own state is already accurate.
+            if !peer.routes_http_model(model) {
+                continue;
+            }
+            let cohort: Vec<&mesh::PeerInfo> = all_peers
+                .iter()
+                .filter(|p| p.id != peer.id && p.is_assigned_model(model))
+                .collect();
+            if cohort.is_empty() {
+                continue; // solo serve for this model
+            }
+            // Pipeline cohort exists. Every member must be serving.
+            for c in cohort {
+                if Self::derive_peer_state(c) != NodeState::Serving {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn derive_peer_state(peer: &mesh::PeerInfo) -> NodeState {
         fn has_nonempty_models(models: &[String]) -> bool {
             models.iter().any(|model| !model.trim().is_empty())
@@ -1448,6 +1540,22 @@ impl MeshApi {
             .iter()
             .map(|p| {
                 let split_classification = classify_peer_split_role(p, &all_peers, my_vram_gb);
+                // Truth gate: if this peer is the elected pipeline_host
+                // for a model whose workers haven't all come up yet, it
+                // can't actually serve anything. Downgrade `state` to
+                // Loading and clear `hosted_models` so downstream
+                // consumers (chat router, /v1/models, public status
+                // page) don't mistake intent for capability. We keep
+                // `serving_models` populated because that's the "trying
+                // to load X" signal — used by the dashboard to show
+                // "Awaiting workers" rather than just "Loading".
+                let pipeline_degraded = Self::pipeline_host_degraded(p, &all_peers);
+                let mut peer_state = Self::derive_peer_state(p);
+                let mut peer_hosted_models = p.hosted_models.clone();
+                if pipeline_degraded && peer_state == NodeState::Serving {
+                    peer_state = NodeState::Loading;
+                    peer_hosted_models.clear();
+                }
                 PeerPayload {
                     id: p.id.fmt_short().to_string(),
                     owner: build_ownership_payload(&p.owner_summary),
@@ -1456,13 +1564,13 @@ impl MeshApi {
                         mesh::NodeRole::Host { .. } => "Host".into(),
                         mesh::NodeRole::Client => "Client".into(),
                     },
-                    state: Self::derive_peer_state(p),
+                    state: peer_state,
                     models: p.models.clone(),
                     available_models: p.available_models.clone(),
                     requested_models: p.requested_models.clone(),
                     vram_gb: p.vram_bytes as f64 / 1e9,
                     serving_models: p.serving_models.clone(),
-                    hosted_models: p.hosted_models.clone(),
+                    hosted_models: peer_hosted_models,
                     hosted_models_known: p.hosted_models_known,
                     version: p.version.clone(),
                     rtt_ms: p.rtt_ms,
@@ -1511,14 +1619,13 @@ impl MeshApi {
         let mesh_id = node.mesh_id().await;
 
         let has_local_worker_activity = has_local_processes || !my_hosted_models.is_empty();
-        let node_state = Self::derive_local_node_state(
+        let mut node_state = Self::derive_local_node_state(
             is_client,
             effective_is_host,
             effective_llama_ready,
             has_local_worker_activity,
             display_model_name.as_str(),
         );
-        let node_status = Self::derive_node_status(node_state);
 
         // Synthesize a PeerInfo-shaped view of this node so we can reuse the
         // peer split classifier above. The local node is "self" — it never
@@ -1534,6 +1641,50 @@ impl MeshApi {
             my_vram_gb,
             &all_peers,
         );
+
+        // Truth gate for the local node: same logic as the peer gate. If
+        // this runtime is the elected pipeline_host for a model and any
+        // cohort peer isn't yet `Serving`, the local node has nothing to
+        // route. Downgrade `node_state` and blank the wire-level
+        // `hosted_models` so `/v1/models` and downstream catalog
+        // consumers don't mistake intent for capability. The dashboard's
+        // `my_hosted_models` (returned to the local UI) is preserved
+        // separately by reading the live `node.hosted_models()` — only
+        // the wire payload is downgraded.
+        let local_pipeline_degraded = matches!(self_split.role.as_deref(), Some("pipeline_host"))
+            && {
+                // Walk the cohort: every other peer assigned to any of our
+                // hosted/serving models must itself be Serving. Mirrors
+                // `pipeline_host_degraded` for the local-node case.
+                let mut degraded = false;
+                let candidate_models: Vec<&str> = my_serving_models
+                    .iter()
+                    .map(String::as_str)
+                    .chain(my_hosted_models.iter().map(String::as_str))
+                    .collect();
+                'outer: for model in candidate_models {
+                    let cohort: Vec<&mesh::PeerInfo> = all_peers
+                        .iter()
+                        .filter(|p| p.is_assigned_model(model))
+                        .collect();
+                    if cohort.is_empty() {
+                        continue;
+                    }
+                    for c in cohort {
+                        if Self::derive_peer_state(c) != NodeState::Serving {
+                            degraded = true;
+                            break 'outer;
+                        }
+                    }
+                }
+                degraded
+            };
+        let mut wire_hosted_models = my_hosted_models.clone();
+        if local_pipeline_degraded && node_state == NodeState::Serving {
+            node_state = NodeState::Loading;
+            wire_hosted_models.clear();
+        }
+        let node_status = Self::derive_node_status(node_state);
 
         StatusPayload {
             version: CLOSEDMESH_VERSION.to_string(),
@@ -1551,7 +1702,7 @@ impl MeshApi {
             available_models: my_available_models,
             requested_models: my_requested_models,
             serving_models: my_serving_models,
-            hosted_models: my_hosted_models,
+            hosted_models: wire_hosted_models,
             draft_name,
             api_port,
             my_vram_gb,
@@ -2296,6 +2447,143 @@ mod tests {
 
         let worker_class = classify_peer_split_role(&worker, &peers, 16.0);
         assert_eq!(worker_class.role.as_deref(), Some("pipeline_worker"));
+    }
+
+    #[test]
+    fn pipeline_host_degraded_when_worker_is_loading() {
+        // Regression: the May 13 2026 incident. LYU was elected
+        // pipeline_host for DeepSeek-R1-Distill-70B but its worker had
+        // empty `hosted_models` (still loading). The runtime kept
+        // reporting LYU as state=Serving and listing the model in
+        // /v1/models. This test pins the truthful behaviour: the
+        // degraded host is reported as degraded.
+        let host = make_test_peer(
+            41,
+            mesh::NodeRole::Host { http_port: 9337 },
+            vec!["DeepSeek-R1-Distill-70B"],
+            vec!["DeepSeek-R1-Distill-70B"],
+            true,
+        );
+        // Worker still loading: empty hosted_models, non-empty serving_models.
+        let worker_loading = make_test_peer(
+            42,
+            mesh::NodeRole::Worker,
+            vec!["DeepSeek-R1-Distill-70B"],
+            vec![],
+            true,
+        );
+        let peers = vec![host.clone(), worker_loading.clone()];
+
+        assert!(MeshApi::pipeline_host_degraded(&host, &peers));
+        // Worker isn't a pipeline_host so it's not "degraded" by this gate.
+        assert!(!MeshApi::pipeline_host_degraded(&worker_loading, &peers));
+    }
+
+    #[test]
+    fn pipeline_host_not_degraded_when_all_workers_serving() {
+        let host = make_test_peer(
+            51,
+            mesh::NodeRole::Host { http_port: 9337 },
+            vec!["BigModel"],
+            vec!["BigModel"],
+            true,
+        );
+        // Worker fully up: both serving_models AND hosted_models populated.
+        let worker_up = make_test_peer(
+            52,
+            mesh::NodeRole::Worker,
+            vec!["BigModel"],
+            vec!["BigModel"],
+            true,
+        );
+        let peers = vec![host.clone(), worker_up.clone()];
+
+        assert!(!MeshApi::pipeline_host_degraded(&host, &peers));
+    }
+
+    #[test]
+    fn pipeline_host_not_degraded_for_solo_serve() {
+        // No cohort = solo. Should never be considered degraded even
+        // though there are no workers at all.
+        let host = make_test_peer(
+            61,
+            mesh::NodeRole::Host { http_port: 9337 },
+            vec!["SmallModel"],
+            vec!["SmallModel"],
+            true,
+        );
+        let peers = vec![host.clone()];
+        assert!(!MeshApi::pipeline_host_degraded(&host, &peers));
+    }
+
+    #[test]
+    fn classify_peer_split_role_returns_none_when_no_host_in_cohort() {
+        // Regression: the May 13 2026 split-brain deadlock. Three peers all
+        // had `role: Worker` and `serving_models = ["DeepSeek-R1-Distill-70B"]`
+        // but none had graduated to `NodeRole::Host`. The old classifier fell
+        // through to `host_id = peer.id` (self) and labelled every peer as
+        // `pipeline_worker`, producing the "I'm a worker for myself" payload
+        // that powered every "Awaiting workers" / "loaded and waiting" lie on
+        // the dashboard. The classifier should now refuse to invent a split
+        // when no peer is actually hosting.
+        let worker_a = make_test_peer(
+            70,
+            mesh::NodeRole::Worker,
+            vec!["DeepSeek-R1-Distill-70B"],
+            vec![],
+            true,
+        );
+        let worker_b = make_test_peer(
+            71,
+            mesh::NodeRole::Worker,
+            vec!["DeepSeek-R1-Distill-70B"],
+            vec![],
+            true,
+        );
+        let worker_c = make_test_peer(
+            72,
+            mesh::NodeRole::Worker,
+            vec!["DeepSeek-R1-Distill-70B"],
+            vec![],
+            true,
+        );
+        let peers = vec![worker_a.clone(), worker_b.clone(), worker_c.clone()];
+        let class = classify_peer_split_role(&worker_a, &peers, 16.0);
+        assert!(
+            class.role.is_none(),
+            "no Host in cohort ⇒ no split_role; got {:?}",
+            class.role
+        );
+        assert!(class.group.is_none());
+    }
+
+    #[test]
+    fn classify_peer_split_role_still_marks_worker_when_host_present() {
+        // Mirror of the regression: as soon as ONE peer in the cohort has
+        // role: Host AND routes the model, the classifier should resume
+        // labelling the others as `pipeline_worker`. The honesty gate must
+        // not break the warm-mesh case.
+        let host = make_test_peer(
+            80,
+            mesh::NodeRole::Host { http_port: 9337 },
+            vec!["DeepSeek-R1-Distill-70B"],
+            vec!["DeepSeek-R1-Distill-70B"],
+            true,
+        );
+        let worker = make_test_peer(
+            81,
+            mesh::NodeRole::Worker,
+            vec!["DeepSeek-R1-Distill-70B"],
+            vec![],
+            true,
+        );
+        let peers = vec![host.clone(), worker.clone()];
+        let class = classify_peer_split_role(&worker, &peers, 16.0);
+        assert_eq!(class.role.as_deref(), Some("pipeline_worker"));
+        let group = class
+            .group
+            .expect("split group still populated when host present");
+        assert_eq!(group.host_id, host.id.fmt_short().to_string());
     }
 
     #[test]

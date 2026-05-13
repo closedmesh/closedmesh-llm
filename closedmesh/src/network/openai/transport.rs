@@ -1879,9 +1879,14 @@ pub async fn handle_mesh_request(
             }
         };
 
-    // Handle /v1/models
+    // Handle /v1/models. Use the routable variant so we don't
+    // advertise models whose only host is in a degraded pipeline
+    // (workers still loading) — the chat router would just 503 those
+    // requests anyway, and exposing them in /v1/models was the bug
+    // that made the public status page look like it was serving 70B
+    // on a 16 GB box for hours at a time.
     if is_models_list_request(&request.method, &request.path) {
-        let served = node.models_being_served().await;
+        let served = node.models_being_served_routable().await;
         let _ = send_models_list(tcp_stream, &served).await;
         return;
     }
@@ -1943,7 +1948,12 @@ pub async fn handle_mesh_request(
                     Some(name)
                 } else {
                     let cl = router::classify(body_json);
-                    let served = node.models_being_served().await;
+                    // Auto-routing should only pick from models that
+                    // can actually be routed right now. Picking a
+                    // degraded-pipeline model here would 503 the
+                    // request and force a retry that would land on
+                    // the same (still-degraded) host.
+                    let served = node.models_being_served_routable().await;
                     let media = router::media_requirements(body_json);
                     let with_caps: Vec<(&str, f64, crate::models::ModelCapabilities)> = served
                         .iter()

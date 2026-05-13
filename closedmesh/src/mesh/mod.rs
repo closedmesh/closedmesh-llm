@@ -2840,6 +2840,88 @@ impl Node {
         result
     }
 
+    /// Like [`models_being_served`], but filters out models whose only
+    /// routing host is in a degraded pipeline-parallel split (i.e. the
+    /// pipeline_host has come up but at least one cohort worker is
+    /// still loading its layer range, so the model is structurally
+    /// non-functional). Used by `/v1/models` so the public catalog
+    /// matches what the chat router can actually serve.
+    ///
+    /// A model is "routable" iff at least one peer (or self) that
+    /// routes the model has either (a) no cohort — solo serve — or
+    /// (b) every cohort member is past the loading phase, signalled
+    /// by a non-empty `hosted_models` (proof of llama_ready) or a
+    /// matching `served_model_runtime` entry with `ready: true`.
+    ///
+    /// Internal routing (chat, election, gossip) intentionally keeps
+    /// using `models_being_served` — degraded routes still return
+    /// errors from the host, which the chat client handles, and we
+    /// don't want to disrupt the existing recovery paths. This new
+    /// method is purely about telling truth on the public surface.
+    pub async fn models_being_served_routable(&self) -> Vec<String> {
+        let my_hosted_models = self.hosted_models.lock().await.clone();
+        let peer_data: Vec<_> = {
+            let state = self.state.lock().await;
+            state.peers.values().cloned().collect()
+        };
+
+        fn peer_serves_model(p: &PeerInfo, model: &str) -> bool {
+            // Modern signal: the runtime descriptor advertises a
+            // ready=true entry for this model.
+            if p.served_model_runtime
+                .iter()
+                .any(|r| r.ready && r.model_name == model)
+            {
+                return true;
+            }
+            // Pre-runtime-descriptor signal: hosted_models is the
+            // post-llama_ready list (see runtime/mod.rs
+            // set_hosted_models / set_serving_models pair).
+            if p.hosted_models.iter().any(|m| m == model) {
+                return true;
+            }
+            // Legacy schema (no hosted_models field): serving_models
+            // was authoritative.
+            if !p.hosted_models_known && p.serving_models.iter().any(|m| m == model) {
+                return true;
+            }
+            false
+        }
+
+        let route_is_healthy = |host: &PeerInfo, model: &str| -> bool {
+            let cohort: Vec<&PeerInfo> = peer_data
+                .iter()
+                .filter(|p| p.id != host.id && p.is_assigned_model(model))
+                .collect();
+            if cohort.is_empty() {
+                return true; // solo serve
+            }
+            cohort.iter().all(|c| peer_serves_model(c, model))
+        };
+
+        let mut routable = std::collections::HashSet::new();
+        // Self-hosted models: assume the local node tracks pipeline
+        // health via its own `hosted_models` writes, which only flip
+        // on after llama_ready. In split-host mode the local runtime
+        // additionally waits for worker readiness before flipping the
+        // bit — so trusting `my_hosted_models` here matches reality.
+        // (If that assumption ever weakens, this is the place to add
+        // the same cohort check using `self.endpoint.id()`.)
+        for s in &my_hosted_models {
+            routable.insert(s.clone());
+        }
+        for peer in &peer_data {
+            for m in peer.http_routable_models() {
+                if route_is_healthy(peer, &m) {
+                    routable.insert(m);
+                }
+            }
+        }
+        let mut result: Vec<String> = routable.into_iter().collect();
+        result.sort();
+        result
+    }
+
     /// Find a host for a specific model, using hash-based selection for load distribution.
     /// When multiple hosts serve the same model, picks one based on our node ID hash.
     /// All host IDs serving a model, with hash-preferred host first.
