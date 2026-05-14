@@ -2266,7 +2266,27 @@ pub async fn election_loop(
                         );
                     }
                     on_change(true, false);
-                    let _ = peer_rx.changed().await;
+                    // Wake up either when the mesh changes OR when the
+                    // host-attempt backoff window has elapsed, whichever
+                    // comes first. Plain `peer_rx.changed().await` deadlocks
+                    // the election after a stepped-aside cycle on a quiet
+                    // mesh — the runner-up never claims, no gossip arrives,
+                    // and we sleep forever. The May 14 2026 70B incident
+                    // hit exactly this: 2 consecutive launches failed
+                    // because one worker's RPC tunnel was silent, the loop
+                    // stepped aside as designed, but then sat on
+                    // `peer_rx.changed()` indefinitely because every peer
+                    // kept gossiping unchanged state. Polling at the
+                    // backoff cadence (slightly longer than
+                    // `HOST_ATTEMPT_BACKOFF` so the next iteration sees
+                    // `host_attempt_backoff.is_active()` go false) gets us
+                    // a fresh election attempt with warm tunnels.
+                    let wake_after =
+                        HOST_ATTEMPT_BACKOFF + std::time::Duration::from_secs(2);
+                    tokio::select! {
+                        _ = peer_rx.changed() => {}
+                        _ = tokio::time::sleep(wake_after) => {}
+                    }
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     continue;
                 }
