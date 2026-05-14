@@ -6,6 +6,7 @@
 //!
 //! No cross-node traffic during inference — each node runs independently.
 
+use anyhow::Context;
 use clap::ValueEnum;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -817,6 +818,22 @@ fn resolve_split_binary(bin_dir: &Path) -> anyhow::Result<PathBuf> {
 }
 
 /// Run llama-moe-split to produce a split GGUF for one node.
+///
+/// After the splitter exits 0 we *also* validate that the produced GGUF
+/// actually contains expert tensors. The bug from issue
+/// [#7](https://github.com/closedmesh/closedmesh-llm/issues/7) was that
+/// `llama-moe-split` happily exited 0 against a non-canonical 6-expert
+/// Mixtral 8x7B quant but produced an output with **zero** expert
+/// tensors. `llama-server` then crash-looped on
+/// `error loading model: missing tensor 'blk.0.ffn_down_exps.weight'`
+/// every minute, with the only signal being silence on the dashboard.
+///
+/// We catch that pre-launch by scanning the output's tensor table (one
+/// cheap header read, no tensor data) and bailing with a structured
+/// error if we expected experts and got none. The election loop's
+/// host-attempt backoff (added in v0.66.22 — see `election.rs`) demotes
+/// us out of the host slot after repeated failures so another peer can
+/// take over instead of looping on the same SIGABRT.
 pub fn run_split(
     bin_dir: &Path,
     model_path: &Path,
@@ -843,6 +860,77 @@ pub fn run_split(
         .map_err(|e| anyhow::anyhow!("Failed to run {}: {e}", split_bin.display()))?;
 
     anyhow::ensure!(status.success(), "llama-moe-split exited with {status}");
+
+    validate_split_shard(model_path, output_path)
+        .with_context(|| format!("validate split shard {}", output_path.display()))?;
+
+    Ok(())
+}
+
+/// Verify that a freshly-produced moe-split shard actually contains the
+/// expert tensors `llama-server` will demand at load time.
+///
+/// Strategy:
+///   - Read the source's MoE descriptor (cheap header scan). If it
+///     reports `expert_count == 0`, the file isn't MoE and we don't
+///     enforce anything (also covers dense-model false positives from
+///     odd third-party quants).
+///   - Scan the output's tensor names. If we find at least one tensor
+///     matching the expert pattern (`ffn_gate_exps` / `ffn_up_exps` /
+///     `ffn_down_exps` / `_expert*`), the splitter did its job.
+///   - Otherwise the splitter has produced a useless file. Bail with a
+///     clear message that names the source quant and the output path so
+///     the user (or the auto-replay log) can see exactly which split
+///     attempt produced the broken shard.
+fn validate_split_shard(source: &Path, shard: &Path) -> anyhow::Result<()> {
+    let Some(moe) = detect_moe(source) else {
+        // Dense model or unparseable header. The caller is expected to
+        // have classified this as MoE before reaching `run_split`, but
+        // we don't want to reject on header-parse flakiness; assume the
+        // splitter is right unless we have positive evidence otherwise.
+        return Ok(());
+    };
+    if moe.expert_count == 0 {
+        return Ok(());
+    }
+
+    let names = match crate::models::gguf::scan_gguf_tensor_names(shard) {
+        Some(names) => names,
+        None => {
+            // The header is unreadable — almost always means the splitter
+            // produced a truncated or empty file. Fail loudly so the
+            // host-attempt backoff demotes us instead of silently
+            // SIGABRTing llama-server post-launch.
+            anyhow::bail!(
+                "moe-split produced an unreadable shard at {} \
+                 (source had {} experts, top-{}); refusing to launch \
+                 llama-server against it",
+                shard.display(),
+                moe.expert_count,
+                moe.expert_used_count
+            );
+        }
+    };
+
+    let any_expert_tensor = names
+        .iter()
+        .any(|n| crate::models::gguf::is_expert_tensor_name(n));
+    if !any_expert_tensor {
+        anyhow::bail!(
+            "moe-split produced a shard at {} with zero expert tensors \
+             (source has {} experts, top-{}); llama-server would crash \
+             with `error loading model: missing tensor 'blk.0.ffn_down_exps.weight'`. \
+             This usually means the source GGUF uses an expert layout \
+             llama-moe-split cannot decompose — see issue \
+             https://github.com/closedmesh/closedmesh-llm/issues/7 \
+             for the canonical 8-expert Mixtral 8x7B sources we ship in \
+             the catalog.",
+            shard.display(),
+            moe.expert_count,
+            moe.expert_used_count
+        );
+    }
+
     Ok(())
 }
 
@@ -851,6 +939,148 @@ mod tests {
     use super::*;
     use crate::models::gguf::detect_moe;
     use serial_test::serial;
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// GGUF header builder used by `validate_split_shard_*` tests below.
+    /// Mirrors the (private) helper in `closedmesh-client/src/models/gguf.rs`
+    /// — duplicated here because integration through a fixture file would
+    /// add a build-time dependency on `llama.cpp`. Producing a valid
+    /// GGUF in-memory is ~30 lines, far cheaper than that.
+    fn build_gguf(n_tensors: i64, kv: &[(&str, u32)], tensor_names: &[&str]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"GGUF");
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&n_tensors.to_le_bytes());
+        bytes.extend_from_slice(&(kv.len() as i64).to_le_bytes());
+        for (key, value) in kv {
+            bytes.extend_from_slice(&(key.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(key.as_bytes());
+            bytes.extend_from_slice(&4u32.to_le_bytes()); // GgufType::Uint32
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        for (i, name) in tensor_names.iter().enumerate() {
+            bytes.extend_from_slice(&(name.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(name.as_bytes());
+            bytes.extend_from_slice(&1u32.to_le_bytes()); // n_dims
+            bytes.extend_from_slice(&16u64.to_le_bytes()); // dim[0]
+            bytes.extend_from_slice(&0u32.to_le_bytes()); // GgufType::Uint8
+            bytes.extend_from_slice(&((i as u64) * 64).to_le_bytes()); // offset
+        }
+        bytes
+    }
+
+    fn write_gguf_to_temp(prefix: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("{prefix}-{unique}.gguf"));
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(bytes).unwrap();
+        file.flush().unwrap();
+        path
+    }
+
+    #[test]
+    fn validate_split_shard_accepts_dense_models_without_moe_metadata() {
+        // No `*.expert_count` KV → detect_moe returns None / 0. We must
+        // not block dense models from being "split" (the splitter
+        // shouldn't have been invoked, but if it was, validation is a
+        // no-op rather than a hard fail).
+        let source_bytes = build_gguf(1, &[], &["blk.0.attn_q.weight"]);
+        let shard_bytes = build_gguf(1, &[], &["blk.0.attn_q.weight"]);
+        let source = write_gguf_to_temp("validate-dense-source", &source_bytes);
+        let shard = write_gguf_to_temp("validate-dense-shard", &shard_bytes);
+
+        let result = validate_split_shard(&source, &shard);
+        assert!(result.is_ok(), "{result:?}");
+
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(shard);
+    }
+
+    #[test]
+    fn validate_split_shard_accepts_moe_shard_with_expert_tensors() {
+        // Source advertises 8 experts; shard contains the per-layer
+        // packed expert tensor — the canonical Mixtral case.
+        let source_bytes = build_gguf(
+            1,
+            &[("llama.expert_count", 8), ("llama.expert_used_count", 2)],
+            &["blk.0.attn_q.weight"],
+        );
+        let shard_bytes = build_gguf(
+            2,
+            &[("llama.expert_count", 8), ("llama.expert_used_count", 2)],
+            &["blk.0.attn_q.weight", "blk.0.ffn_down_exps.weight"],
+        );
+        let source = write_gguf_to_temp("validate-moe-ok-source", &source_bytes);
+        let shard = write_gguf_to_temp("validate-moe-ok-shard", &shard_bytes);
+
+        let result = validate_split_shard(&source, &shard);
+        assert!(result.is_ok(), "{result:?}");
+
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(shard);
+    }
+
+    #[test]
+    fn validate_split_shard_rejects_moe_shard_with_zero_expert_tensors() {
+        // The exact bug from issue #7: source claims 8 experts, splitter
+        // exited 0, but the shard has only attn / output tensors and no
+        // `ffn_*_exps.weight`. llama-server would crash-loop with
+        // `missing tensor 'blk.0.ffn_down_exps.weight'`. We must catch
+        // this before launch so the host-attempt backoff demotes us.
+        let source_bytes = build_gguf(
+            1,
+            &[("llama.expert_count", 8), ("llama.expert_used_count", 2)],
+            &["blk.0.attn_q.weight"],
+        );
+        let shard_bytes = build_gguf(
+            2,
+            &[("llama.expert_count", 8), ("llama.expert_used_count", 2)],
+            &["blk.0.attn_q.weight", "output.weight"],
+        );
+        let source = write_gguf_to_temp("validate-moe-bad-source", &source_bytes);
+        let shard = write_gguf_to_temp("validate-moe-bad-shard", &shard_bytes);
+
+        let err = validate_split_shard(&source, &shard).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("zero expert tensors"),
+            "expected zero-expert error, got: {msg}"
+        );
+        // Surface the canonical-source link so the user knows where to
+        // look — same hint the catalog comment carries.
+        assert!(msg.contains("issues/7"), "expected issue link in: {msg}");
+
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(shard);
+    }
+
+    #[test]
+    fn validate_split_shard_rejects_unreadable_shard() {
+        // Splitter wrote a truncated / non-GGUF file. Without a
+        // pre-launch check llama-server would SIGABRT at parse time and
+        // we'd retry the same broken splitter forever.
+        let source_bytes = build_gguf(
+            1,
+            &[("llama.expert_count", 8), ("llama.expert_used_count", 2)],
+            &["blk.0.attn_q.weight"],
+        );
+        let source = write_gguf_to_temp("validate-unreadable-source", &source_bytes);
+        let shard = write_gguf_to_temp("validate-unreadable-shard", b"not a gguf file");
+
+        let err = validate_split_shard(&source, &shard).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("unreadable shard"),
+            "expected unreadable-shard error, got: {msg}"
+        );
+
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(shard);
+    }
 
     #[test]
     fn test_assignments_2_nodes() {

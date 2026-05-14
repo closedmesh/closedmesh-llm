@@ -474,6 +474,53 @@ fn is_expert_partitioned_tensor(name: &str) -> bool {
         || lower.contains("_expert")
 }
 
+/// Cheap header-only enumeration of every tensor name in a GGUF file.
+///
+/// Reads only the magic, KV section, and tensor-info table — never tensor
+/// data — so this is safe to call on multi-GB files. Returns `None` on
+/// any parse failure (missing magic, truncated header, malformed table).
+///
+/// Used by [`crate::inference::moe`] to validate the output of
+/// `llama-moe-split` before launching `llama-server` against the shard.
+/// Issue
+/// [closedmesh/closedmesh-llm#7](https://github.com/closedmesh/closedmesh-llm/issues/7)
+/// documented the failure mode where the splitter exits 0 but produces a
+/// shard missing every `blk.<L>.ffn_*_exps.weight`; llama-server then
+/// crash-loops on `error loading model: missing tensor 'blk.0.ffn_down_exps.weight'`.
+pub fn scan_gguf_tensor_names(path: &Path) -> Option<Vec<String>> {
+    let mut f = std::fs::File::open(path).ok()?;
+
+    let mut magic = [0u8; 4];
+    f.read_exact(&mut magic).ok()?;
+    if &magic != b"GGUF" {
+        return None;
+    }
+    let version = read_u32(&mut f).ok()?;
+    if version < 2 {
+        return None;
+    }
+
+    let n_tensors = read_gguf_header_count(&mut f, MAX_GGUF_TENSOR_COUNT, "tensor count").ok()?;
+    let n_kv = read_gguf_header_count(&mut f, MAX_GGUF_HEADER_KV_COUNT, "KV count").ok()?;
+
+    for _ in 0..n_kv {
+        let _key = read_gguf_string(&mut f).ok()?;
+        let vtype = GgufType::from_u32(read_u32(&mut f).ok()?)?;
+        skip_gguf_value(&mut f, vtype).ok()?;
+    }
+
+    let tensors = read_tensor_infos(&mut f, n_tensors).ok()?;
+    Some(tensors.into_iter().map(|t| t.name).collect())
+}
+
+/// Returns true iff `name` is one of the per-expert FFN tensor names that
+/// llama.cpp expects on every layer of an MoE model. Mirrors the local
+/// `is_expert_partitioned_tensor` heuristic, but exposed publicly so the
+/// runtime crate can use it for shard validation.
+pub fn is_expert_tensor_name(name: &str) -> bool {
+    is_expert_partitioned_tensor(name)
+}
+
 /// Scan GGUF tensor metadata and estimate which bytes are always resident versus
 /// expert-partitioned. Reads only the header and tensor-info tables.
 pub fn scan_gguf_tensor_byte_profile(path: &Path) -> Option<GgufTensorByteProfile> {
@@ -697,6 +744,62 @@ mod tests {
         let path = write_bytes("mesh-client-gguf-negative-kv", &bytes);
         assert!(scan_gguf_compact_meta(&path).is_none());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn scan_gguf_tensor_names_returns_every_tensor_name_in_order() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"GGUF");
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&3i64.to_le_bytes()); // n_tensors
+        bytes.extend_from_slice(&0i64.to_le_bytes()); // n_kv
+        push_tensor_info(&mut bytes, "blk.0.attn_q.weight", 0);
+        push_tensor_info(&mut bytes, "blk.0.ffn_down_exps.weight", 64);
+        push_tensor_info(&mut bytes, "output.weight", 128);
+
+        let path = write_bytes("mesh-client-gguf-names", &bytes);
+        let names = scan_gguf_tensor_names(&path).expect("should parse GGUF");
+        assert_eq!(
+            names,
+            vec![
+                "blk.0.attn_q.weight",
+                "blk.0.ffn_down_exps.weight",
+                "output.weight",
+            ]
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn scan_gguf_tensor_names_returns_none_on_bad_magic() {
+        let bytes = b"NOTG\x02\x00\x00\x00";
+        let path = write_bytes("mesh-client-gguf-names-bad", bytes);
+        assert!(scan_gguf_tensor_names(&path).is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn is_expert_tensor_name_recognises_canonical_moe_patterns() {
+        // Positive cases: every per-expert tensor name we've seen in
+        // upstream llama.cpp models. Mixtral / Qwen3-MoE / DeepSeek-V2.
+        for n in [
+            "blk.0.ffn_down_exps.weight",
+            "blk.7.ffn_up_exps.weight",
+            "blk.31.ffn_gate_exps.weight",
+            "blk.0.exp_probs_b.bias",
+        ] {
+            assert!(is_expert_tensor_name(n), "should be expert tensor: {n}");
+        }
+        // Negative cases: shared trunk tensors and the dense fallback
+        // FFN. These must NOT trigger the validation.
+        for n in [
+            "blk.0.attn_q.weight",
+            "blk.0.ffn_down.weight",
+            "output.weight",
+            "blk.0.shared_expert.ffn_down.weight",
+        ] {
+            assert!(!is_expert_tensor_name(n), "should NOT be expert: {n}");
+        }
     }
 
     #[test]
