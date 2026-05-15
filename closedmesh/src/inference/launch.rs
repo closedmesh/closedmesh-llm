@@ -880,6 +880,14 @@ fn compute_fit_target_mib(
     (target_bytes / (1024 * 1024)).max(1024)
 }
 
+fn fit_target_mib_for_launch(
+    has_rpc_workers: bool,
+    selected_gpu: Option<&crate::runtime::StartupPinnedGpuTarget>,
+    my_vram: u64,
+) -> Option<u64> {
+    (!has_rpc_workers).then(|| compute_fit_target_mib(selected_gpu, my_vram))
+}
+
 fn ensure_selected_gpu_capacity(
     selected_gpu: Option<&crate::runtime::StartupPinnedGpuTarget>,
     required_bytes: u64,
@@ -1493,17 +1501,21 @@ pub async fn start_llama_server(
     // count that fits the chosen device-memory target.
     //
     // `-fitt` (fit-target) is set to 70% of the pinned device's reported
-    // `vram_bytes`, which leaves headroom for KV cache, compute buffers,
-    // and the Apple-Silicon gap between our compound-RAM estimate and
-    // Metal's `recommendedMaxWorkingSetSize`. See `compute_fit_target_mib`.
-    let fit_target_mib = compute_fit_target_mib(selected_gpu, my_vram);
+    // `vram_bytes` for local launches, which leaves headroom for KV cache,
+    // compute buffers, and the Apple-Silicon gap between our compound-RAM
+    // estimate and Metal's `recommendedMaxWorkingSetSize`. See
+    // `compute_fit_target_mib`.
+    //
+    // Do not pass a host-derived fit target to RPC split launches: llama.cpp
+    // applies the single target to every remote device, so a 14 GB Mac host can
+    // accidentally require 9+ GB free on an 8 GB CUDA worker and make the whole
+    // launch impossible before the fitter can rebalance.
+    let fit_target_mib = fit_target_mib_for_launch(!tunnel_ports.is_empty(), selected_gpu, my_vram);
     args.extend_from_slice(&[
         "-fa".to_string(),
         "on".to_string(),
         "-fit".to_string(),
         "on".to_string(),
-        "-fitt".to_string(),
-        fit_target_mib.to_string(),
         "--no-mmap".to_string(),
         "--parallel".to_string(),
         slots.to_string(),
@@ -1538,6 +1550,10 @@ pub async fn start_llama_server(
         "--repeat-last-n".to_string(),
         "256".to_string(),
     ]);
+    if let Some(fit_target_mib) = fit_target_mib {
+        args.push("-fitt".to_string());
+        args.push(fit_target_mib.to_string());
+    }
 
     // Mesh hooks — tell llama-server where to call back.
     // Uses the management API port (default 3131) as the callback target.
@@ -2340,6 +2356,28 @@ No devices found
         let message = err.to_string();
         assert!(message.contains("uuid:GPU-small"));
         assert!(message.contains("selected device"));
+    }
+
+    #[test]
+    fn rpc_split_launch_does_not_apply_host_fit_target_to_workers() {
+        let pinned_gpu = crate::runtime::StartupPinnedGpuTarget {
+            index: 0,
+            stable_id: "metal:apple-m3-pro".into(),
+            backend_device: "MTL0".into(),
+            vram_bytes: 14_000_000_000,
+        };
+
+        assert_eq!(
+            super::fit_target_mib_for_launch(true, Some(&pinned_gpu), 14_000_000_000),
+            None
+        );
+        assert_eq!(
+            super::fit_target_mib_for_launch(false, Some(&pinned_gpu), 14_000_000_000),
+            Some(super::compute_fit_target_mib(
+                Some(&pinned_gpu),
+                14_000_000_000
+            ))
+        );
     }
 
     // ── SplitMode ──

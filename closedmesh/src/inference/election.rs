@@ -3602,8 +3602,10 @@ async fn start_llama(
         }
     }
 
-    // Calculate tensor split from VRAM.
-    // Device order: RPC workers first (matching --rpc order), then the local host device last.
+    // Calculate group VRAM from the planned cohort. Do not pass this as a
+    // fixed --tensor-split for RPC launches: remote free memory can change
+    // between gossip and llama.cpp's device probe, and a user-pinned split
+    // prevents the fitter from recovering.
     let my_vram_f = local_launch_vram as f64;
     let mut all_vrams: Vec<f64> = Vec::new();
     for id in &worker_ids {
@@ -3613,15 +3615,6 @@ async fn start_llama(
     }
     all_vrams.push(my_vram_f); // Host device is last
     let total: f64 = all_vrams.iter().sum();
-    let split = if total > 0.0 && !rpc_ports.is_empty() {
-        let s: Vec<String> = all_vrams
-            .iter()
-            .map(|v| format!("{:.2}", v / total))
-            .collect();
-        Some(s.join(","))
-    } else {
-        None
-    };
 
     // Launch on ephemeral port
     let llama_port = match find_free_port().await {
@@ -3655,7 +3648,7 @@ async fn start_llama(
             model,
             http_port: llama_port,
             tunnel_ports: &rpc_ports,
-            tensor_split: split.as_deref(),
+            tensor_split: None,
             // Row split only works for local multi-GPU — not over RPC.
             // When we have RPC workers, llama.cpp uses layer (pipeline) split.
             split_mode: if rpc_ports.is_empty() {
