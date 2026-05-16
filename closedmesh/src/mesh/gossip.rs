@@ -600,8 +600,20 @@ impl Node {
     /// Refreshes `last_mentioned` (not `last_seen`) so the peer survives pruning
     /// and gossip propagation as long as a bridge peer keeps mentioning it, but
     /// PeerDown silencing uses only `last_seen` (direct proof-of-life).
-    /// Does NOT trigger peer_change events for new transitive peers
-    /// (avoids re-election storms at scale).
+    ///
+    /// Tick semantics for `peer_change_tx`:
+    ///   * Existing transitive peer, serving changed → tick (election cares).
+    ///   * Existing transitive peer, RTT / VRAM / capability noise → no tick.
+    ///   * **New** transitive peer enters the active set → tick (added
+    ///     May 16 2026 — without this, an elected host could keep
+    ///     serving against a stale cohort view for up to one heartbeat
+    ///     round when a candidate worker arrived via gossip without
+    ///     also touching serving fields; Phase A3's stable-host re-eval
+    ///     timer is the backstop for any case the tick still misses).
+    ///
+    /// The `tokio::sync::watch` channel auto-coalesces concurrent sends,
+    /// so a single gossip wave that mentions N new transitive peers
+    /// only wakes downstream receivers once.
     pub(super) async fn update_transitive_peer(
         &self,
         id: EndpointId,
@@ -678,7 +690,9 @@ impl Node {
             peer.last_seen =
                 std::time::Instant::now() - std::time::Duration::from_secs(PEER_STALE_SECS * 2);
             state.peers.insert(id, peer.clone());
+            let count = state.peers.len();
             drop(state);
+            let _ = self.peer_change_tx.send(count);
             self.emit_plugin_mesh_event(
                 crate::plugin::proto::mesh_event::Kind::PeerUp,
                 Some(&peer),
