@@ -4410,6 +4410,98 @@ impl Node {
         Ok(())
     }
 
+    /// Force a fresh QUIC dial to a peer we already know about via gossip
+    /// but for which we hold no `state.connections` entry.
+    ///
+    /// `connect_to_peer` short-circuits whenever the peer is in
+    /// `state.peers` (regression-guarded by
+    /// `test_connect_to_peer_skips_known_peer_without_connection`) so a
+    /// transitive peer learned only from the entry node's gossip stays
+    /// permanently unreachable from this node — `open_tunnel_stream`
+    /// then fails with `No connection to ...`, the local TCP listener
+    /// drops the inbound rpc-server tunnel before HELLO completes, and
+    /// the pre-launch HELLO probe reports `UnexpectedEof`. The
+    /// May 16 2026 cluster reproduced this end-to-end: the vast.ai host
+    /// elected itself with three Mac workers it had never directly
+    /// dialled, every HELLO probe failed, election retried forever, the
+    /// 70B model never bound a port.
+    ///
+    /// This method dials with a short timeout and stores the connection
+    /// so subsequent `open_tunnel_stream` calls succeed. Returns Ok on
+    /// success, Err if the dial fails or the peer's addrs are empty.
+    pub async fn dial_for_split(
+        &self,
+        peer_id: EndpointId,
+        timeout: std::time::Duration,
+    ) -> Result<()> {
+        if peer_id == self.endpoint.id() {
+            return Ok(());
+        }
+        let (already_connected, peer_addr) = {
+            let state = self.state.lock().await;
+            let connected = state.connections.contains_key(&peer_id);
+            let addr = state.peers.get(&peer_id).map(|p| p.addr.clone());
+            (connected, addr)
+        };
+        if already_connected {
+            return Ok(());
+        }
+        let Some(addr) = peer_addr else {
+            anyhow::bail!("Peer {} unknown to this node", peer_id.fmt_short());
+        };
+        if addr.addrs.is_empty() {
+            anyhow::bail!(
+                "Peer {} has no advertised addrs to dial",
+                peer_id.fmt_short()
+            );
+        }
+        tracing::info!(
+            "Pre-dial: forcing QUIC connection to known peer {}",
+            peer_id.fmt_short()
+        );
+        let conn =
+            match tokio::time::timeout(timeout, connect_mesh(&self.endpoint, addr.clone())).await {
+                Ok(Ok(c)) => c,
+                Ok(Err(e)) => {
+                    anyhow::bail!("Dial to {} failed: {e}", peer_id.fmt_short());
+                }
+                Err(_) => {
+                    anyhow::bail!(
+                        "Dial to {} timed out after {:.1}s",
+                        peer_id.fmt_short(),
+                        timeout.as_secs_f64()
+                    );
+                }
+            };
+        {
+            let mut state = self.state.lock().await;
+            state.connections.insert(peer_id, conn.clone());
+        }
+        let node_for_dispatch = self.clone();
+        let conn_for_dispatch = conn.clone();
+        tokio::spawn(async move {
+            node_for_dispatch
+                .dispatch_streams(conn_for_dispatch, peer_id)
+                .await;
+        });
+        // Refresh peer info + RTT via gossip — fire and forget, the
+        // connection is what the launch path needs.
+        let node_for_gossip = self.clone();
+        let conn_for_gossip = conn.clone();
+        tokio::spawn(async move {
+            if let Err(e) = node_for_gossip
+                .initiate_gossip(conn_for_gossip, peer_id)
+                .await
+            {
+                tracing::debug!(
+                    "Post-pre-dial gossip with {} failed: {e}",
+                    peer_id.fmt_short()
+                );
+            }
+        });
+        Ok(())
+    }
+
     async fn handle_tunnel_map_stream(
         &self,
         remote: EndpointId,

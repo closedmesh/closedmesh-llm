@@ -3134,6 +3134,100 @@ async fn test_connect_to_peer_skips_known_peer_without_connection() -> Result<()
     Ok(())
 }
 
+/// `dial_for_split` is the explicit-dial counterpart to `connect_to_peer`.
+/// When the peer is already connected, it must return Ok without touching
+/// the network — the election launch flow calls it on every cohort member
+/// every cycle, so this path is hot.
+#[tokio::test]
+async fn dial_for_split_short_circuits_when_already_connected() -> Result<()> {
+    let node_a = make_test_node(super::NodeRole::Worker).await?;
+    let node_b = make_test_node(super::NodeRole::Worker).await?;
+
+    // Stand up a real QUIC connection by accepting on B and dialing from A.
+    node_b.start_accepting();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let addr_b = node_b.endpoint.addr();
+    node_a.connect_to_peer(addr_b).await?;
+
+    assert!(node_a
+        .state
+        .lock()
+        .await
+        .connections
+        .contains_key(&node_b.endpoint.id()));
+
+    let res = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        node_a.dial_for_split(node_b.endpoint.id(), std::time::Duration::from_secs(5)),
+    )
+    .await;
+    assert!(res.is_ok(), "dial_for_split must not block when connected");
+    res.unwrap()?;
+    Ok(())
+}
+
+/// The bug we're fixing: a peer learned only via gossip (in `state.peers`
+/// but not in `state.connections`) must be force-dialed by
+/// `dial_for_split` so subsequent `open_tunnel_stream` calls succeed.
+/// Without this, every RPC HELLO probe in the election launch path hits
+/// `UnexpectedEof` and the mesh deadlocks on host-step-aside loops.
+#[tokio::test]
+async fn dial_for_split_redials_transitive_peer_without_connection() -> Result<()> {
+    let node_a = make_test_node(super::NodeRole::Worker).await?;
+    let node_b = make_test_node(super::NodeRole::Worker).await?;
+    node_b.start_accepting();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let peer_b_id = node_b.endpoint.id();
+    let peer_b_addr = node_b.endpoint.addr();
+
+    // Simulate the transitive-discovery scenario: A knows B's address from
+    // gossip but has no QUIC connection to B.
+    {
+        let mut state = node_a.state.lock().await;
+        let mut peer = make_test_peer(peer_b_id, None, 16);
+        peer.addr = peer_b_addr.clone();
+        state.peers.insert(peer_b_id, peer);
+        assert!(!state.connections.contains_key(&peer_b_id));
+    }
+
+    node_a
+        .dial_for_split(peer_b_id, std::time::Duration::from_secs(5))
+        .await?;
+
+    assert!(
+        node_a
+            .state
+            .lock()
+            .await
+            .connections
+            .contains_key(&peer_b_id),
+        "dial_for_split must populate state.connections so open_tunnel_stream works"
+    );
+    Ok(())
+}
+
+/// A peer with no addrs is unreachable. `dial_for_split` must surface
+/// this as an error so the election launch path can drop the worker
+/// from the cohort instead of trying llama-server with a phantom RPC.
+#[tokio::test]
+async fn dial_for_split_errors_when_addrs_empty() -> Result<()> {
+    let node = make_test_node(super::NodeRole::Worker).await?;
+    let peer_key = SecretKey::generate();
+    let peer_id = EndpointId::from(peer_key.public());
+    {
+        let mut state = node.state.lock().await;
+        state
+            .peers
+            .insert(peer_id, make_test_peer(peer_id, None, 8));
+    }
+    let res = node
+        .dial_for_split(peer_id, std::time::Duration::from_millis(200))
+        .await;
+    assert!(res.is_err(), "empty-addrs peer must error, not hang");
+    Ok(())
+}
+
 #[test]
 fn config_sync_subscribe_snapshot_encode_decode() {
     use crate::proto::node::{ConfigSnapshotResponse, NodeConfigSnapshot, NodeGpuConfig};

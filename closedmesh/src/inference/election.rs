@@ -3477,6 +3477,64 @@ async fn start_llama(
         .await;
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
+        // Pre-dial workers: ensure a real iroh QUIC connection exists to
+        // every cohort member. Peers learned only transitively from the
+        // entry node's gossip have no `state.connections` entry; the
+        // outbound tunnel listener still accepts TCP, but
+        // `open_tunnel_stream` errors immediately, the TCP socket drops,
+        // and the pre-launch HELLO probe reports `UnexpectedEof` for
+        // every such worker (May 16 2026 vast.ai-host incident — a
+        // 12 GB cloud GPU elected itself as host for three Mac workers
+        // it had never directly dialled, every HELLO failed, the 70 B
+        // model never served). Forcing the dial here populates
+        // `state.connections` so the subsequent HELLO probe and
+        // llama-server `--rpc` connect both find a live QUIC channel.
+        let mut unreachable_workers: HashSet<iroh::EndpointId> = HashSet::new();
+        {
+            let dial_timeout = std::time::Duration::from_secs(8);
+            let mut dial_set = tokio::task::JoinSet::new();
+            for id in worker_ids.iter().copied() {
+                let node = node.clone();
+                dial_set.spawn(async move { (id, node.dial_for_split(id, dial_timeout).await) });
+            }
+            while let Some(joined) = dial_set.join_next().await {
+                if let Ok((id, res)) = joined {
+                    if let Err(e) = res {
+                        tracing::warn!("Pre-dial to {} failed: {e}", id.fmt_short());
+                        unreachable_workers.insert(id);
+                    }
+                }
+            }
+        }
+        if !unreachable_workers.is_empty() {
+            let dropped: Vec<String> = unreachable_workers
+                .iter()
+                .map(|id| id.fmt_short().to_string())
+                .collect();
+            emit_warning(
+                format!(
+                    "Dropping {} unreachable worker(s) from cohort (no QUIC path): {}",
+                    unreachable_workers.len(),
+                    dropped.join(", ")
+                ),
+                Some(format!("model={model_name}")),
+            );
+            worker_ids.retain(|id| !unreachable_workers.contains(id));
+            // If we lost every worker, give up this election cycle so
+            // the next runner-up gets a shot instead of launching solo
+            // against a model that doesn't fit on the host alone.
+            if worker_ids.is_empty() {
+                emit_warning(
+                    format!(
+                        "Aborting launch — every worker unreachable from this host \
+                         (model needs split mode, host fast-memory alone is insufficient)"
+                    ),
+                    Some(format!("model={model_name}")),
+                );
+                return None;
+            }
+        }
+
         // B2B tunnel map exchange
         let my_map = tunnel_mgr.peer_ports_map().await;
         let _ = node.broadcast_tunnel_map(my_map).await;
