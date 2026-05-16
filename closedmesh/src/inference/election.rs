@@ -459,6 +459,65 @@ fn rpc_ports_for_worker_ids(
         .collect()
 }
 
+fn replenish_worker_cohort_after_probe_failure(
+    model_name: &str,
+    model_peers: &[mesh::PeerInfo],
+    current_worker_ids: &[iroh::EndpointId],
+    current_rpc_ports: &[u16],
+    bad_ports: &HashSet<u16>,
+    all_ports: &HashMap<iroh::EndpointId, u16>,
+    local_launch_vram: u64,
+    model_bytes: u64,
+) -> (Vec<iroh::EndpointId>, Vec<u16>, u64) {
+    let mut worker_ids = Vec::new();
+    let mut rpc_ports = Vec::new();
+    let mut bad_worker_ids = HashSet::new();
+    let mut group_capacity = local_launch_vram;
+
+    for (id, port) in current_worker_ids.iter().zip(current_rpc_ports.iter()) {
+        if bad_ports.contains(port) {
+            bad_worker_ids.insert(*id);
+        } else {
+            worker_ids.push(*id);
+            rpc_ports.push(*port);
+            if let Some(peer) = model_peers.iter().find(|peer| peer.id == *id) {
+                group_capacity =
+                    group_capacity.saturating_add(split_peer_vram_bytes(peer, local_launch_vram));
+            }
+        }
+    }
+
+    let min_vram = (model_bytes as f64 * 1.1) as u64;
+    if group_capacity >= min_vram {
+        return (worker_ids, rpc_ports, group_capacity);
+    }
+
+    let mut candidates: Vec<_> = model_peers
+        .iter()
+        .filter(|p| matches!(p.role, NodeRole::Worker) || p.is_assigned_model(model_name))
+        .filter(|p| !matches!(p.role, NodeRole::Client))
+        .filter(|p| !matches!(p.rtt_ms, Some(rtt) if rtt > mesh::MAX_SPLIT_RTT_MS))
+        .filter(|p| !bad_worker_ids.contains(&p.id))
+        .filter(|p| !worker_ids.contains(&p.id))
+        .collect();
+    candidates.sort_by_key(|p| (p.rtt_ms.unwrap_or(u32::MAX), p.id));
+
+    for peer in candidates {
+        if group_capacity >= min_vram {
+            break;
+        }
+        let Some(port) = all_ports.get(&peer.id).copied() else {
+            continue;
+        };
+        worker_ids.push(peer.id);
+        rpc_ports.push(port);
+        group_capacity =
+            group_capacity.saturating_add(split_peer_vram_bytes(peer, local_launch_vram));
+    }
+
+    (worker_ids, rpc_ports, group_capacity)
+}
+
 /// The current state of llama-server as managed by the election loop.
 /// The API proxy reads this to know where to forward requests.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -3667,32 +3726,32 @@ async fn start_llama(
             // worker_ids and rpc_ports stay aligned because both lists
             // were built in the same order from the same launch_plan.
             let original_count = rpc_ports.len();
-            let kept: Vec<(iroh::EndpointId, u16)> = worker_ids
-                .iter()
-                .zip(rpc_ports.iter())
-                .filter(|(_, port)| !bad_ports.contains(port))
-                .map(|(id, port)| (*id, *port))
-                .collect();
-            let new_worker_ids: Vec<iroh::EndpointId> = kept.iter().map(|(id, _)| *id).collect();
-            let new_rpc_ports: Vec<u16> = kept.iter().map(|(_, port)| *port).collect();
-
-            // Recompute group capacity from the survivors plus the host.
-            let survivor_capacity: u64 = new_worker_ids
-                .iter()
-                .filter_map(|id| model_peers.iter().find(|p| &p.id == id))
-                .map(|peer| split_peer_vram_bytes(peer, local_launch_vram))
-                .sum();
-            let group_capacity = local_launch_vram.saturating_add(survivor_capacity);
+            let survivor_count = original_count.saturating_sub(bad.len());
+            let (new_worker_ids, new_rpc_ports, group_capacity) =
+                replenish_worker_cohort_after_probe_failure(
+                    model_name,
+                    model_peers,
+                    &worker_ids,
+                    &rpc_ports,
+                    &bad_ports,
+                    &all_ports,
+                    local_launch_vram,
+                    model_bytes,
+                );
+            let replacement_count = new_worker_ids.len().saturating_sub(survivor_count);
             let min_vram = (model_bytes as f64 * 1.1) as u64;
 
             if group_capacity >= min_vram && !new_worker_ids.is_empty() {
                 emit_warning(
                     format!(
-                        "Dropping {}/{} worker(s) from cohort after failed HELLO probe \
-                         ({}); proceeding with {} survivor(s) at {:.1}GB capacity",
+                        "Replacing cohort after {}/{} worker HELLO failure(s) ({}); \
+                         kept {} survivor(s), added {} replacement(s), proceeding with \
+                         {} worker(s) at {:.1}GB capacity",
                         bad.len(),
                         original_count,
                         bad.join(", "),
+                        survivor_count,
+                        replacement_count,
                         new_worker_ids.len(),
                         group_capacity as f64 / 1e9
                     ),
@@ -4623,6 +4682,45 @@ mod tests {
         assert!(
             rpc_ports_for_worker_ids(&complete, &[id_b, id_c]).is_none(),
             "launch must wait until every selected worker has a resolved RPC port"
+        );
+    }
+
+    #[test]
+    fn failed_hello_worker_is_replaced_when_spare_capacity_exists() {
+        let model = "dense";
+        let id_bad_fast = make_id(2);
+        let id_spare = make_id(3);
+        let id_tiny = make_id(4);
+        let peers = vec![
+            make_dense_peer(id_bad_fast, 30, Some(8), model),
+            make_dense_peer(id_spare, 20, Some(20), model),
+            make_dense_peer(id_tiny, 5, Some(30), model),
+        ];
+        let current_worker_ids = vec![id_bad_fast];
+        let current_rpc_ports = vec![9001];
+        let mut bad_ports = HashSet::new();
+        bad_ports.insert(9001);
+        let mut all_ports = HashMap::new();
+        all_ports.insert(id_bad_fast, 9001);
+        all_ports.insert(id_spare, 9002);
+        all_ports.insert(id_tiny, 9003);
+
+        let (worker_ids, rpc_ports, group_capacity) = replenish_worker_cohort_after_probe_failure(
+            model,
+            &peers,
+            &current_worker_ids,
+            &current_rpc_ports,
+            &bad_ports,
+            &all_ports,
+            50,
+            60,
+        );
+
+        assert_eq!(worker_ids, vec![id_spare]);
+        assert_eq!(rpc_ports, vec![9002]);
+        assert!(
+            group_capacity >= 66,
+            "replacement cohort must restore enough capacity to launch"
         );
     }
 
