@@ -305,7 +305,11 @@ async fn run_outbound_tunnel(node: Node, peer_id: EndpointId, listener: TcpListe
 /// is already marked dead we skip the broadcast (other in-flight
 /// tunnels would otherwise race to all signal death and spam
 /// `STREAM_PEER_DOWN` to every neighbour).
-async fn relay_outbound(node: Node, peer_id: EndpointId, tcp_stream: TcpStream) -> Result<()> {
+pub(crate) async fn relay_outbound(
+    node: Node,
+    peer_id: EndpointId,
+    tcp_stream: TcpStream,
+) -> Result<()> {
     tracing::info!("Opening tunnel stream to {}", peer_id.fmt_short());
     let (quic_send, quic_recv) = node.open_tunnel_stream(peer_id).await?;
     tracing::info!("Tunnel stream opened to {}", peer_id.fmt_short());

@@ -3228,6 +3228,103 @@ async fn dial_for_split_errors_when_addrs_empty() -> Result<()> {
     Ok(())
 }
 
+/// Death-signal primitive: `handle_peer_death` must remove the peer
+/// from the active set and flag it in `dead_peers` so the routing
+/// layer evicts on the next scan instead of waiting for the next
+/// heartbeat round (~60–90 s on default settings).
+#[tokio::test]
+async fn handle_peer_death_evicts_peer_and_marks_dead() -> Result<()> {
+    let node = make_test_node(super::NodeRole::Worker).await?;
+    let peer_key = SecretKey::generate();
+    let peer_id = EndpointId::from(peer_key.public());
+
+    {
+        let mut state = node.state.lock().await;
+        state
+            .peers
+            .insert(peer_id, make_test_peer(peer_id, Some(20), 16));
+    }
+    assert!(node.state.lock().await.peers.contains_key(&peer_id));
+    assert!(!node.is_peer_marked_dead(peer_id).await);
+
+    node.handle_peer_death(peer_id).await;
+
+    let state = node.state.lock().await;
+    assert!(
+        state.dead_peers.contains(&peer_id),
+        "peer must be flagged dead after handle_peer_death"
+    );
+    assert!(
+        !state.peers.contains_key(&peer_id),
+        "peer must be removed from the active set after handle_peer_death"
+    );
+    Ok(())
+}
+
+/// Debounce primitive: `is_peer_marked_dead` is what the tunnel relay
+/// path checks before each `handle_peer_death` call so racing in-flight
+/// tunnels (one per concurrent TCP connection through the same
+/// outbound tunnel) don't spam `STREAM_PEER_DOWN` broadcasts to every
+/// neighbour when a single worker vanishes.
+#[tokio::test]
+async fn is_peer_marked_dead_reflects_state_dead_peers() -> Result<()> {
+    let node = make_test_node(super::NodeRole::Worker).await?;
+    let peer_key = SecretKey::generate();
+    let peer_id = EndpointId::from(peer_key.public());
+
+    assert!(!node.is_peer_marked_dead(peer_id).await);
+
+    {
+        let mut state = node.state.lock().await;
+        state.dead_peers.insert(peer_id);
+    }
+    assert!(node.is_peer_marked_dead(peer_id).await);
+    Ok(())
+}
+
+/// Distinguishing the two relay-failure modes: when
+/// `open_tunnel_stream` itself fails (no live QUIC connection), the
+/// peer might just be transiently disconnected — the heartbeat /
+/// dispatcher / `dial_for_split` paths will recover them. We must
+/// NOT flag death here, otherwise we'd permanently evict any peer
+/// that gets temporarily isolated. The death signal is reserved for
+/// mid-stream QUIC errors (handled separately in `relay_outbound`).
+#[tokio::test]
+async fn relay_outbound_does_not_flag_death_when_open_tunnel_fails() -> Result<()> {
+    let node = make_test_node(super::NodeRole::Worker).await?;
+    let peer_key = SecretKey::generate();
+    let peer_id = EndpointId::from(peer_key.public());
+
+    {
+        let mut state = node.state.lock().await;
+        state
+            .peers
+            .insert(peer_id, make_test_peer(peer_id, Some(20), 16));
+        assert!(
+            !state.connections.contains_key(&peer_id),
+            "setup: peer must not have a live QUIC connection"
+        );
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let _client_handle = tokio::spawn(async move {
+        let _ = tokio::net::TcpStream::connect(addr).await;
+    });
+    let (server_side, _) = listener.accept().await?;
+
+    let res = crate::network::tunnel::relay_outbound(node.clone(), peer_id, server_side).await;
+    assert!(
+        res.is_err(),
+        "relay must fail when no live QUIC connection to peer exists"
+    );
+    assert!(
+        !node.is_peer_marked_dead(peer_id).await,
+        "open_tunnel_stream failure must NOT mark the peer dead"
+    );
+    Ok(())
+}
+
 #[test]
 fn config_sync_subscribe_snapshot_encode_decode() {
     use crate::proto::node::{ConfigSnapshotResponse, NodeConfigSnapshot, NodeGpuConfig};
