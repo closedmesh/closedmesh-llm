@@ -4645,10 +4645,8 @@ mod tests {
         // symlink at it, then delete the blob. `find_model_path` will
         // resolve to the symlink; `try_total_model_bytes` will fail.
         let dangling_repo = "unsloth/Qwen3-32B-GGUF";
-        let dangling_dir = cache_root.join(huggingface_repo_folder_name(
-            dangling_repo,
-            RepoType::Model,
-        ));
+        let dangling_dir =
+            cache_root.join(huggingface_repo_folder_name(dangling_repo, RepoType::Model));
         std::fs::create_dir_all(dangling_dir.join("refs")).unwrap();
         std::fs::write(dangling_dir.join("refs").join("main"), "dangling").unwrap();
         std::fs::create_dir_all(dangling_dir.join("blobs")).unwrap();
@@ -4673,16 +4671,14 @@ mod tests {
             cache_root.join(huggingface_repo_folder_name(sidecar_repo, RepoType::Model));
         std::fs::create_dir_all(sidecar_dir.join("refs")).unwrap();
         std::fs::write(sidecar_dir.join("refs").join("main"), "sidecar").unwrap();
-        let sidecar_snap =
-            huggingface_snapshot_path(sidecar_repo, RepoType::Model, "sidecar");
+        let sidecar_snap = huggingface_snapshot_path(sidecar_repo, RepoType::Model, "sidecar");
         std::fs::create_dir_all(&sidecar_snap).unwrap();
         let sidecar_path = sidecar_snap.join("Qwen3-14B-Q4_K_M.gguf");
         std::fs::write(&sidecar_path, vec![0u8; 754]).unwrap();
 
         // Fixture 3 — zero-byte file (download in progress, no bytes flushed).
         let empty_repo = "unsloth/Qwen3-8B-GGUF";
-        let empty_dir =
-            cache_root.join(huggingface_repo_folder_name(empty_repo, RepoType::Model));
+        let empty_dir = cache_root.join(huggingface_repo_folder_name(empty_repo, RepoType::Model));
         std::fs::create_dir_all(empty_dir.join("refs")).unwrap();
         std::fs::write(empty_dir.join("refs").join("main"), "empty").unwrap();
         let empty_snap = huggingface_snapshot_path(empty_repo, RepoType::Model, "empty");
@@ -4708,8 +4704,7 @@ mod tests {
             "Qwen3-0.6B-Q4_K_M".to_string(), // real
         ];
         let resolved_paths: Vec<PathBuf> = vec![]; // pure-stem case (config-driven)
-        let (servable, missing) =
-            partition_servable_declared_models(&declared, &resolved_paths);
+        let (servable, missing) = partition_servable_declared_models(&declared, &resolved_paths);
 
         assert_eq!(
             servable,
@@ -4791,8 +4786,7 @@ mod tests {
 
         let declared = vec!["MyCustom-Q4_K_M".to_string()];
         let resolved_paths = vec![explicit_path.clone()];
-        let (servable, missing) =
-            partition_servable_declared_models(&declared, &resolved_paths);
+        let (servable, missing) = partition_servable_declared_models(&declared, &resolved_paths);
 
         assert_eq!(
             servable,
@@ -4801,7 +4795,11 @@ mod tests {
              resolved_paths fallback; otherwise --model /abs/path.gguf is \
              broken for every user who doesn't have the file in the HF cache"
         );
-        assert!(missing.is_empty(), "expected no missing entries, got {:?}", missing);
+        assert!(
+            missing.is_empty(),
+            "expected no missing entries, got {:?}",
+            missing
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
         restore_env("HF_HUB_CACHE", prev_hub_cache);
