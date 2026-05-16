@@ -138,7 +138,7 @@ fn http_route_stats(
             continue;
         }
         node_count += 1;
-        mesh_vram_gb += peer.vram_bytes as f64 / 1e9;
+        mesh_vram_gb += peer.fast_memory_bytes() as f64 / 1e9;
         active_nodes.push(
             peer.hostname
                 .clone()
@@ -303,10 +303,10 @@ fn classify_peer_split_role(
     peer_ids.sort();
     peer_ids.dedup();
 
-    let total_group_vram_gb = (peer.vram_bytes as f64 / 1e9)
+    let total_group_vram_gb = (peer.fast_memory_bytes() as f64 / 1e9)
         + cohort
             .iter()
-            .map(|c| c.vram_bytes as f64 / 1e9)
+            .map(|c| c.fast_memory_bytes() as f64 / 1e9)
             .sum::<f64>();
 
     let host_id = host
@@ -410,9 +410,9 @@ fn classify_model_split_kind(
         my_vram_gb * 0.95 >= size_gb
     } else {
         false
-    } || all_peers
-        .iter()
-        .any(|p| p.routes_http_model(model_name) && (p.vram_bytes as f64 / 1e9) * 0.95 >= size_gb);
+    } || all_peers.iter().any(|p| {
+        p.routes_http_model(model_name) && (p.fast_memory_bytes() as f64 / 1e9) * 0.95 >= size_gb
+    });
 
     if single_peer_can_fit {
         "multi_host".to_string()
@@ -459,7 +459,7 @@ fn compute_mesh_fit(size_gb: f64, my_vram_gb: f64, all_peers: &[mesh::PeerInfo])
         {
             continue;
         }
-        let peer_vram_gb = peer.vram_bytes as f64 / 1e9;
+        let peer_vram_gb = peer.fast_memory_bytes() as f64 / 1e9;
         if peer_vram_gb <= 0.0 {
             continue;
         }
@@ -560,7 +560,7 @@ fn classify_local_split_role(
     let total_group_vram_gb = my_vram_gb
         + cohort
             .iter()
-            .map(|c| c.vram_bytes as f64 / 1e9)
+            .map(|c| c.fast_memory_bytes() as f64 / 1e9)
             .sum::<f64>();
 
     // Determine host: prefer an existing peer with Host role for this model,
@@ -947,7 +947,7 @@ impl MeshApi {
             let inner = self.inner.lock().await;
             (
                 inner.node.clone(),
-                inner.node.vram_bytes() as f64 / 1e9,
+                inner.node.fast_memory_bytes() as f64 / 1e9,
                 inner.model_name.clone(),
                 inner.model_size_bytes,
                 inner.local_processes.clone(),
@@ -1415,7 +1415,7 @@ impl MeshApi {
                 inner.node.clone(),
                 inner.node.id().fmt_short().to_string(),
                 inner.node.invite_token(),
-                inner.node.vram_bytes() as f64 / 1e9,
+                inner.node.fast_memory_bytes() as f64 / 1e9,
                 inner.node.inflight_requests(),
                 inner.affinity_router.stats_snapshot(),
                 // `/api/status` exposes the current node's bounded routing
@@ -1512,7 +1512,7 @@ impl MeshApi {
                     models: p.models.clone(),
                     available_models: p.available_models.clone(),
                     requested_models: p.requested_models.clone(),
-                    vram_gb: p.vram_bytes as f64 / 1e9,
+                    vram_gb: p.fast_memory_bytes() as f64 / 1e9,
                     serving_models: p.serving_models.clone(),
                     hosted_models: p.hosted_models.clone(),
                     hosted_models_known: p.hosted_models_known,
@@ -2314,6 +2314,21 @@ mod tests {
         let fit = compute_mesh_fit(200.0, 8.0, &[small_peer]);
         assert!(!fit.fits_on_largest_node);
         assert!(!fit.fits_pooled);
+    }
+
+    #[test]
+    fn compute_mesh_fit_uses_fast_memory_not_inflated_advertised_bytes() {
+        let mut inflated_peer = make_test_peer(13, mesh::NodeRole::Worker, vec![], vec![], true);
+        inflated_peer.vram_bytes = 106_000_000_000;
+        inflated_peer.capability.vram_total_mb = 16 * 1024;
+
+        // 40 GB needs 44 GB with headroom. Local 12 GB + the peer's real
+        // 16 GiB GPU budget is short, even though its legacy vram_bytes field
+        // is inflated by host-RAM offload and would otherwise claim 118 GB.
+        let fit = compute_mesh_fit(40.0, 12.0, &[inflated_peer]);
+        assert!(!fit.fits_on_largest_node);
+        assert!(!fit.fits_pooled);
+        assert!(fit.pooled_vram_gb < fit.needed_vram_gb);
     }
 
     #[test]
