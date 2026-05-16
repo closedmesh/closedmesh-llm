@@ -636,6 +636,14 @@ impl Node {
     }
 
     /// Handle a peer death: remove from state, broadcast to all other peers.
+    /// Lightweight check: has this peer already been flagged as dead?
+    /// Callers (e.g. multiple in-flight tunnels racing on a worker
+    /// vanish) use this to avoid spamming `STREAM_PEER_DOWN`
+    /// broadcasts when one death signal is enough.
+    pub async fn is_peer_marked_dead(&self, peer_id: EndpointId) -> bool {
+        self.state.lock().await.dead_peers.contains(&peer_id)
+    }
+
     pub async fn handle_peer_death(&self, dead_id: EndpointId) {
         super::emit_mesh_warning(format!(
             "⚠️  Peer {} died — removing and broadcasting",

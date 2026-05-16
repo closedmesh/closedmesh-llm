@@ -282,13 +282,46 @@ async fn run_outbound_tunnel(node: Node, peer_id: EndpointId, listener: TcpListe
 }
 
 /// Relay a single outbound TCP connection through a QUIC bi-stream.
+///
+/// Two distinct failure modes, treated differently:
+///
+///   1. **`open_tunnel_stream` fails.** No live QUIC connection exists.
+///      The peer might just be transiently disconnected; dispatcher
+///      reconnect, heartbeat, or `dial_for_split` may recover it.
+///      We *do not* flag the peer as dead — letting the rest of the
+///      mesh keep them as a candidate.
+///   2. **Mid-stream QUIC error after the bi-stream opened.** The
+///      connection was healthy enough to negotiate but then died.
+///      That's a strong signal the worker process is gone (machine
+///      off, network drop, app exit, llama-server crash). Before
+///      this fix the runtime would only notice on the next heartbeat
+///      round (up to ~90 s for default `2 × 60 s` settings), during
+///      which the elected host kept routing inference requests to a
+///      dead peer and 503'ing. We now call `handle_peer_death` so
+///      eviction lands in seconds and the next election cycle has a
+///      correct cohort view.
+///
+/// The death signal is debounced via `state.dead_peers`: if the peer
+/// is already marked dead we skip the broadcast (other in-flight
+/// tunnels would otherwise race to all signal death and spam
+/// `STREAM_PEER_DOWN` to every neighbour).
 async fn relay_outbound(node: Node, peer_id: EndpointId, tcp_stream: TcpStream) -> Result<()> {
     tracing::info!("Opening tunnel stream to {}", peer_id.fmt_short());
     let (quic_send, quic_recv) = node.open_tunnel_stream(peer_id).await?;
     tracing::info!("Tunnel stream opened to {}", peer_id.fmt_short());
 
     let (tcp_read, tcp_write) = tokio::io::split(tcp_stream);
-    relay_bidirectional(tcp_read, tcp_write, quic_send, quic_recv).await
+    let result = relay_bidirectional(tcp_read, tcp_write, quic_send, quic_recv).await;
+    if let Err(e) = &result {
+        if !node.is_peer_marked_dead(peer_id).await {
+            tracing::warn!(
+                "Outbound relay to {} died mid-stream: {e} — flagging peer death",
+                peer_id.fmt_short()
+            );
+            node.handle_peer_death(peer_id).await;
+        }
+    }
+    result
 }
 
 /// Handle an inbound tunnel bi-stream: connect to local rpc-server and relay.
