@@ -471,12 +471,15 @@ fn replenish_worker_cohort_after_probe_failure(
 ) -> (Vec<iroh::EndpointId>, Vec<u16>, u64) {
     let mut worker_ids = Vec::new();
     let mut rpc_ports = Vec::new();
-    let mut bad_worker_ids = HashSet::new();
+    let bad_worker_ids: HashSet<_> = all_ports
+        .iter()
+        .filter_map(|(id, port)| bad_ports.contains(port).then_some(*id))
+        .collect();
     let mut group_capacity = local_launch_vram;
 
     for (id, port) in current_worker_ids.iter().zip(current_rpc_ports.iter()) {
         if bad_ports.contains(port) {
-            bad_worker_ids.insert(*id);
+            continue;
         } else {
             worker_ids.push(*id);
             rpc_ports.push(*port);
@@ -509,6 +512,9 @@ fn replenish_worker_cohort_after_probe_failure(
         let Some(port) = all_ports.get(&peer.id).copied() else {
             continue;
         };
+        if bad_ports.contains(&port) {
+            continue;
+        }
         worker_ids.push(peer.id);
         rpc_ports.push(port);
         group_capacity =
@@ -3725,11 +3731,13 @@ async fn start_llama(
     // because every host candidate tried to include it for capacity.
     // Dropping the silent peer keeps the model serving on the reachable
     // 3-of-4 cohort while the broken peer recovers on its own schedule.
+    let mut launch_bad_ports = HashSet::new();
     while !rpc_ports.is_empty() {
         let (bad, bad_ports) = probe_rpc_ports(&rpc_ports).await;
         if bad.is_empty() {
             break;
         }
+        launch_bad_ports.extend(bad_ports);
 
         // Filter cohort down to workers whose probe was healthy.
         // worker_ids and rpc_ports stay aligned because both lists
@@ -3742,7 +3750,7 @@ async fn start_llama(
                 model_peers,
                 &worker_ids,
                 &rpc_ports,
-                &bad_ports,
+                &launch_bad_ports,
                 &all_ports,
                 local_launch_vram,
                 model_bytes,
@@ -4744,6 +4752,43 @@ mod tests {
             group_capacity >= 66,
             "replacement cohort must restore enough capacity to launch"
         );
+    }
+
+    #[test]
+    fn failed_hello_replacement_does_not_readd_previously_failed_port() {
+        let model = "dense";
+        let id_bad_a = make_id(2);
+        let id_bad_b = make_id(3);
+        let peers = vec![
+            make_dense_peer(id_bad_a, 30, Some(8), model),
+            make_dense_peer(id_bad_b, 30, Some(20), model),
+        ];
+        let current_worker_ids = vec![id_bad_b];
+        let current_rpc_ports = vec![9002];
+        let mut bad_ports = HashSet::new();
+        bad_ports.insert(9001);
+        bad_ports.insert(9002);
+        let mut all_ports = HashMap::new();
+        all_ports.insert(id_bad_a, 9001);
+        all_ports.insert(id_bad_b, 9002);
+
+        let (worker_ids, rpc_ports, group_capacity) = replenish_worker_cohort_after_probe_failure(
+            model,
+            &peers,
+            &current_worker_ids,
+            &current_rpc_ports,
+            &bad_ports,
+            &all_ports,
+            50,
+            60,
+        );
+
+        assert!(
+            worker_ids.is_empty(),
+            "a worker that failed an earlier HELLO probe in this launch attempt must stay excluded"
+        );
+        assert!(rpc_ports.is_empty());
+        assert_eq!(group_capacity, 50);
     }
 
     // ── Shard index computation ──
