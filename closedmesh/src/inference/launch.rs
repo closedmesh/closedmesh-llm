@@ -1510,10 +1510,17 @@ pub async fn start_llama_server(
     // applies the single target to every remote device, so a 14 GB Mac host can
     // accidentally require 9+ GB free on an 8 GB CUDA worker and make the whole
     // launch impossible before the fitter can rebalance.
-    let fit_target_mib = fit_target_mib_for_launch(!tunnel_ports.is_empty(), selected_gpu, my_vram);
+    let is_rpc_split = !tunnel_ports.is_empty();
+    let fit_target_mib = fit_target_mib_for_launch(is_rpc_split, selected_gpu, my_vram);
+    if is_rpc_split {
+        tracing::info!(
+            "RPC split launch detected; leaving Flash Attention and KV-cache quantization off \
+             because rpc-server Metal workers can abort on FLASH_ATTN_EXT"
+        );
+    } else {
+        args.extend_from_slice(&["-fa".to_string(), "on".to_string()]);
+    }
     args.extend_from_slice(&[
-        "-fa".to_string(),
-        "on".to_string(),
         "-fit".to_string(),
         "on".to_string(),
         "--no-mmap".to_string(),
@@ -1598,7 +1605,9 @@ pub async fn start_llama_server(
     // closed upstream and our fork is rebased past the fixes, remove the
     // corresponding KvCacheWarning variants, the build assertion, and this
     // caveat block.
-    KvCacheQuant::for_model_size(model_bytes).append_args(&mut args, model_bytes);
+    if !is_rpc_split {
+        KvCacheQuant::for_model_size(model_bytes).append_args(&mut args, model_bytes);
+    }
     if let Some(ts) = tensor_split {
         args.push("--tensor-split".to_string());
         args.push(ts.to_string());
