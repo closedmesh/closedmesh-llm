@@ -545,6 +545,19 @@ pub(crate) enum KvCacheWarning {
     QuantizedVBreaksMetalFaFallback,
 }
 
+/// Build the `-fa` arguments for a llama-server launch.
+///
+/// llama.cpp defaults `-fa` to `auto`, which on a Metal host resolves to
+/// "enabled" and then dispatches `FLASH_ATTN_EXT` ops via RPC to every worker
+/// including Metal `rpc-server` instances that do not implement that op and
+/// abort on it. We therefore force `-fa off` on every RPC split launch, and
+/// keep `-fa on` for solo launches where the host runs the FA op locally on
+/// hardware that supports it.
+pub(crate) fn flash_attention_args(is_rpc_split: bool) -> [String; 2] {
+    let mode = if is_rpc_split { "off" } else { "on" };
+    ["-fa".to_string(), mode.to_string()]
+}
+
 impl KvCacheQuant {
     /// Thresholds in bytes for the tier boundaries below. Named constants so
     /// the tests can assert exact boundary behavior.
@@ -1512,13 +1525,12 @@ pub async fn start_llama_server(
     // launch impossible before the fitter can rebalance.
     let is_rpc_split = !tunnel_ports.is_empty();
     let fit_target_mib = fit_target_mib_for_launch(is_rpc_split, selected_gpu, my_vram);
+    args.extend_from_slice(&flash_attention_args(is_rpc_split));
     if is_rpc_split {
         tracing::info!(
-            "RPC split launch detected; leaving Flash Attention and KV-cache quantization off \
+            "RPC split launch detected; forcing -fa off and skipping KV-cache quantization \
              because rpc-server Metal workers can abort on FLASH_ATTN_EXT"
         );
-    } else {
-        args.extend_from_slice(&["-fa".to_string(), "on".to_string()]);
     }
     args.extend_from_slice(&[
         "-fit".to_string(),
@@ -2009,13 +2021,28 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_context_size, is_safe_kill_target, model_label, parse_available_devices,
-        preferred_device, terminate_process, wait_for_exit, BinaryFlavor, KvCacheQuant,
-        KvCacheWarning, KvType, RpcServerHandle, SplitMode, GB,
+        compute_context_size, flash_attention_args, is_safe_kill_target, model_label,
+        parse_available_devices, preferred_device, terminate_process, wait_for_exit, BinaryFlavor,
+        KvCacheQuant, KvCacheWarning, KvType, RpcServerHandle, SplitMode, GB,
     };
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+
+    #[test]
+    fn flash_attention_args_force_off_for_rpc_split_launches() {
+        assert_eq!(
+            flash_attention_args(true),
+            ["-fa".to_string(), "off".to_string()],
+            "RPC split launches must pass -fa off explicitly; relying on llama.cpp's `-fa auto` \
+             default re-enables FLASH_ATTN_EXT on Metal hosts and aborts the Metal rpc-server"
+        );
+        assert_eq!(
+            flash_attention_args(false),
+            ["-fa".to_string(), "on".to_string()],
+            "solo launches must keep -fa on so single-host inference uses Flash Attention"
+        );
+    }
 
     #[test]
     fn kv_quant_small_model_is_plain_f16() {

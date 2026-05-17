@@ -524,7 +524,10 @@ fn replenish_worker_cohort_after_probe_failure(
     (worker_ids, rpc_ports, group_capacity)
 }
 
-async fn probe_rpc_ports(rpc_ports: &[u16]) -> (Vec<String>, HashSet<u16>) {
+async fn probe_rpc_ports(
+    rpc_ports: &[u16],
+    port_to_peer: &HashMap<u16, iroh::EndpointId>,
+) -> (Vec<String>, HashSet<u16>) {
     let mut probe_set = tokio::task::JoinSet::new();
     for port in rpc_ports {
         let port = *port;
@@ -544,12 +547,32 @@ async fn probe_rpc_ports(rpc_ports: &[u16]) -> (Vec<String>, HashSet<u16>) {
     while let Some(joined) = probe_set.join_next().await {
         if let Ok((port, outcome)) = joined {
             if !outcome.is_healthy() {
-                bad.push(format!("127.0.0.1:{port} ({outcome:?})"));
+                bad.push(format_probe_failure(
+                    port,
+                    port_to_peer.get(&port),
+                    &outcome,
+                ));
                 bad_ports.insert(port);
             }
         }
     }
     (bad, bad_ports)
+}
+
+/// Format a single failed HELLO probe so the dashboard warning names the
+/// remote peer whose rpc-server is the actual bottleneck instead of just the
+/// opaque local tunnel port. The endpoint short id is what every other event
+/// in the runtime uses, so users can cross-reference it against the status
+/// page peer list.
+fn format_probe_failure(
+    port: u16,
+    peer_id: Option<&iroh::EndpointId>,
+    outcome: &crate::network::rpc_probe::ProbeOutcome,
+) -> String {
+    match peer_id {
+        Some(id) => format!("peer {} (127.0.0.1:{port}) ({outcome:?})", id.fmt_short()),
+        None => format!("127.0.0.1:{port} ({outcome:?})"),
+    }
 }
 
 /// The current state of llama-server as managed by the election loop.
@@ -3731,9 +3754,11 @@ async fn start_llama(
     // because every host candidate tried to include it for capacity.
     // Dropping the silent peer keeps the model serving on the reachable
     // 3-of-4 cohort while the broken peer recovers on its own schedule.
+    let port_to_peer: HashMap<u16, iroh::EndpointId> =
+        all_ports.iter().map(|(id, port)| (*port, *id)).collect();
     let mut launch_bad_ports = HashSet::new();
     while !rpc_ports.is_empty() {
-        let (bad, bad_ports) = probe_rpc_ports(&rpc_ports).await;
+        let (bad, bad_ports) = probe_rpc_ports(&rpc_ports, &port_to_peer).await;
         if bad.is_empty() {
             break;
         }
@@ -4789,6 +4814,27 @@ mod tests {
         );
         assert!(rpc_ports.is_empty());
         assert_eq!(group_capacity, 50);
+    }
+
+    #[test]
+    fn probe_failure_warning_names_remote_peer_when_known() {
+        let peer = make_id(7);
+        let outcome = crate::network::rpc_probe::ProbeOutcome::Timeout;
+        let with_peer = super::format_probe_failure(51857, Some(&peer), &outcome);
+        assert!(
+            with_peer.contains(&peer.fmt_short().to_string()),
+            "warning must include the remote peer short id so the dashboard says which \
+             peer's rpc-server is unreachable, not just an opaque local port (got: {with_peer:?})"
+        );
+        assert!(
+            with_peer.contains("Timeout"),
+            "warning must still include the probe outcome variant (got: {with_peer:?})"
+        );
+        let no_peer = super::format_probe_failure(51857, None, &outcome);
+        assert_eq!(
+            no_peer, "127.0.0.1:51857 (Timeout)",
+            "fall back to the local port format when the port-to-peer mapping is missing"
+        );
     }
 
     // ── Shard index computation ──
