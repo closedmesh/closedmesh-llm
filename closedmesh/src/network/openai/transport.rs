@@ -1564,16 +1564,37 @@ pub(crate) async fn relay_with_metrics(
     let ttft = first_byte_at.duration_since(request_committed_at);
     let result =
         relay_probed_response(downstream, upstream, probe, false, ResponseAdapter::None).await;
-    if let Ok(RouteAttemptResult::Delivered {
-        status_code: code,
-        completion_tokens: Some(tokens),
-    }) = result
-    {
-        if (200..300).contains(&code) && tokens > 0 {
-            let decode_duration = first_byte_at.elapsed();
-            node.record_local_inference_completion(model, ttft, decode_duration, tokens);
+    // v0.66.44 diagnostic: always log one structured line per served
+    // request so we can grep desktop-app logs to verify the metric hook
+    // path. v0.66.43 deployed the hook but production metrics stayed
+    // empty — we couldn't tell from outside whether the hook was firing
+    // at all, the model was None, or `completion_tokens` was None.
+    // Dropped to `debug!` once we've confirmed the path is live.
+    let (status_code, completion_tokens, recorded) = match &result {
+        Ok(RouteAttemptResult::Delivered {
+            status_code: code,
+            completion_tokens,
+        }) => {
+            let mut recorded = false;
+            if let Some(tokens) = completion_tokens {
+                if (200..300).contains(code) && *tokens > 0 {
+                    let decode_duration = first_byte_at.elapsed();
+                    node.record_local_inference_completion(model, ttft, decode_duration, *tokens);
+                    recorded = true;
+                }
+            }
+            (Some(*code), *completion_tokens, recorded)
         }
-    }
+        _ => (None, None, false),
+    };
+    tracing::info!(
+        model = ?model,
+        status_code = ?status_code,
+        completion_tokens = ?completion_tokens,
+        ttft_ms = ttft.as_millis() as u64,
+        recorded,
+        "backend_proxy.relay_with_metrics complete"
+    );
     Ok(())
 }
 

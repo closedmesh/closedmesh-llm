@@ -132,6 +132,17 @@ async fn handle_connection(mut stream: TcpStream, llama_port: u16, node: Node) -
         }
     };
     let model = request.model_name.clone();
+    // v0.66.44 diagnostic: log every accepted request so we can confirm
+    // the backend proxy is on the hot path for tunnel-relayed inference.
+    // Paired with `backend_proxy.relay_with_metrics complete` in
+    // transport.rs so a single grep can reconstruct the full request
+    // lifecycle. Dropped to `debug!` once we've confirmed the path.
+    tracing::info!(
+        path = %request.path,
+        model = ?model,
+        body_len = request.body_len_bytes,
+        "backend_proxy.handle_connection accepted"
+    );
 
     let mut upstream = match TcpStream::connect(format!("127.0.0.1:{llama_port}")).await {
         Ok(stream) => stream,
