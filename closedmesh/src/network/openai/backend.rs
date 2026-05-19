@@ -132,16 +132,14 @@ async fn handle_connection(mut stream: TcpStream, llama_port: u16, node: Node) -
         }
     };
     let model = request.model_name.clone();
-    // v0.66.45 diagnostic: log every accepted request so we can confirm
-    // the backend proxy is on the hot path for tunnel-relayed inference.
-    // Paired with `backend_proxy.relay_with_metrics complete` in
-    // transport.rs so a single grep can reconstruct the full request
-    // lifecycle. Emitted at `warn!` (not `info!`) because the default
-    // `EnvFilter` in `runtime/mod.rs` only enables INFO for
-    // `mesh_inference`, so v0.66.44's `info!` calls were silently
-    // dropped on every released runtime — including LYU's. Removed (or
-    // dropped to `debug!`) once we've confirmed the path is live.
-    tracing::warn!(
+    // Diagnostic for the backend-proxy hot path. Kept at `debug!` because
+    // the runtime's default `EnvFilter` (`runtime/mod.rs`) does not enable
+    // INFO/WARN for the `closedmesh` crate, so anything higher than DEBUG
+    // here would silently bypass `stderr.log` anyway. v0.66.45's WARN
+    // attempt taught us that — confirmed via `measured_tps_p50_by_model`
+    // populating on the local `/api/status` without any matching log line.
+    // To re-enable in production, set `RUST_LOG=closedmesh::network::openai::backend=debug`.
+    tracing::debug!(
         path = %request.path,
         model = ?model,
         body_len = request.body_len_bytes,

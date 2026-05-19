@@ -120,6 +120,13 @@ pub(super) fn apply_transitive_ann(
     if ann.experts_summary.is_some() {
         existing.experts_summary = ann.experts_summary.clone();
     }
+    // Refresh measured per-model TPS/TTFT for transitively-learned peers too.
+    // Same rationale as the direct-peer `add_peer` branch (see comment there):
+    // empty != "measured zero", and the source-of-truth is whoever produced
+    // the announcement, so always overwrite from the latest. Without this,
+    // metrics from a host learned through a relay would never reach
+    // `/api/status` on the entry node, which is the dashboard's only feed.
+    existing.model_timings = ann.model_timings.clone();
     serving_changed
 }
 
@@ -531,6 +538,14 @@ impl Node {
                     &existing.serving_models,
                 );
             }
+            // Refresh measured per-model TPS/TTFT from the latest announcement.
+            // Pre-v0.66.46 this assignment was missing, so the field stayed at
+            // whatever it was at first `PeerInfo::from_announcement` — which is
+            // empty for every peer that joins before serving its first request.
+            // That was the reason `measured_tps_p50_by_model` never populated
+            // on `closedmesh.com/status` even after the metric collection hook
+            // was confirmed working end-to-end on the host side.
+            existing.model_timings = ann.model_timings.clone();
             let updated_peer = existing.clone();
             let changed = peer_meaningfully_changed(&old_peer, &updated_peer)
                 || old_peer.gpu_name != updated_peer.gpu_name
@@ -983,6 +998,47 @@ mod tests {
         apply_transitive_ann(&mut existing, &test_addr(0x33), &ann);
 
         assert_eq!(existing.first_joined_mesh_ts, Some(100));
+    }
+
+    /// Regression for v0.66.46: before this fix, `apply_transitive_ann`
+    /// silently skipped `model_timings`, so a peer's measured TPS/TTFT
+    /// never propagated past its first announcement. Result: the entry
+    /// node's `/api/status` (the dashboard's only feed) always showed
+    /// `measured_tps_p50_by_model: {}` for every host, even when local
+    /// `/api/status` on the host itself reported real samples. We assert
+    /// here that the latest announcement always wins, including the
+    /// transition from "some samples" back to empty (matters because
+    /// the snapshot is omitted when no recent samples exist, and we
+    /// don't want stale timings lingering in the UI).
+    #[test]
+    fn test_apply_transitive_ann_refreshes_model_timings() {
+        let mut existing = test_peer(Some(100));
+        existing.model_timings = vec![crate::mesh::ModelTimingEntry {
+            model: "stale-model".to_string(),
+            measured_tps_p50: 1.0,
+            measured_ttft_ms_p50: 1,
+            samples_in_window: 1,
+        }];
+
+        let mut ann = test_announcement(Some(100));
+        ann.model_timings = vec![crate::mesh::ModelTimingEntry {
+            model: "Qwen3-32B-Q4_K_M".to_string(),
+            measured_tps_p50: 12.5,
+            measured_ttft_ms_p50: 850,
+            samples_in_window: 4,
+        }];
+
+        apply_transitive_ann(&mut existing, &test_addr(0x33), &ann);
+
+        assert_eq!(existing.model_timings.len(), 1);
+        assert_eq!(existing.model_timings[0].model, "Qwen3-32B-Q4_K_M");
+        assert!((existing.model_timings[0].measured_tps_p50 - 12.5).abs() < 1e-9);
+        assert_eq!(existing.model_timings[0].measured_ttft_ms_p50, 850);
+
+        // Now go back to empty (window expired) — must overwrite, not retain.
+        ann.model_timings = vec![];
+        apply_transitive_ann(&mut existing, &test_addr(0x33), &ann);
+        assert!(existing.model_timings.is_empty());
     }
 
     #[test]
