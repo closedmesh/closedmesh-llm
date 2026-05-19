@@ -132,12 +132,16 @@ async fn handle_connection(mut stream: TcpStream, llama_port: u16, node: Node) -
         }
     };
     let model = request.model_name.clone();
-    // v0.66.44 diagnostic: log every accepted request so we can confirm
+    // v0.66.45 diagnostic: log every accepted request so we can confirm
     // the backend proxy is on the hot path for tunnel-relayed inference.
     // Paired with `backend_proxy.relay_with_metrics complete` in
     // transport.rs so a single grep can reconstruct the full request
-    // lifecycle. Dropped to `debug!` once we've confirmed the path.
-    tracing::info!(
+    // lifecycle. Emitted at `warn!` (not `info!`) because the default
+    // `EnvFilter` in `runtime/mod.rs` only enables INFO for
+    // `mesh_inference`, so v0.66.44's `info!` calls were silently
+    // dropped on every released runtime — including LYU's. Removed (or
+    // dropped to `debug!`) once we've confirmed the path is live.
+    tracing::warn!(
         path = %request.path,
         model = ?model,
         body_len = request.body_len_bytes,

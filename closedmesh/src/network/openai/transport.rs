@@ -1564,12 +1564,16 @@ pub(crate) async fn relay_with_metrics(
     let ttft = first_byte_at.duration_since(request_committed_at);
     let result =
         relay_probed_response(downstream, upstream, probe, false, ResponseAdapter::None).await;
-    // v0.66.44 diagnostic: always log one structured line per served
+    // v0.66.45 diagnostic: always log one structured line per served
     // request so we can grep desktop-app logs to verify the metric hook
     // path. v0.66.43 deployed the hook but production metrics stayed
     // empty — we couldn't tell from outside whether the hook was firing
     // at all, the model was None, or `completion_tokens` was None.
-    // Dropped to `debug!` once we've confirmed the path is live.
+    // Emitted at `warn!` (not `info!`) because the default `EnvFilter`
+    // in `runtime/mod.rs` only enables INFO for `mesh_inference`, so
+    // v0.66.44's `info!` calls were silently dropped on every released
+    // runtime — including LYU's. Removed (or dropped to `debug!`) once
+    // we've confirmed the path is live.
     let (status_code, completion_tokens, recorded) = match &result {
         Ok(RouteAttemptResult::Delivered {
             status_code: code,
@@ -1587,7 +1591,7 @@ pub(crate) async fn relay_with_metrics(
         }
         _ => (None, None, false),
     };
-    tracing::info!(
+    tracing::warn!(
         model = ?model,
         status_code = ?status_code,
         completion_tokens = ?completion_tokens,
