@@ -918,22 +918,42 @@ fn selected_backend_device(
 }
 
 /// Compute the per-device memory target (in MiB) that we hand to llama.cpp's
-/// `-fitt` flag. llama.cpp uses this as the ceiling when `-fit on` is auto-
-/// picking how many layers to offload to GPU.
+/// `-fitt` flag.
 ///
-/// We intentionally undershoot the raw `vram_bytes` figure for two reasons:
+/// **Semantics correction (v0.66.51, May 20 2026).** Previously this function
+/// returned `0.7 * device_vram` and a docstring claimed the value was the
+/// "ceiling on llama.cpp's GPU usage" / "headroom for KV cache". That was
+/// inverted. From `llama-server --help`:
 ///
-/// 1. KV cache, compute buffers, and decode-time command buffers all live on
-///    the same device and aren't accounted for in `vram_bytes`. Without
-///    headroom, Metal hits `kIOGPUCommandBufferCallbackErrorOutOfMemory` at
-///    first decode and CUDA hits `cudaMalloc OOM` during slot allocation.
-/// 2. On Apple Silicon, our `vram_bytes` is derived from system RAM (the GPU
-///    has unified memory), but the actual usable Metal working set is
-///    Metal's `recommendedMaxWorkingSetSize` — typically ~12 GiB on an
-///    M3 Pro 18 GB, well below the 13.5 GiB our compound estimate would
-///    suggest. A 30% reserve covers both this Apple-specific gap and the
-///    KV/compute headroom, without leaving so much VRAM idle that small
-///    models pay a meaningful CPU-overflow tax.
+/// > `-fitt, --fit-target MiB0,MiB1,…  target margin per device for --fit,
+/// > comma-separated list of values, single value is broadcast across all
+/// > devices, default: 1024`
+///
+/// `-fitt N` is the amount of memory the fitter must **leave free** on the
+/// device, not the maximum it may use. With the old formula, an 18 GB M3
+/// Pro (Metal pool ~12.3 GiB) was told to keep ~9.7 GiB free, leaving only
+/// ~2.6 GiB for the model. The fitter responded by offloading 22 of 36
+/// layers of an 8 B Q4_K_M model to CPU repack — local decode dropped to
+/// **0.74 t/s** instead of the ~17 t/s the hardware delivers when the
+/// model is fully on Metal. Going through the v0.66.51 ship to
+/// `clamp(device_mib / 10, 1024, 2048)` lifted the same M3 Pro's
+/// native_tps from 0.737 → 8.95 t/s (12.1×) and TTFT 7290 → 2528 ms
+/// (2.9×). The Phase 3.0 native baseline made the cost visible across
+/// every Apple-Silicon peer in the mesh.
+///
+/// Replacement formula: `clamp(device_mib / 10, 1024, 2048)`.
+/// - 1024 MiB matches llama.cpp's own default; safe everywhere.
+/// - 10 % of device size scales modestly so multi-slot KV cache on larger
+///   devices still has breathing room without becoming the dominant cost.
+/// - 2048 MiB cap keeps 80 GB+ discrete GPUs from reserving 8 GB for
+///   nothing — KV/compute buffers don't grow with device size at fixed
+///   ctx, so the absolute margin should not either.
+///
+/// llama.cpp itself accounts for KV cache and compute buffers when sizing
+/// the fit (see `common_params_fit_impl`'s breakdown line:
+/// `5696 = 4455 + 936 + 304` for model+context+compute). The `-fitt`
+/// margin only needs to cover incidental overhead and OS pressure on
+/// unified-memory devices.
 ///
 /// `selected_gpu.vram_bytes` is preferred because it's the device-specific
 /// figure; `my_vram` is the node-level compound VRAM and is used as a
@@ -943,8 +963,8 @@ fn compute_fit_target_mib(
     my_vram: u64,
 ) -> u64 {
     let device_vram = selected_gpu.map(|g| g.vram_bytes).unwrap_or(my_vram);
-    let target_bytes = (device_vram as f64 * 0.7) as u64;
-    (target_bytes / (1024 * 1024)).max(1024)
+    let device_mib = device_vram / (1024 * 1024);
+    (device_mib / 10).clamp(1024, 2048)
 }
 
 fn fit_target_mib_for_launch(
@@ -2513,6 +2533,49 @@ No devices found
                 14_000_000_000
             ))
         );
+    }
+
+    /// Regression for v0.66.51: the `-fitt` margin must stay small enough
+    /// that the fitter doesn't push layers to CPU on common device sizes.
+    ///
+    /// Pre-v0.66.51 the formula was `0.7 * device_vram`, which on an 18 GB
+    /// M3 Pro (Metal pool 12.3 GiB) returned 9676 MiB and forced 22/36
+    /// layers of an 8 B Q4_K_M model to CPU. The new formula
+    /// `clamp(device_mib / 10, 1024, 2048)` keeps the margin in a 1–2 GiB
+    /// band regardless of device size; this test pins that down across the
+    /// devices we know are in the mesh today and the ones we expect next
+    /// (high-end Apple, mid CUDA, datacenter).
+    #[test]
+    fn fit_target_mib_is_a_small_margin_not_most_of_vram() {
+        let cases = [
+            // M3 Pro 18 GB after the runtime's 4.5 GB OS reserve: 14_495_514_624 bytes ≈ 13824 MiB → /10 = 1382 MiB margin.
+            ("M3 Pro 18 GB post-reserve", 14_495_514_624u64, 1382u64),
+            // M1 Air 8 GB after reserve: ~5722 MiB → /10 = 572 → clamped up to 1024 MiB. Confirms the 1024 floor matches llama.cpp's default.
+            ("M1/M2/M3 Air 8 GB post-reserve", 6_000_000_000, 1024),
+            ("RTX 4070 Laptop 8 GB", 8_585_740_288, 1024),
+            ("RTX 5090 32 GB", 32u64 * 1024 * 1024 * 1024, 2048),
+            ("H100 80 GB", 80u64 * 1024 * 1024 * 1024, 2048),
+            ("M3 Ultra 192 GB", 192u64 * 1024 * 1024 * 1024, 2048),
+        ];
+        for (label, vram_bytes, expected_mib) in cases {
+            let pinned = crate::runtime::StartupPinnedGpuTarget {
+                index: 0,
+                stable_id: format!("test:{label}"),
+                backend_device: "test".into(),
+                vram_bytes,
+            };
+            let got = super::compute_fit_target_mib(Some(&pinned), vram_bytes);
+            assert!(
+                (1024..=2048).contains(&got),
+                "{label}: -fitt margin must stay in [1024, 2048] MiB; got {got}"
+            );
+            assert_eq!(got, expected_mib, "{label}: -fitt margin regression");
+            assert!(
+                (vram_bytes / (1024 * 1024)).saturating_sub(got) >= 4096,
+                "{label}: -fitt margin must leave ≥ 4 GiB usable; vram={} MiB, margin={got} MiB",
+                vram_bytes / (1024 * 1024)
+            );
+        }
     }
 
     // ── SplitMode ──
