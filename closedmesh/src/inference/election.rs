@@ -2949,6 +2949,15 @@ pub async fn election_loop(
             } else {
                 &[]
             };
+            // v0.66.49 Phase 3.0: only the solo path gets a native
+            // baseline collector. A pipeline-host's local llama-server
+            // talks to remote rpc-servers via iroh tunnels, so a
+            // synthetic chat against it would measure rpc-tunnel
+            // overhead — not what "native baseline" means semantically.
+            // Captured here as a boolean because `desired_launch` is
+            // moved by the match above and the proxy-startup code path
+            // also forks for split.
+            let is_solo_launch = matches!(desired_launch, DenseLaunchPlan::Solo);
             let (llama_port, process) = match start_llama(StartLlamaParams {
                 runtime: &runtime,
                 node: &node,
@@ -3046,6 +3055,24 @@ pub async fn election_loop(
             host_attempt_backoff.record_success();
             // Re-gossip so peers learn we're the host for this model
             node.regossip().await;
+            // v0.66.49 Phase 3.0 benchmark honesty: kick off the
+            // native baseline collector for this `(model, llama_port)`
+            // pair. The collector runs in the background, issues a
+            // single synthetic chat directly to 127.0.0.1 (no entry
+            // tunnel, no auth, no routing), and gossips the result so
+            // the catalog can render the through-mesh / native ratio.
+            // Solo only — see `is_solo_launch` definition.
+            if is_solo_launch {
+                crate::inference::native_baseline::spawn_collector(
+                    node.clone(),
+                    model_name.clone(),
+                    llama_port,
+                    binary_flavor
+                        .map(|f| f.suffix().to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    Some(std::path::PathBuf::from(&model)),
+                );
+            }
             update_targets(
                 &node,
                 &model_name,
@@ -4626,6 +4653,7 @@ mod tests {
             inflight_requests: 0,
             system_ram_bytes: 0,
             model_timings: vec![],
+           native_baselines: vec![],
             capability: crate::mesh::NodeCapability::default(),
         }
     }

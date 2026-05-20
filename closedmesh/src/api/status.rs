@@ -190,6 +190,18 @@ pub(super) struct StatusPayload {
     /// as `measured_tps_p50_by_model`.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub(super) measured_ttft_ms_p50_by_model: std::collections::HashMap<String, u64>,
+    /// v0.66.49 Phase 3.0 benchmark honesty: per-model native TPS measured
+    /// by issuing a synthetic chat directly to 127.0.0.1:llama_port,
+    /// bypassing the entry tunnel, auth gateway, and routing layer. Empty
+    /// when no baseline has been collected yet. Paired with
+    /// `measured_tps_p50_by_model` lets the UI render the mesh overhead
+    /// ratio per model.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub(super) native_tps_p50_by_model: std::collections::HashMap<String, f64>,
+    /// v0.66.49 Phase 3.0: per-model native TTFT (ms). Same semantics as
+    /// `native_tps_p50_by_model`.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub(super) native_ttft_ms_p50_by_model: std::collections::HashMap<String, u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) first_joined_mesh_ts: Option<u64>,
     /// This node's current split-role classification, mirroring the same
@@ -265,6 +277,18 @@ pub(super) struct PeerPayload {
     /// `measured_tps_p50_by_model`.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub(super) measured_ttft_ms_p50_by_model: std::collections::HashMap<String, u64>,
+    /// v0.66.49 Phase 3.0 benchmark honesty: per-model native TPS gossiped
+    /// by this peer (measured by issuing a synthetic chat against its own
+    /// llama-server, no mesh involvement). Empty for legacy peers
+    /// (<= v0.66.48) and for peers that haven't completed a baseline run
+    /// yet. Paired with `measured_tps_p50_by_model` lets the catalog
+    /// render a per-`(peer, model)` mesh overhead ratio.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub(super) native_tps_p50_by_model: std::collections::HashMap<String, f64>,
+    /// v0.66.49 Phase 3.0: per-model native TTFT (ms). Same semantics as
+    /// `native_tps_p50_by_model`.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub(super) native_ttft_ms_p50_by_model: std::collections::HashMap<String, u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) first_joined_mesh_ts: Option<u64>,
     /// Coarse classification of how this peer is currently participating in
@@ -675,6 +699,8 @@ mod tests {
             capability: NodeCapabilityPayload::default(),
             measured_tps_p50_by_model: std::collections::HashMap::new(),
             measured_ttft_ms_p50_by_model: std::collections::HashMap::new(),
+            native_tps_p50_by_model: std::collections::HashMap::new(),
+            native_ttft_ms_p50_by_model: std::collections::HashMap::new(),
             first_joined_mesh_ts: None,
             serving_mode: None,
             split_role: None,
@@ -710,6 +736,8 @@ mod tests {
             capability: NodeCapabilityPayload::default(),
             measured_tps_p50_by_model: std::collections::HashMap::new(),
             measured_ttft_ms_p50_by_model: std::collections::HashMap::new(),
+            native_tps_p50_by_model: std::collections::HashMap::new(),
+            native_ttft_ms_p50_by_model: std::collections::HashMap::new(),
             first_joined_mesh_ts: None,
             serving_mode: None,
             split_role: None,
@@ -770,6 +798,8 @@ mod tests {
             routing_metrics: metrics::RoutingMetricsStatusSnapshot::default(),
             measured_tps_p50_by_model: std::collections::HashMap::new(),
             measured_ttft_ms_p50_by_model: std::collections::HashMap::new(),
+            native_tps_p50_by_model: std::collections::HashMap::new(),
+            native_ttft_ms_p50_by_model: std::collections::HashMap::new(),
             first_joined_mesh_ts: None,
             my_split_role: None,
             my_split_group: None,
@@ -824,6 +854,8 @@ mod tests {
             routing_metrics: metrics::RoutingMetricsStatusSnapshot::default(),
             measured_tps_p50_by_model: std::collections::HashMap::new(),
             measured_ttft_ms_p50_by_model: std::collections::HashMap::new(),
+            native_tps_p50_by_model: std::collections::HashMap::new(),
+            native_ttft_ms_p50_by_model: std::collections::HashMap::new(),
             first_joined_mesh_ts: None,
             my_split_role: None,
             my_split_group: None,
@@ -885,6 +917,8 @@ mod tests {
             routing_metrics: metrics::RoutingMetricsStatusSnapshot::default(),
             measured_tps_p50_by_model: std::collections::HashMap::new(),
             measured_ttft_ms_p50_by_model: std::collections::HashMap::new(),
+            native_tps_p50_by_model: std::collections::HashMap::new(),
+            native_ttft_ms_p50_by_model: std::collections::HashMap::new(),
             first_joined_mesh_ts: None,
             my_split_role: None,
             my_split_group: None,
@@ -941,6 +975,8 @@ mod tests {
             routing_metrics: metrics::RoutingMetricsStatusSnapshot::default(),
             measured_tps_p50_by_model: std::collections::HashMap::new(),
             measured_ttft_ms_p50_by_model: std::collections::HashMap::new(),
+            native_tps_p50_by_model: std::collections::HashMap::new(),
+            native_ttft_ms_p50_by_model: std::collections::HashMap::new(),
             first_joined_mesh_ts: None,
             my_split_role: None,
             my_split_group: None,
@@ -977,6 +1013,8 @@ mod tests {
             capability: NodeCapabilityPayload::default(),
             measured_tps_p50_by_model: std::collections::HashMap::new(),
             measured_ttft_ms_p50_by_model: std::collections::HashMap::new(),
+            native_tps_p50_by_model: std::collections::HashMap::new(),
+            native_ttft_ms_p50_by_model: std::collections::HashMap::new(),
             first_joined_mesh_ts: None,
             serving_mode: None,
             split_role: None,
@@ -1019,6 +1057,8 @@ mod tests {
             capability: NodeCapabilityPayload::default(),
             measured_tps_p50_by_model: std::collections::HashMap::new(),
             measured_ttft_ms_p50_by_model: std::collections::HashMap::new(),
+           native_tps_p50_by_model: std::collections::HashMap::new(),
+           native_ttft_ms_p50_by_model: std::collections::HashMap::new(),
             first_joined_mesh_ts: None,
             serving_mode: None,
             split_role: None,
@@ -1034,6 +1074,14 @@ mod tests {
         assert!(
             !json.contains("measured_ttft_ms_p50_by_model"),
             "empty TTFT map must be omitted from JSON; got {json}"
+        );
+        assert!(
+            !json.contains("native_tps_p50_by_model"),
+            "empty native baseline map must be omitted from JSON; got {json}"
+        );
+        assert!(
+            !json.contains("native_ttft_ms_p50_by_model"),
+            "empty native TTFT map must be omitted from JSON; got {json}"
         );
     }
 
@@ -1067,6 +1115,8 @@ mod tests {
             capability: NodeCapabilityPayload::default(),
             measured_tps_p50_by_model: tps,
             measured_ttft_ms_p50_by_model: ttft,
+            native_tps_p50_by_model: std::collections::HashMap::new(),
+            native_ttft_ms_p50_by_model: std::collections::HashMap::new(),
             first_joined_mesh_ts: None,
             serving_mode: None,
             split_role: None,

@@ -127,6 +127,11 @@ pub(super) fn apply_transitive_ann(
     // metrics from a host learned through a relay would never reach
     // `/api/status` on the entry node, which is the dashboard's only feed.
     existing.model_timings = ann.model_timings.clone();
+    // v0.66.49 Phase 3.0: same refresh pattern for native baselines. The
+    // catalog ratio (through-mesh / native) only displays when both
+    // fields are populated, so a missed refresh here would silently hide
+    // the most valuable column on the page.
+    existing.native_baselines = ann.native_baselines.clone();
     serving_changed
 }
 
@@ -546,6 +551,11 @@ impl Node {
             // on `closedmesh.com/status` even after the metric collection hook
             // was confirmed working end-to-end on the host side.
             existing.model_timings = ann.model_timings.clone();
+            // v0.66.49 Phase 3.0: same refresh pattern for native baselines.
+            // The catalog ratio (through-mesh / native) only displays when
+            // both fields are populated, so a missed refresh here would
+            // silently hide the most valuable column on the page.
+            existing.native_baselines = ann.native_baselines.clone();
             let updated_peer = existing.clone();
             let changed = peer_meaningfully_changed(&old_peer, &updated_peer)
                 || old_peer.gpu_name != updated_peer.gpu_name
@@ -799,6 +809,11 @@ impl Node {
                     // told us; we never substitute our own measurements
                     // of their performance (those would be WAN-tainted).
                     model_timings: p.model_timings.clone(),
+                    // v0.66.49 Phase 3.0: native baselines relay
+                    // unchanged for the same reason — only the peer's
+                    // own llama-server can measure its native
+                    // performance, anything we add here would be noise.
+                    native_baselines: p.native_baselines.clone(),
                     capability: Some(p.capability.clone()),
                 })
                 .collect()
@@ -881,6 +896,13 @@ impl Node {
                     samples_in_window: snap.samples_in_window,
                 })
                 .collect(),
+            // v0.66.49 Phase 3.0: snapshot the local node's per-model
+            // native baselines (synthetic chats issued directly to
+            // 127.0.0.1:llama_port, no mesh involved) for gossip. Empty
+            // when this node hasn't completed a baseline run yet —
+            // baselines only land after the model is `Ready` and a
+            // synthetic prompt has returned successfully.
+            native_baselines: self.native_baselines_snapshot().await,
             capability: self.local_node_capability().await,
         });
         announcements
@@ -937,6 +959,7 @@ mod tests {
             inflight_requests: 0,
             system_ram_bytes: 0,
             model_timings: vec![],
+           native_baselines: vec![],
             capability: None,
         }
     }
@@ -1039,6 +1062,51 @@ mod tests {
         ann.model_timings = vec![];
         apply_transitive_ann(&mut existing, &test_addr(0x33), &ann);
         assert!(existing.model_timings.is_empty());
+    }
+
+    /// Regression for v0.66.49 Phase 3.0: same defect class as
+    /// `test_apply_transitive_ann_refreshes_model_timings` above —
+    /// `apply_transitive_ann` MUST overwrite `native_baselines` on
+    /// every announcement, not just the first. The Phase 1 post-mortem
+    /// rule that motivated this test (any new `PeerAnnouncement` field
+    /// gets a refresh assertion, not just a `from_announcement` smoke
+    /// check) is the only reason the catalog ratio renders correctly
+    /// for transitively-learned peers; without it, a peer learned via
+    /// relay would publish its baseline once and then stay frozen on
+    /// the entry's `/api/status` forever.
+    #[test]
+    fn test_apply_transitive_ann_refreshes_native_baselines() {
+        let mut existing = test_peer(Some(100));
+        existing.native_baselines = vec![crate::mesh::NativeBaselineEntry {
+            model: "stale-model".to_string(),
+            native_tps_p50: 1.0,
+            native_ttft_ms_p50: 1,
+            measured_at_unix_secs: 1,
+            samples: 1,
+            backend: "metal".to_string(),
+        }];
+
+        let mut ann = test_announcement(Some(100));
+        ann.native_baselines = vec![crate::mesh::NativeBaselineEntry {
+            model: "Qwen3-8B-Q4_K_M".to_string(),
+            native_tps_p50: 28.5,
+            native_ttft_ms_p50: 320,
+            measured_at_unix_secs: 1_747_700_000,
+            samples: 1,
+            backend: "metal".to_string(),
+        }];
+
+        apply_transitive_ann(&mut existing, &test_addr(0x33), &ann);
+
+        assert_eq!(existing.native_baselines.len(), 1);
+        assert_eq!(existing.native_baselines[0].model, "Qwen3-8B-Q4_K_M");
+        assert!((existing.native_baselines[0].native_tps_p50 - 28.5).abs() < 1e-9);
+        assert_eq!(existing.native_baselines[0].native_ttft_ms_p50, 320);
+
+        // Empty (e.g. peer downgraded to legacy build) must overwrite.
+        ann.native_baselines = vec![];
+        apply_transitive_ann(&mut existing, &test_addr(0x33), &ann);
+        assert!(existing.native_baselines.is_empty());
     }
 
     #[test]

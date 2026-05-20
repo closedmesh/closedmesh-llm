@@ -934,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "closedmesh"
-version = "0.66.48"
+version = "0.66.49"
 dependencies = [
  "ansi-to-tui",
  "anyhow",

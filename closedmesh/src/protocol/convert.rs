@@ -503,6 +503,24 @@ pub(crate) fn local_ann_to_proto_ann(
                 samples_in_window: t.samples_in_window,
             })
             .collect(),
+        // v0.66.49 Phase 3.0 benchmark honesty — see
+        // `mesh::NativeBaselineEntry` for the field semantics. Same
+        // wire-shape rule as `model_timings`: only entries the local
+        // node has actually measured (synthetic chats against its own
+        // llama-server) ship; an empty vec means "no baseline yet",
+        // not "measured zero".
+        native_baselines: ann
+            .native_baselines
+            .iter()
+            .map(|b| crate::proto::node::NativeBaseline {
+                model: b.model.clone(),
+                native_tps_p50: b.native_tps_p50,
+                native_ttft_ms_p50: b.native_ttft_ms_p50,
+                measured_at_unix_secs: b.measured_at_unix_secs,
+                samples: b.samples,
+                backend: b.backend.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -677,6 +695,22 @@ pub(crate) fn proto_ann_to_local(
                 measured_tps_p50: t.measured_tps_p50,
                 measured_ttft_ms_p50: t.measured_ttft_ms_p50,
                 samples_in_window: t.samples_in_window,
+            })
+            .collect(),
+        // v0.66.49 Phase 3.0 benchmark honesty. Legacy peers (<= v0.66.48)
+        // don't populate this; the empty vec is the right default since
+        // every consumer treats "no entry for model X" as "no baseline
+        // yet" rather than "measured zero".
+        native_baselines: pa
+            .native_baselines
+            .iter()
+            .map(|b| crate::mesh::NativeBaselineEntry {
+                model: b.model.clone(),
+                native_tps_p50: b.native_tps_p50,
+                native_ttft_ms_p50: b.native_ttft_ms_p50,
+                measured_at_unix_secs: b.measured_at_unix_secs,
+                samples: b.samples,
+                backend: b.backend.clone(),
             })
             .collect(),
         capability: pa

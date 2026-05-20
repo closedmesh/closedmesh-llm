@@ -1568,6 +1568,23 @@ impl MeshApi {
                         .iter()
                         .map(|t| (t.model.clone(), t.measured_ttft_ms_p50))
                         .collect(),
+                    // v0.66.49 Phase 3.0 benchmark honesty: hydrate the
+                    // native baseline maps from the peer's gossiped
+                    // `native_baselines` vec. Same "missing key = not
+                    // yet measured" semantics — pre-v0.66.49 peers
+                    // gossip an empty vec, so the catalog UI silently
+                    // omits the ratio column for them rather than
+                    // showing a ratio of zero.
+                    native_tps_p50_by_model: p
+                        .native_baselines
+                        .iter()
+                        .map(|b| (b.model.clone(), b.native_tps_p50))
+                        .collect(),
+                    native_ttft_ms_p50_by_model: p
+                        .native_baselines
+                        .iter()
+                        .map(|b| (b.model.clone(), b.native_ttft_ms_p50))
+                        .collect(),
                     first_joined_mesh_ts: p.first_joined_mesh_ts,
                     serving_mode: serving_mode_from_classification(p, &split_classification),
                     split_role: split_classification.role,
@@ -1731,6 +1748,22 @@ impl MeshApi {
                 .model_timings_snapshot()
                 .iter()
                 .map(|(model, snap)| (model.clone(), snap.measured_ttft_ms_p50))
+                .collect(),
+            // v0.66.49 Phase 3.0: native baselines for THIS node from
+            // its in-memory cache (populated by the inference baseline
+            // collector, persisted across restarts in
+            // `~/.closedmesh/native-baselines.json`).
+            native_tps_p50_by_model: node
+                .native_baselines_snapshot()
+                .await
+                .into_iter()
+                .map(|b| (b.model, b.native_tps_p50))
+                .collect(),
+            native_ttft_ms_p50_by_model: node
+                .native_baselines_snapshot()
+                .await
+                .into_iter()
+                .map(|b| (b.model, b.native_ttft_ms_p50))
                 .collect(),
             first_joined_mesh_ts: node.first_joined_mesh_ts().await,
             my_split_role: self_split.role,
@@ -2821,6 +2854,7 @@ mod tests {
             inflight_requests: 0,
             system_ram_bytes: 0,
             model_timings: vec![],
+           native_baselines: vec![],
             capability: crate::mesh::NodeCapability::default(),
         }
     }
@@ -3103,6 +3137,7 @@ mod tests {
             inflight_requests: 0,
             system_ram_bytes: 0,
             model_timings: vec![],
+           native_baselines: vec![],
             capability: crate::mesh::NodeCapability::default(),
         }
     }

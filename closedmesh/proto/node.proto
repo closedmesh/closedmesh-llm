@@ -47,6 +47,7 @@ message PeerAnnouncement {
   uint64 inflight_requests = 36;                    // Current local API/tunnel requests; used for load-aware host ordering
   uint64 system_ram_bytes = 37;                     // Total system RAM (sysinfo::System::total_memory). 0 = legacy peer; election treats as unknown.
   repeated ModelTiming model_timings = 38;          // v0.66.41 Phase 1 marketplace metrics: per-model TPS p50 and TTFT p50 over a rolling 1h window of local-inference completions. Empty for legacy peers and for peers with no recent local serving.
+  repeated NativeBaseline native_baselines = 39;    // v0.66.49 Phase 3.0 benchmark honesty: per-model native llama-server TPS / TTFT measured by issuing a synthetic chat directly to 127.0.0.1:llama_port (no entry tunnel, no auth, no routing). Paired with `model_timings` lets the catalog show the through-mesh / native ratio. Empty for legacy peers and for peers that haven't completed a baseline run yet.
 }
 
 // v0.66.41 Phase 1 marketplace metrics. Each entry summarises a single
@@ -61,6 +62,24 @@ message ModelTiming {
   double measured_tps_p50 = 2;       // Tokens per second, decode-only.
   uint64 measured_ttft_ms_p50 = 3;   // Milliseconds from request commit to first response byte.
   uint64 samples_in_window = 4;      // Number of completions that contributed to the p50s. Used by the UI to qualify low-confidence rows.
+}
+
+// v0.66.49 Phase 3.0 benchmark honesty. Each entry summarises a single
+// model's native serving performance — measured by the runtime issuing a
+// synthetic chat completion request directly to its own llama-server on
+// 127.0.0.1, NOT through the mesh tunnel, the entry node, or the auth
+// gateway. Paired with `ModelTiming` (which measures through-mesh
+// traffic) lets the catalog render a per-(peer, model) ratio that
+// quantifies the "mesh overhead tax". Refresh cadence: once on first
+// startup after a model becomes Ready, then every 24h or when the
+// model file mtime changes.
+message NativeBaseline {
+  string model = 1;
+  double native_tps_p50 = 2;         // Tokens per second from the synthetic baseline run, decode-only with the same wall-clock fallback as ModelTiming.
+  uint64 native_ttft_ms_p50 = 3;     // Milliseconds from request commit to first response byte on the synthetic run.
+  uint64 measured_at_unix_secs = 4;  // Wall-clock at which the baseline was measured. Lets the UI label stale baselines.
+  uint32 samples = 5;                // Number of synthetic runs that contributed (currently always 1; the field exists so we can raise sample count later without a schema change).
+  string backend = 6;                // metal / cuda / rocm / vulkan / cpu — disambiguates which llama-server flavor produced the number.
 }
 
 // NodeCapability is the canonical, normalized advertisement used by the mesh

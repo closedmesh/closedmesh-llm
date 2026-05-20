@@ -724,6 +724,13 @@ pub(crate) struct PeerAnnouncement {
     /// Surfaced on `/api/status` and rendered as the per-model Catalog row
     /// on closedmesh.com/status.
     pub(crate) model_timings: Vec<ModelTimingEntry>,
+    /// v0.66.49 Phase 3.0 benchmark honesty: per-model native llama-server
+    /// TPS/TTFT measured by issuing a synthetic chat directly to
+    /// 127.0.0.1:llama_port (no entry tunnel, no auth, no routing). Paired
+    /// with `model_timings` lets the catalog render the through-mesh /
+    /// native ratio per `(peer, model)` pair. Empty for pre-v0.66.49 peers
+    /// and for peers that haven't completed a baseline run yet.
+    pub(crate) native_baselines: Vec<NativeBaselineEntry>,
     /// Normalized capability advertisement used for capability-aware routing.
     /// Older peers that don't set this get back-filled from `gpu_*` / `hardware`
     /// when they're upgraded to a `PeerInfo`.
@@ -742,6 +749,24 @@ pub struct ModelTimingEntry {
     pub measured_tps_p50: f64,
     pub measured_ttft_ms_p50: u64,
     pub samples_in_window: u64,
+}
+
+/// v0.66.49 Phase 3.0: per-model native baseline carried on
+/// `PeerAnnouncement` / `PeerInfo`. Peers measure this once (then refresh
+/// every 24h or on model file change) by running a synthetic chat against
+/// their own llama-server on 127.0.0.1, bypassing the entry tunnel, auth
+/// gateway, and routing layer. The catalog pairs this with `ModelTiming`
+/// (through-mesh measurements) to render a per-`(peer, model)` ratio that
+/// quantifies the mesh overhead tax — the central deliverable of Phase 3.0
+/// "benchmark honesty".
+#[derive(Debug, Clone)]
+pub struct NativeBaselineEntry {
+    pub model: String,
+    pub native_tps_p50: f64,
+    pub native_ttft_ms_p50: u64,
+    pub measured_at_unix_secs: u64,
+    pub samples: u32,
+    pub backend: String,
 }
 
 #[derive(Debug, Clone)]
@@ -812,6 +837,12 @@ pub struct PeerInfo {
     /// serving. Surfaced on `/api/status` and rendered as the per-model
     /// Catalog row on closedmesh.com/status.
     pub model_timings: Vec<ModelTimingEntry>,
+    /// v0.66.49 Phase 3.0 benchmark honesty: per-model native llama-server
+    /// TPS/TTFT measured directly against 127.0.0.1 with no mesh involvement.
+    /// Empty for pre-v0.66.49 peers and for peers that haven't completed a
+    /// baseline run yet. The catalog pairs each entry with the matching
+    /// `ModelTimingEntry` to display the mesh overhead tax.
+    pub native_baselines: Vec<NativeBaselineEntry>,
     /// Normalized capability for routing. Always populated — back-filled from
     /// the legacy GPU fields when the announcement didn't include it.
     pub capability: NodeCapability,
@@ -934,6 +965,7 @@ impl PeerInfo {
             inflight_requests: ann.inflight_requests,
             system_ram_bytes: ann.system_ram_bytes,
             model_timings: ann.model_timings.clone(),
+            native_baselines: ann.native_baselines.clone(),
             capability: ann.capability.clone().unwrap_or_else(|| {
                 capability::backfill_from_legacy(
                     ann.gpu_name.as_deref(),
@@ -1151,6 +1183,14 @@ pub struct Node {
     llama_ready: Arc<Mutex<bool>>,
     available_models: Arc<Mutex<Vec<String>>>,
     requested_models: Arc<Mutex<Vec<String>>>,
+    /// v0.66.49 Phase 3.0 benchmark honesty: in-memory mirror of the
+    /// per-model native baselines persisted at
+    /// `~/.closedmesh/native-baselines.json`. Populated by the
+    /// `native_baseline` collector when llama-server reports Ready;
+    /// gossiped to peers via `PeerAnnouncement::native_baselines` and
+    /// surfaced on `/api/status` as
+    /// `native_tps_p50_by_model` / `native_ttft_ms_p50_by_model`.
+    native_baselines: Arc<Mutex<HashMap<String, NativeBaselineEntry>>>,
     /// Mesh-wide demand map — merged from gossip + local API requests.
     /// This is the single source of truth for "what does the mesh want?"
     model_demand: Arc<std::sync::Mutex<HashMap<String, ModelDemand>>>,
@@ -1647,6 +1687,31 @@ impl Node {
             .record_request(model, attempts, outcome);
     }
 
+    /// v0.66.49 Phase 3.0 benchmark honesty: store a fresh native baseline
+    /// measurement for `model`, replacing any previous entry. Triggers a
+    /// regossip so the new baseline propagates to peers within the next
+    /// gossip tick. Disk persistence is owned by
+    /// `inference::native_baseline::Collector` (which has the
+    /// model-file mtime needed for proper cache invalidation); this
+    /// method is the in-memory + gossip side only.
+    pub async fn record_native_baseline(&self, entry: NativeBaselineEntry) {
+        {
+            let mut map = self.native_baselines.lock().await;
+            map.insert(entry.model.clone(), entry);
+        }
+        self.regossip().await;
+    }
+
+    /// Snapshot of current native baselines (one entry per model that has
+    /// completed at least one synthetic measurement). Used by
+    /// `gossip_local_announce` to fill the `native_baselines` field on
+    /// outgoing `PeerAnnouncement`s, and by `/api/status` to populate
+    /// `native_tps_p50_by_model` for the local node.
+    pub async fn native_baselines_snapshot(&self) -> Vec<NativeBaselineEntry> {
+        let map = self.native_baselines.lock().await;
+        map.values().cloned().collect()
+    }
+
     /// v0.66.41 Phase 1 marketplace metrics: feed a per-model TPS / TTFT
     /// sample into the rolling 1h window held by `RoutingMetrics`.
     /// Called from `route_local_attempt` on every successful local
@@ -1913,6 +1978,17 @@ impl Node {
             llama_ready: Arc::new(Mutex::new(false)),
             available_models: Arc::new(Mutex::new(Vec::new())),
             requested_models: Arc::new(Mutex::new(Vec::new())),
+            native_baselines: Arc::new(Mutex::new(
+                crate::inference::native_baseline::cache_path()
+                    .map(|p| crate::inference::native_baseline::load_cache(&p))
+                    .map(|c| {
+                        c.entries
+                            .iter()
+                            .map(|(k, v)| (k.clone(), NativeBaselineEntry::from(v)))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            )),
             model_demand: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mesh_id: Arc::new(Mutex::new(None)),
             first_joined_mesh_ts: Arc::new(Mutex::new(None)),
@@ -2021,6 +2097,7 @@ impl Node {
             llama_ready: Arc::new(Mutex::new(false)),
             available_models: Arc::new(Mutex::new(Vec::new())),
             requested_models: Arc::new(Mutex::new(Vec::new())),
+            native_baselines: Arc::new(Mutex::new(HashMap::new())),
             model_demand: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mesh_id: Arc::new(Mutex::new(None)),
             first_joined_mesh_ts: Arc::new(Mutex::new(None)),
