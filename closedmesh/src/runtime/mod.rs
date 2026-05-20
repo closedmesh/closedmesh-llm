@@ -963,7 +963,15 @@ pub(crate) async fn run() -> Result<()> {
                 .add_directive("mesh_inference=info".parse()?)
                 .add_directive("nostr_relay_pool=off".parse()?)
                 .add_directive("nostr_sdk=warn".parse()?)
-                .add_directive("noq_proto::connection=warn".parse()?),
+                .add_directive("noq_proto::connection=warn".parse()?)
+                // v0.66.50 Phase 3.0: surface the native-baseline collector's
+                // lifecycle ("collector spawned", "recorded native baseline",
+                // "measurement failed") in the runtime log. Default `error`-
+                // only filtering hid every successful baseline run during
+                // the v0.66.49 rollout, which made the gossip-flap defect
+                // (mixed-version mesh stomping native_baselines on transitive
+                // refresh) hard to attribute — see RESILIENCE.md.
+                .add_directive("closedmesh::native_baseline=info".parse()?),
         )
         .with_writer(MeshTracingStderr)
         .init();

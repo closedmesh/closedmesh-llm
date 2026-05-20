@@ -329,6 +329,13 @@ pub fn spawn_collector(
     backend: String,
     model_file_path: Option<std::path::PathBuf>,
 ) {
+    tracing::info!(
+        target: "closedmesh::native_baseline",
+        model = %model,
+        port = http_port,
+        backend = %backend,
+        "native baseline collector spawned"
+    );
     tokio::spawn(async move {
         // Initial settle delay — some backends spin up Metal/CUDA buffers
         // lazily on the first request and we don't want our baseline to

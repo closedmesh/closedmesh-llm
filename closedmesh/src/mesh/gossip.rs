@@ -120,18 +120,28 @@ pub(super) fn apply_transitive_ann(
     if ann.experts_summary.is_some() {
         existing.experts_summary = ann.experts_summary.clone();
     }
-    // Refresh measured per-model TPS/TTFT for transitively-learned peers too.
-    // Same rationale as the direct-peer `add_peer` branch (see comment there):
-    // empty != "measured zero", and the source-of-truth is whoever produced
-    // the announcement, so always overwrite from the latest. Without this,
-    // metrics from a host learned through a relay would never reach
-    // `/api/status` on the entry node, which is the dashboard's only feed.
-    existing.model_timings = ann.model_timings.clone();
-    // v0.66.49 Phase 3.0: same refresh pattern for native baselines. The
-    // catalog ratio (through-mesh / native) only displays when both
-    // fields are populated, so a missed refresh here would silently hide
-    // the most valuable column on the page.
-    existing.native_baselines = ann.native_baselines.clone();
+    // v0.66.50: refresh measured per-model TPS/TTFT for transitively-learned
+    // peers, but DO NOT overwrite a non-empty existing value with an empty
+    // ann. In a mixed-version mesh the May 20 2026 incident showed that a
+    // legacy v0.66.48 worker's transitive view of a v0.66.49 host has
+    // `model_timings: []` and `native_baselines: []` (default empty for an
+    // unknown proto field). When that legacy worker gossips its world to
+    // the entry, an unconditional `existing.X = ann.X.clone()` blanks the
+    // direct-gossip data the host published moments earlier. The end-state
+    // flapped per gossip tick: catalog rendered the efficiency ratio for
+    // ~one cycle, then dropped it again.
+    //
+    // The "metrics from a host learned through a relay would never reach
+    // the entry" concern that motivated the unconditional overwrite still
+    // works: as long as some peer in the chain has the data populated, the
+    // refresh below applies. We only refuse to overwrite *full* with
+    // *empty* — full→full and empty→full both still work.
+    if !ann.model_timings.is_empty() || existing.model_timings.is_empty() {
+        existing.model_timings = ann.model_timings.clone();
+    }
+    if !ann.native_baselines.is_empty() || existing.native_baselines.is_empty() {
+        existing.native_baselines = ann.native_baselines.clone();
+    }
     serving_changed
 }
 
@@ -543,19 +553,20 @@ impl Node {
                     &existing.serving_models,
                 );
             }
-            // Refresh measured per-model TPS/TTFT from the latest announcement.
-            // Pre-v0.66.46 this assignment was missing, so the field stayed at
-            // whatever it was at first `PeerInfo::from_announcement` — which is
-            // empty for every peer that joins before serving its first request.
-            // That was the reason `measured_tps_p50_by_model` never populated
-            // on `closedmesh.com/status` even after the metric collection hook
-            // was confirmed working end-to-end on the host side.
-            existing.model_timings = ann.model_timings.clone();
-            // v0.66.49 Phase 3.0: same refresh pattern for native baselines.
-            // The catalog ratio (through-mesh / native) only displays when
-            // both fields are populated, so a missed refresh here would
-            // silently hide the most valuable column on the page.
-            existing.native_baselines = ann.native_baselines.clone();
+            // v0.66.50 (May 20 2026): refresh measured per-model TPS/TTFT
+            // and Phase 3.0 native baselines from the latest announcement,
+            // but DO NOT overwrite a non-empty existing value with an empty
+            // ann. See the matching block in `apply_transitive_ann` for the
+            // mixed-version-mesh incident that motivated the empty-guard;
+            // the same flap can hit the direct-gossip path when the entry
+            // re-handshakes with a legacy peer who happens to have the
+            // host's stale view in its connection-warm cache.
+            if !ann.model_timings.is_empty() || existing.model_timings.is_empty() {
+                existing.model_timings = ann.model_timings.clone();
+            }
+            if !ann.native_baselines.is_empty() || existing.native_baselines.is_empty() {
+                existing.native_baselines = ann.native_baselines.clone();
+            }
             let updated_peer = existing.clone();
             let changed = peer_meaningfully_changed(&old_peer, &updated_peer)
                 || old_peer.gpu_name != updated_peer.gpu_name
@@ -959,7 +970,7 @@ mod tests {
             inflight_requests: 0,
             system_ram_bytes: 0,
             model_timings: vec![],
-           native_baselines: vec![],
+            native_baselines: vec![],
             capability: None,
         }
     }
@@ -1058,10 +1069,20 @@ mod tests {
         assert!((existing.model_timings[0].measured_tps_p50 - 12.5).abs() < 1e-9);
         assert_eq!(existing.model_timings[0].measured_ttft_ms_p50, 850);
 
-        // Now go back to empty (window expired) — must overwrite, not retain.
+        // v0.66.50 (May 20 2026): empty in a transitive ann must NOT
+        // overwrite a non-empty existing — that flap was the live
+        // defect that hid the catalog ratio in mixed v0.66.48/v0.66.49
+        // meshes. Full→empty only fires from a direct gossip path
+        // (`add_peer`), and even there guarded by the same `is_empty`
+        // check; the source-of-truth for "this host has no recent
+        // samples" must not be a legacy peer's stale relayed view.
         ann.model_timings = vec![];
         apply_transitive_ann(&mut existing, &test_addr(0x33), &ann);
-        assert!(existing.model_timings.is_empty());
+        assert_eq!(
+            existing.model_timings.len(),
+            1,
+            "empty transitive ann must not stomp non-empty existing model_timings"
+        );
     }
 
     /// Regression for v0.66.49 Phase 3.0: same defect class as
@@ -1103,10 +1124,19 @@ mod tests {
         assert!((existing.native_baselines[0].native_tps_p50 - 28.5).abs() < 1e-9);
         assert_eq!(existing.native_baselines[0].native_ttft_ms_p50, 320);
 
-        // Empty (e.g. peer downgraded to legacy build) must overwrite.
+        // v0.66.50 (May 20 2026): same empty-transitive guard as
+        // `test_apply_transitive_ann_refreshes_model_timings`. A legacy
+        // v0.66.48 worker's view of a v0.66.49 host has
+        // `native_baselines: []` (default for an unknown proto field);
+        // when that worker gossips its world to the entry we must not
+        // let it blank the host's freshly-published baseline.
         ann.native_baselines = vec![];
         apply_transitive_ann(&mut existing, &test_addr(0x33), &ann);
-        assert!(existing.native_baselines.is_empty());
+        assert_eq!(
+            existing.native_baselines.len(),
+            1,
+            "empty transitive ann must not stomp non-empty existing native_baselines"
+        );
     }
 
     #[test]
