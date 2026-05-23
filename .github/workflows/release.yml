@@ -371,6 +371,10 @@ jobs:
     if: ${{ needs.prepare_release.outputs.skip_gpu_bundles != 'true' }}
     runs-on: ubuntu-latest
     needs: prepare_release
+    # Container jobs need explicit cache API scope for mozilla-actions/sccache-action.
+    permissions:
+      contents: read
+      actions: write
     container:
       image: nvidia/cuda:${{ vars.CUDA_VERSION || '12.8.0' }}-devel-ubuntu22.04
 
@@ -408,6 +412,9 @@ jobs:
       - uses: taiki-e/install-action@just
 
       - uses: mozilla-actions/sccache-action@v0.0.9
+        continue-on-error: true
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: Swatinem/rust-cache@v2
         with:

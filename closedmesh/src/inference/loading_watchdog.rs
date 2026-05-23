@@ -189,12 +189,12 @@ pub(crate) fn diagnose_stuck_loading(
 
     let outdated: Vec<(String, String)> = cohort_peers
         .iter()
-        .filter(|p| !crate::inference::election::peer_supports_pipeline_election(p.version.as_deref()))
+        .filter(|p| {
+            !crate::inference::election::peer_supports_pipeline_election(p.version.as_deref())
+        })
         .map(|p| {
             (
-                p.hostname
-                    .clone()
-                    .unwrap_or_else(|| "peer".to_string()),
+                p.hostname.clone().unwrap_or_else(|| "peer".to_string()),
                 p.version.clone().unwrap_or_else(|| "unknown".to_string()),
             )
         })
