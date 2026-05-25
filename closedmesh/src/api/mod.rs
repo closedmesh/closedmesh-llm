@@ -187,6 +187,28 @@ struct PeerSplitClassification {
     moe_shard: Option<MoeShardPayload>,
 }
 
+/// Largest model-size in bytes any peer in `all_peers` has observed locally.
+///
+/// `available_model_sizes` is populated by every peer that scanned the GGUF
+/// on disk (see `models::inventory`). Sizes for the same model are always
+/// the byte-equal weights file, so taking `max` is just a robust pick that
+/// works when most peers gossip 0 (didn't scan) and one peer gossips the
+/// true size. Returns `0` if no peer has scanned the model.
+fn model_bytes_observed_in_mesh(model: &str, all_peers: &[mesh::PeerInfo]) -> u64 {
+    all_peers
+        .iter()
+        .filter_map(|p| p.available_model_sizes.get(model).copied())
+        .max()
+        .unwrap_or(0)
+}
+
+/// Matches `min_vram_for_solo` in `inference::election` — kept as a free
+/// function here to avoid adding a dependency edge from `api` to `inference`
+/// just for one constant. The 1.1× headroom mirrors `build_dense_launch_plan`.
+fn host_can_solo_model(host_fast_memory_bytes: u64, model_bytes: u64) -> bool {
+    model_bytes > 0 && host_fast_memory_bytes >= (model_bytes as f64 * 1.1) as u64
+}
+
 fn serving_mode_from_classification(
     peer: &mesh::PeerInfo,
     split: &PeerSplitClassification,
@@ -305,6 +327,28 @@ fn classify_peer_split_role(
     // claims, and we want the classifier to refuse to invent a topology that
     // doesn't exist.
     if host.is_none() && !peer.routes_http_model(model) {
+        return PeerSplitClassification {
+            role: None,
+            group: None,
+            moe_shard: None,
+        };
+    }
+
+    // Standby-cohort honesty gate (May 25 2026, the Qwen3-8B-on-three-boxes
+    // miscall): when multiple peers all opt in to share the same model but
+    // the model genuinely fits solo on the elected host, the election deliberately
+    // keeps the other peers in `NodeRole::Worker` *standby* — they're warm
+    // for failover, not actually splitting layers across an RPC tunnel. The
+    // pre-gate classifier blindly tagged the host as `pipeline_host` and the
+    // standby peers as `pipeline_worker`, and the UI dutifully advertised a
+    // 3-way "pooled VRAM" group that did not exist in the runtime. Refuse to
+    // fabricate the split when the host fits the model on its own fast memory.
+    // Safe fallback: the gate above returns early when `host.is_none() &&
+    // !peer.routes_http_model(model)`, so if we reach here either `host` is
+    // Some or `peer` itself routes the model and is the de-facto host.
+    let elected_host = host.unwrap_or(peer);
+    let model_bytes = model_bytes_observed_in_mesh(model, all_peers);
+    if host_can_solo_model(elected_host.fast_memory_bytes(), model_bytes) {
         return PeerSplitClassification {
             role: None,
             group: None,
@@ -561,6 +605,23 @@ fn classify_local_split_role(
     // idle waiting for a host that will never connect.
     let any_host_for_model = all_peers.iter().any(|p| p.routes_http_model(model));
     if !any_host_for_model && !is_host {
+        return PeerSplitClassification {
+            role: None,
+            group: None,
+            moe_shard: None,
+        };
+    }
+
+    // Standby-cohort honesty gate (May 25 2026): when the model fits solo on
+    // the elected host, multi-peer interest is *standby*, not split — see the
+    // matching gate in `classify_peer_split_role` for the incident write-up.
+    let model_bytes = model_bytes_observed_in_mesh(model, all_peers);
+    let elected_host_fast_memory = all_peers
+        .iter()
+        .find(|p| p.routes_http_model(model))
+        .map(|h| h.fast_memory_bytes())
+        .unwrap_or_else(|| (my_vram_gb * 1e9) as u64);
+    if host_can_solo_model(elected_host_fast_memory, model_bytes) {
         return PeerSplitClassification {
             role: None,
             group: None,
@@ -2586,6 +2647,111 @@ mod tests {
             .group
             .expect("split group still populated when host present");
         assert_eq!(group.host_id, host.id.fmt_short().to_string());
+    }
+
+    /// Regression for the May 25 2026 Qwen3-8B-on-three-boxes miscall.
+    ///
+    /// Three peers all clicked "share Qwen3-8B-Q4_K_M": Mac Air (14.5 GB),
+    /// LYU (17 GB), MSI (8.5 GB). The 5 GB model fits solo on any of them,
+    /// so the election deliberately elected Mac as the sole `NodeRole::Host`
+    /// and left LYU/MSI in `NodeRole::Worker` as standby (warm for failover
+    /// but not actually running rpc-server for Mac).
+    ///
+    /// The pre-fix classifier still saw all three peers list the model in
+    /// `serving_models`, paired them up via `cohort`, and labelled Mac as
+    /// `pipeline_host` with a 3-way `split_group` while tagging LYU/MSI as
+    /// `pipeline_worker` — the same lie pattern the host_is_none branch
+    /// fixed for the deadlock case, just one step further down the road.
+    /// Once the dashboard advertised a 40 GB pooled split that did not
+    /// exist, the metrics page kept showing 0 contributors because the
+    /// runtime never recorded a single split sample (it was solo all
+    /// along), and the user closed two of the apps before the gap was
+    /// understood.
+    ///
+    /// Gate: if the elected host has enough fast memory to hold the model
+    /// alone (1.1× the GGUF bytes), the cohort is standby — return no role
+    /// and no group, same shape as a true solo serve.
+    #[test]
+    fn classify_peer_split_role_returns_none_when_host_can_solo_the_model() {
+        let mut host = make_test_peer(
+            90,
+            mesh::NodeRole::Host { http_port: 9337 },
+            vec!["Qwen3-8B-Q4_K_M"],
+            vec!["Qwen3-8B-Q4_K_M"],
+            true,
+        );
+        host.vram_bytes = 15_000_000_000; // Mac Air-class, 15 GB fast memory
+        host.available_model_sizes
+            .insert("Qwen3-8B-Q4_K_M".to_string(), 5_000_000_000);
+        let standby_lyu = make_test_peer(
+            91,
+            mesh::NodeRole::Worker,
+            vec!["Qwen3-8B-Q4_K_M"],
+            vec![],
+            true,
+        );
+        let standby_msi = make_test_peer(
+            92,
+            mesh::NodeRole::Worker,
+            vec!["Qwen3-8B-Q4_K_M"],
+            vec![],
+            true,
+        );
+        let peers = vec![host.clone(), standby_lyu.clone(), standby_msi.clone()];
+
+        let host_class = classify_peer_split_role(&host, &peers, 14.5);
+        assert!(
+            host_class.role.is_none(),
+            "host that can solo the model must not be tagged pipeline_host; got {:?}",
+            host_class.role
+        );
+        assert!(
+            host_class.group.is_none(),
+            "no split_group when the cohort is standby"
+        );
+
+        for standby in [&standby_lyu, &standby_msi] {
+            let class = classify_peer_split_role(standby, &peers, 14.5);
+            assert!(
+                class.role.is_none(),
+                "standby Worker must not be tagged pipeline_worker; got {:?}",
+                class.role
+            );
+            assert!(class.group.is_none());
+        }
+    }
+
+    /// And the inverse: when the host CANNOT solo the model (genuine
+    /// pipeline split — the Phase-1 case), the classifier still labels
+    /// the host and workers correctly. This protects the DeepSeek-70B
+    /// case from over-firing the standby gate.
+    #[test]
+    fn classify_peer_split_role_marks_split_when_model_does_not_fit_solo() {
+        let mut host = make_test_peer(
+            100,
+            mesh::NodeRole::Host { http_port: 9337 },
+            vec!["DeepSeek-R1-Distill-70B"],
+            vec!["DeepSeek-R1-Distill-70B"],
+            true,
+        );
+        host.vram_bytes = 16_000_000_000; // RTX 4060 Ti class — far short of 70 GB
+        host.available_model_sizes
+            .insert("DeepSeek-R1-Distill-70B".to_string(), 42_000_000_000);
+        let worker = make_test_peer(
+            101,
+            mesh::NodeRole::Worker,
+            vec!["DeepSeek-R1-Distill-70B"],
+            vec![],
+            true,
+        );
+        let peers = vec![host.clone(), worker.clone()];
+
+        let host_class = classify_peer_split_role(&host, &peers, 16.0);
+        assert_eq!(host_class.role.as_deref(), Some("pipeline_host"));
+        assert!(host_class.group.is_some());
+
+        let worker_class = classify_peer_split_role(&worker, &peers, 16.0);
+        assert_eq!(worker_class.role.as_deref(), Some("pipeline_worker"));
     }
 
     #[test]
