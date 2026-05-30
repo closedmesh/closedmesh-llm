@@ -971,7 +971,13 @@ pub(crate) async fn run() -> Result<()> {
                 // the v0.66.49 rollout, which made the gossip-flap defect
                 // (mixed-version mesh stomping native_baselines on transitive
                 // refresh) hard to attribute — see RESILIENCE.md.
-                .add_directive("closedmesh::native_baseline=info".parse()?),
+                .add_directive("closedmesh::native_baseline=info".parse()?)
+                // v0.66.57 verification layer: surface the verifier loop's
+                // startup line + per-(peer,model) verdicts (Match/Mismatch/
+                // DEMOTED). Same EnvFilter-swallow class as native_baseline
+                // above — without this the observe-mode verifier runs silently
+                // and there is no way to confirm it is even probing peers.
+                .add_directive("closedmesh::verify=info".parse()?),
         )
         .with_writer(MeshTracingStderr)
         .init();
