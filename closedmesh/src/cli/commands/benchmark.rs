@@ -97,9 +97,8 @@ pub(crate) async fn dispatch_benchmark_command(command: &BenchmarkCommand) -> Re
             moe_benchmark::run_moe_model_matrix_benchmark(args).await
         }
         BenchmarkCommand::CaptureReference { model, port } => {
-            let fp =
-                crate::inference::native_baseline::capture_reference_fingerprint(*port, model)
-                    .await?;
+            let fp = crate::inference::native_baseline::capture_reference_fingerprint(*port, model)
+                .await?;
             let path = crate::inference::verify::upsert_reference(model, &fp)?;
             let hash_head = &fp.output_sha256[..fp.output_sha256.len().min(12)];
             println!(

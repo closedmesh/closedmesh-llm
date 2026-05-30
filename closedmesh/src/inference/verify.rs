@@ -21,11 +21,30 @@
 //!   which is the opposite of what we want. The token sequence and output
 //!   hash are the discriminators.
 //!
-//! Limitation (documented honestly): a fixed probe is spoofable by a
-//! sophisticated peer that detects the known prompt and runs the real model
-//! only for it. v1 targets the common threat — wrong/smaller model, canned
-//! replies, misconfiguration. Unpredictable probes + second-node recompute
-//! (proof-of-sampling) is a later increment.
+//! Two probe modes (see `run_one_audit`):
+//! - **Self-oracle (preferred).** When this node serves the model, each audit
+//!   generates a fresh nonce-randomized probe, runs it on our own llama-server
+//!   for ground truth, and sends the identical probe to the suspect. Because
+//!   the probe is unpredictable, a peer can't detect "the probe" and serve the
+//!   real model only for it — this closes the known-prompt spoof.
+//! - **Fixed reference (fallback).** When we don't serve the model, the suspect
+//!   is compared against a precomputed reference for the fixed probe. Spoofable
+//!   by a peer that recognizes the known prompt, but still catches the common
+//!   threat — wrong/smaller model, canned replies, misconfiguration.
+//!
+//! PRIVACY BOUNDARY (deliberate, do not "improve" by sampling real traffic):
+//! verification only ever re-executes *synthetic* probes we generate. Sampling
+//! real user requests and replaying them against a second node would be more
+//! robust against a peer that fingerprints synthetic traffic — but it would
+//! fan a user's private prompt out to a node that played no part in serving
+//! the request, expanding plaintext exposure beyond the minimal serving path
+//! (entry + the one host). That conflicts with the privacy promise, so it is
+//! intentionally not done. The determined adversary who can statistically
+//! distinguish synthetic probes from organic traffic is left to the later
+//! staking / attestation layer, not to prompt snooping.
+//!
+//! Deferred: multi-peer consensus (proof-of-sampling) for models *no* verifier
+//! serves locally, so the self-oracle's coverage isn't limited to served models.
 
 use super::native_baseline::{self, LogitFingerprint};
 use crate::mesh;
@@ -84,7 +103,8 @@ pub fn compare_fingerprints(
     // An exact hash match is a clean positive; a mismatch with no prefix is
     // ambiguous (expected across backends), so we decline to judge.
     if reference.prefix_tokens.is_empty() || candidate.prefix_tokens.is_empty() {
-        if !reference.output_sha256.is_empty() && reference.output_sha256 == candidate.output_sha256
+        if !reference.output_sha256.is_empty()
+            && reference.output_sha256 == candidate.output_sha256
         {
             return FingerprintVerdict::Match {
                 prefix_agreement: 1.0,
@@ -178,12 +198,7 @@ impl Default for VerifierConfig {
 
 fn enforce_from_env() -> bool {
     std::env::var(ENFORCE_ENV)
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)
 }
 
@@ -621,15 +636,7 @@ mod tests {
         let r = fp(&ten(), "h1");
         let wrong = fp(
             &[
-                "Hola",
-                " mundo",
-                " esto",
-                " es",
-                " otro",
-                " modelo",
-                " muy",
-                " distinto",
-                " aqui",
+                "Hola", " mundo", " esto", " es", " otro", " modelo", " muy", " distinto", " aqui",
                 " vale",
             ],
             "h2",
