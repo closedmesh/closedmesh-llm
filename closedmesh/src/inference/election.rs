@@ -4169,6 +4169,20 @@ async fn update_targets(
         );
     }
 
+    // Drop verifier-demoted (peer, model) remote targets. The set is empty
+    // unless enforcement is enabled, so this is a no-op on the common path.
+    let demotions = node.active_demotions().await;
+    if !demotions.is_empty() {
+        for (model, model_targets) in targets.iter_mut() {
+            model_targets.retain(|t| match t {
+                InferenceTarget::Remote(peer_id) => {
+                    !demotions.contains(&(*peer_id, model.clone()))
+                }
+                _ => true,
+            });
+        }
+    }
+
     for (model, dropped) in &filtered_only_candidates {
         let still_have = targets.get(model).map(|v| !v.is_empty()).unwrap_or(false);
         if !still_have && *dropped > 0 {

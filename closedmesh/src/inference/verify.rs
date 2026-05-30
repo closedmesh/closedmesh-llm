@@ -128,12 +128,21 @@ pub fn compare_fingerprints(
     }
 }
 
-// ── Verifier loop (observe-only) ─────────────────────────────────────────────
+// ── Verifier loop ────────────────────────────────────────────────────────────
 //
-// OBSERVE-ONLY by design: the loop probes peers, runs the oracle, and logs
-// verdicts, but never demotes or excludes anyone. Demotion is the one
+// Observe by default, enforce only when explicitly enabled. The loop probes
+// peers, runs the oracle, and logs verdicts. Demotion is the one
 // irreversible-ish lever (a false positive punishes an honest contributor), so
-// it rides on top of observe-mode data behind a flag in a later increment.
+// it is gated three ways: (1) off unless `CLOSEDMESH_VERIFY_ENFORCE` is set,
+// (2) requires several *consecutive* `Mismatch` verdicts for the same
+// `(peer, model)` before acting, never a single flaky probe, and (3) the
+// action is a reversible, time-boxed route demotion — the peer stays in the
+// mesh, keeps being re-probed, and is reinstated on the next `Match` or when
+// the cooldown lapses. `Inconclusive` never counts toward conviction.
+
+/// Set to a truthy value (`1`/`true`/`yes`/`on`) to let the verifier demote
+/// convicted peers instead of only logging.
+const ENFORCE_ENV: &str = "CLOSEDMESH_VERIFY_ENFORCE";
 
 /// Config for the background verifier loop.
 #[derive(Debug, Clone)]
@@ -145,6 +154,13 @@ pub struct VerifierConfig {
     /// Per-probe timeout (re-probing a slow peer over the tunnel).
     pub probe_timeout: Duration,
     pub thresholds: VerifyThresholds,
+    /// When `false` (default), the loop only logs verdicts. When `true`, a
+    /// convicted `(peer, model)` is demoted from routing for `demotion`.
+    pub enforce: bool,
+    /// Consecutive `Mismatch` verdicts required before a demotion. `>= 1`.
+    pub min_consecutive_mismatches: u32,
+    /// How long a demotion lasts before the peer is auto-reinstated.
+    pub demotion: Duration,
 }
 
 impl Default for VerifierConfig {
@@ -154,8 +170,17 @@ impl Default for VerifierConfig {
             interval: Duration::from_secs(120),
             probe_timeout: Duration::from_secs(60),
             thresholds: VerifyThresholds::default(),
+            enforce: false,
+            min_consecutive_mismatches: 2,
+            demotion: Duration::from_secs(900), // 15 min, reversible
         }
     }
+}
+
+fn enforce_from_env() -> bool {
+    std::env::var(ENFORCE_ENV)
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
 }
 
 /// Auditor-established reference fingerprints, keyed by model name.
@@ -226,8 +251,14 @@ pub(crate) fn upsert_reference(
     Ok(path)
 }
 
-/// Spawn the observe-only verifier. Intended to run on entry / proxy nodes.
-pub fn spawn_verifier(node: mesh::Node, config: VerifierConfig) {
+/// Spawn the background verifier. Intended to run on entry / proxy nodes.
+/// Observe-only unless `CLOSEDMESH_VERIFY_ENFORCE` is set, in which case
+/// repeatedly-convicted peers are demoted from routing for a cooldown.
+pub fn spawn_verifier(node: mesh::Node, mut config: VerifierConfig) {
+    if enforce_from_env() {
+        config.enforce = true;
+    }
+    config.min_consecutive_mismatches = config.min_consecutive_mismatches.max(1);
     tokio::spawn(async move {
         tokio::time::sleep(config.settle).await;
         let store = ReferenceStore::load();
@@ -235,11 +266,18 @@ pub fn spawn_verifier(node: mesh::Node, config: VerifierConfig) {
             target: "closedmesh::verify",
             shipped_refs = store.refs.len(),
             interval_secs = config.interval.as_secs(),
-            "verifier loop started (observe-only; never demotes)"
+            enforce = config.enforce,
+            min_consecutive_mismatches = config.min_consecutive_mismatches,
+            demotion_secs = config.demotion.as_secs(),
+            "verifier loop started ({})",
+            if config.enforce { "enforcing" } else { "observe-only" }
         );
+        // Consecutive-mismatch streak per (peer, model). Reset on Match;
+        // untouched by Inconclusive. Drives conviction before any demotion.
+        let mut streaks: HashMap<(EndpointId, String), u32> = HashMap::new();
         loop {
             tokio::time::sleep(config.interval).await;
-            if let Err(e) = run_one_audit(&node, &store, &config).await {
+            if let Err(e) = run_one_audit(&node, &store, &config, &mut streaks).await {
                 tracing::debug!(target: "closedmesh::verify", "audit tick skipped: {e}");
             }
         }
@@ -262,6 +300,7 @@ async fn run_one_audit(
     node: &mesh::Node,
     store: &ReferenceStore,
     config: &VerifierConfig,
+    streaks: &mut HashMap<(EndpointId, String), u32>,
 ) -> anyhow::Result<()> {
     let local_id = node.id();
     let self_refs = self_baseline_fingerprints(node).await;
@@ -305,7 +344,93 @@ async fn run_one_audit(
 
     let verdict = compare_fingerprints(&reference, &candidate, &config.thresholds);
     log_verdict(peer_id, &model, &verdict);
+    apply_enforcement(node, peer_id, &model, &verdict, config, streaks).await;
     Ok(())
+}
+
+/// What the verifier should do to the routable set after a verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnforcementAction {
+    /// Leave routing untouched.
+    None,
+    /// Lift any active demotion for this `(peer, model)` (it behaved).
+    Reinstate,
+    /// Demote this `(peer, model)` for the cooldown.
+    Demote,
+}
+
+/// Pure conviction state machine: given a verdict, the current consecutive-
+/// mismatch streak, and config, return the new streak and the routing action.
+/// Kept side-effect-free so the safety rules are unit-testable without a node.
+///
+/// Rules:
+/// - `Inconclusive` → streak unchanged, no action (never convicts).
+/// - `Match` → streak reset to 0; `Reinstate` when enforcing (else `None`).
+/// - `Mismatch` → streak +1; `Demote` only when enforcing *and* the streak has
+///   reached `min_consecutive_mismatches`. A single mismatch never demotes.
+fn next_streak_and_action(
+    verdict: &FingerprintVerdict,
+    current_streak: u32,
+    config: &VerifierConfig,
+) -> (u32, EnforcementAction) {
+    match verdict {
+        FingerprintVerdict::Inconclusive { .. } => (current_streak, EnforcementAction::None),
+        FingerprintVerdict::Match { .. } => (
+            0,
+            if config.enforce {
+                EnforcementAction::Reinstate
+            } else {
+                EnforcementAction::None
+            },
+        ),
+        FingerprintVerdict::Mismatch { .. } => {
+            let streak = current_streak.saturating_add(1);
+            let action = if config.enforce && streak >= config.min_consecutive_mismatches {
+                EnforcementAction::Demote
+            } else {
+                EnforcementAction::None
+            };
+            (streak, action)
+        }
+    }
+}
+
+/// Apply [`next_streak_and_action`] to the shared streak map and the node's
+/// routable set.
+async fn apply_enforcement(
+    node: &mesh::Node,
+    peer_id: EndpointId,
+    model: &str,
+    verdict: &FingerprintVerdict,
+    config: &VerifierConfig,
+    streaks: &mut HashMap<(EndpointId, String), u32>,
+) {
+    let key = (peer_id, model.to_string());
+    let current = streaks.get(&key).copied().unwrap_or(0);
+    let (new_streak, action) = next_streak_and_action(verdict, current, config);
+    if new_streak == 0 {
+        streaks.remove(&key);
+    } else {
+        streaks.insert(key, new_streak);
+    }
+    match action {
+        EnforcementAction::None => {}
+        EnforcementAction::Reinstate => {
+            node.clear_peer_model_demotion(peer_id, model).await;
+        }
+        EnforcementAction::Demote => {
+            let until = std::time::Instant::now() + config.demotion;
+            node.demote_peer_model(peer_id, model, until).await;
+            tracing::warn!(
+                target: "closedmesh::verify",
+                peer = %peer_id.fmt_short(),
+                model,
+                consecutive_mismatches = new_streak,
+                demotion_secs = config.demotion.as_secs(),
+                "verify: DEMOTED (cooldown; reversible, peer stays in mesh)"
+            );
+        }
+    }
 }
 
 /// Re-probe a specific peer with the byte-identical deterministic probe used
@@ -391,7 +516,7 @@ fn log_verdict(peer_id: EndpointId, model: &str, verdict: &FingerprintVerdict) {
                 prefix_agreement,
                 compared_tokens,
                 reason,
-                "verify: MISMATCH (observe-only — not demoting)"
+                "verify: MISMATCH"
             );
         }
         FingerprintVerdict::Inconclusive { reason } => {
@@ -512,5 +637,88 @@ mod tests {
             .expect("embedded references must include the canonical daily driver");
         assert!(!fp.output_sha256.is_empty());
         assert_eq!(fp.prefix_tokens.len(), 32);
+    }
+
+    // ── conviction / enforcement state machine ────────────────────────────
+
+    fn mismatch() -> FingerprintVerdict {
+        FingerprintVerdict::Mismatch {
+            prefix_agreement: 0.1,
+            compared_tokens: 32,
+            reason: "test",
+        }
+    }
+    fn matched() -> FingerprintVerdict {
+        FingerprintVerdict::Match {
+            prefix_agreement: 1.0,
+            compared_tokens: 32,
+        }
+    }
+    fn inconclusive() -> FingerprintVerdict {
+        FingerprintVerdict::Inconclusive { reason: "test" }
+    }
+
+    fn observe() -> VerifierConfig {
+        VerifierConfig::default() // enforce = false
+    }
+    fn enforcing() -> VerifierConfig {
+        VerifierConfig {
+            enforce: true,
+            min_consecutive_mismatches: 2,
+            ..VerifierConfig::default()
+        }
+    }
+
+    #[test]
+    fn observe_mode_never_demotes_however_many_mismatches() {
+        let cfg = observe();
+        let mut streak = 0;
+        for _ in 0..10 {
+            let (s, action) = next_streak_and_action(&mismatch(), streak, &cfg);
+            streak = s;
+            assert_eq!(action, EnforcementAction::None);
+        }
+        assert_eq!(streak, 10); // streak still tracked for observability
+    }
+
+    #[test]
+    fn single_mismatch_does_not_demote_when_enforcing() {
+        let cfg = enforcing(); // needs 2
+        let (streak, action) = next_streak_and_action(&mismatch(), 0, &cfg);
+        assert_eq!(streak, 1);
+        assert_eq!(action, EnforcementAction::None);
+    }
+
+    #[test]
+    fn consecutive_mismatches_demote_at_threshold() {
+        let cfg = enforcing();
+        let (streak, action) = next_streak_and_action(&mismatch(), 1, &cfg);
+        assert_eq!(streak, 2);
+        assert_eq!(action, EnforcementAction::Demote);
+    }
+
+    #[test]
+    fn inconclusive_never_advances_streak_or_demotes() {
+        let cfg = enforcing();
+        // One prior mismatch on record, then an inconclusive probe.
+        let (streak, action) = next_streak_and_action(&inconclusive(), 1, &cfg);
+        assert_eq!(streak, 1, "inconclusive must not advance the streak");
+        assert_eq!(action, EnforcementAction::None);
+    }
+
+    #[test]
+    fn match_resets_streak_and_reinstates_when_enforcing() {
+        let cfg = enforcing();
+        let (streak, action) = next_streak_and_action(&matched(), 5, &cfg);
+        assert_eq!(streak, 0);
+        assert_eq!(action, EnforcementAction::Reinstate);
+    }
+
+    #[test]
+    fn match_in_observe_mode_resets_but_takes_no_routing_action() {
+        let cfg = observe();
+        let (streak, action) = next_streak_and_action(&matched(), 5, &cfg);
+        assert_eq!(streak, 0);
+        assert_eq!(action, EnforcementAction::None);
     }
 }

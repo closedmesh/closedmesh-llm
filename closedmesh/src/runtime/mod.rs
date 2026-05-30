@@ -3106,9 +3106,11 @@ async fn run_auto(
         .await;
     });
 
-    // Verification v1 (observe-only): periodically re-probe peers and compare
-    // their logit fingerprint against a reference. Logs verdicts; never
-    // demotes. Safe to run on any node that proxies inference.
+    // Verification v1: periodically re-probe peers and compare their model
+    // fingerprint against a reference. Observe-only by default; demotes
+    // repeatedly-convicted peers (reversible cooldown) when
+    // CLOSEDMESH_VERIFY_ENFORCE is set. Safe to run on any node that proxies
+    // inference.
     crate::inference::verify::spawn_verifier(
         node.clone(),
         crate::inference::verify::VerifierConfig::default(),
@@ -4192,8 +4194,9 @@ async fn run_passive(
     }
 
     // Verification v1 (observe-only): a client/entry router re-probes peers it
-    // routes to and compares their logit fingerprint against a reference.
-    // Logs verdicts; never demotes (enforcement is a later, flagged increment).
+    // routes to and compares their model fingerprint against a reference.
+    // Observe-only by default; demotes repeatedly-convicted peers (reversible
+    // cooldown) when CLOSEDMESH_VERIFY_ENFORCE is set.
     crate::inference::verify::spawn_verifier(
         node.clone(),
         crate::inference::verify::VerifierConfig::default(),

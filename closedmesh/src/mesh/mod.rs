@@ -1362,6 +1362,16 @@ struct MeshState {
     /// longer permanently evicts the cohort's only target. Cleared on
     /// successful Delivered.
     target_failures: HashMap<EndpointId, VecDeque<std::time::Instant>>,
+    /// Verifier-armed temporary route demotions, keyed by `(peer, model)` →
+    /// the `Instant` the demotion expires. While present and unexpired, that
+    /// `(peer, model)` pair is skipped by `hosts_for_model` and the election
+    /// target builder, so traffic for `model` routes elsewhere. This is a
+    /// *reversible* cooldown (not eviction): the peer stays in the mesh, keeps
+    /// getting re-probed, and is reinstated automatically when the cooldown
+    /// lapses or immediately on a verified `Match`. Only the verifier writes
+    /// here, and only when enforcement is explicitly enabled; with
+    /// enforcement off the map stays empty and every filter is a no-op.
+    verifier_demotions: HashMap<(EndpointId, String), std::time::Instant>,
 }
 
 /// Sliding window over which routing-layer failures to a single remote
@@ -1595,6 +1605,40 @@ impl Node {
     pub async fn clear_target_failures(&self, peer_id: EndpointId) {
         let mut state = self.state.lock().await;
         state.target_failures.remove(&peer_id);
+    }
+
+    /// Verifier enforcement: temporarily demote `(peer, model)` from routing
+    /// until `until`. Reversible — the peer stays in the mesh and keeps being
+    /// re-probed; it is reinstated when the cooldown lapses or on a verified
+    /// `Match`. Only the verifier calls this, and only with enforcement on.
+    pub async fn demote_peer_model(
+        &self,
+        peer_id: EndpointId,
+        model: &str,
+        until: std::time::Instant,
+    ) {
+        let mut state = self.state.lock().await;
+        state
+            .verifier_demotions
+            .insert((peer_id, model.to_string()), until);
+    }
+
+    /// Reinstate a `(peer, model)` early (e.g. on a verified `Match`).
+    pub async fn clear_peer_model_demotion(&self, peer_id: EndpointId, model: &str) {
+        let mut state = self.state.lock().await;
+        state
+            .verifier_demotions
+            .remove(&(peer_id, model.to_string()));
+    }
+
+    /// Snapshot of currently-active `(peer, model)` demotions, pruning any
+    /// that have lapsed. Consulted by the election target builder so a
+    /// convicted host is skipped without waiting for it to re-gossip.
+    pub async fn active_demotions(&self) -> std::collections::HashSet<(EndpointId, String)> {
+        let now = std::time::Instant::now();
+        let mut state = self.state.lock().await;
+        state.verifier_demotions.retain(|_, until| *until > now);
+        state.verifier_demotions.keys().cloned().collect()
     }
 
     #[cfg(test)]
@@ -1972,6 +2016,7 @@ impl Node {
                 seen_plugin_message_order: VecDeque::new(),
                 policy_rejected_peers: HashMap::new(),
                 target_failures: HashMap::new(),
+                verifier_demotions: HashMap::new(),
             })),
             role: Arc::new(Mutex::new(role)),
             models: Arc::new(Mutex::new(Vec::new())),
@@ -2091,6 +2136,7 @@ impl Node {
                 seen_plugin_message_order: VecDeque::new(),
                 policy_rejected_peers: HashMap::new(),
                 target_failures: HashMap::new(),
+                verifier_demotions: HashMap::new(),
             })),
             role: Arc::new(Mutex::new(role)),
             models: Arc::new(Mutex::new(Vec::new())),
@@ -3322,10 +3368,20 @@ impl Node {
     /// Used for retry: if the first host fails, try the next.
     pub async fn hosts_for_model(&self, model: &str) -> Vec<EndpointId> {
         let state = self.state.lock().await;
+        // Skip any host the verifier has demoted for this model (cooldown not
+        // yet lapsed). The map is empty unless enforcement is enabled, so this
+        // is a no-op on the common path.
+        let now = std::time::Instant::now();
+        let demotions = &state.verifier_demotions;
         let mut hosts: Vec<(EndpointId, u64)> = state
             .peers
             .values()
             .filter(|p| p.routes_http_model(model))
+            .filter(|p| {
+                !demotions
+                    .get(&(p.id, model.to_string()))
+                    .is_some_and(|until| *until > now)
+            })
             .map(|p| (p.id, p.inflight_requests))
             .collect();
         let my_id = self.endpoint.id();
