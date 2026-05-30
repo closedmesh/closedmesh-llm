@@ -171,10 +171,12 @@ pub struct CachedNativeBaseline {
     /// this differs from the live file's mtime — covers re-quantization
     /// and redownload without us having to hash the weights.
     pub model_file_mtime_secs: Option<u64>,
-    /// Deterministic logit fingerprint from the same probe. `None` for
-    /// caches written before this field existed (serde default) or when
-    /// the probe produced no output. Captured + cached only today — not
-    /// yet gossiped or used for enforcement.
+    /// Deterministic model-identity fingerprint from the same probe.
+    /// `None` for caches written before this field existed (serde default)
+    /// or when the probe produced no output. Captured, cached, and gossiped;
+    /// consumed by the verifier loop in `inference::verify`. Enforcement
+    /// (reversible peer demotion) is gated behind `CLOSEDMESH_VERIFY_ENFORCE`
+    /// and off by default — see that module for the observe-vs-enforce policy.
     #[serde(default)]
     pub logit_fingerprint: Option<LogitFingerprint>,
 }
@@ -196,8 +198,12 @@ pub struct CachedNativeBaseline {
 /// returns no alternatives, so they carried no signal. The token sequence
 /// and output hash are the discriminators.
 ///
-/// This struct is captured + cached + gossiped, but drives no enforcement
-/// yet — pure instrumentation, same risk profile as the timing baseline.
+/// This struct is captured, cached, and gossiped, and is consumed by the
+/// verifier loop in [`crate::inference::verify`]. Enforcement (reversible,
+/// time-boxed peer demotion on sustained mismatch) is gated behind
+/// `CLOSEDMESH_VERIFY_ENFORCE` and off by default, so capturing/gossiping a
+/// fingerprint has the same risk profile as the timing baseline — observe-only
+/// until enforcement is explicitly enabled.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LogitFingerprint {
     /// Number of decoded tokens observed for the probe (`0` when the backend
@@ -218,11 +224,7 @@ pub(crate) fn build_fingerprint(tokens: &[String], full_text: &str) -> LogitFing
     let mut hasher = Sha256::new();
     hasher.update(full_text.as_bytes());
     let output_sha256 = hex::encode(hasher.finalize());
-    let prefix_tokens = tokens
-        .iter()
-        .take(FINGERPRINT_PREFIX_LEN)
-        .cloned()
-        .collect();
+    let prefix_tokens = tokens.iter().take(FINGERPRINT_PREFIX_LEN).cloned().collect();
     LogitFingerprint {
         token_count: tokens.len() as u32,
         output_sha256,
@@ -740,16 +742,16 @@ pub fn spawn_collector(
                         let mut cache = load_cache(cp);
                         cache.entries.insert(
                             model.clone(),
-                            CachedNativeBaseline {
-                                model: entry.model.clone(),
-                                native_tps_p50: entry.native_tps_p50,
-                                native_ttft_ms_p50: entry.native_ttft_ms_p50,
-                                measured_at_unix_secs: entry.measured_at_unix_secs,
-                                samples: entry.samples,
-                                backend: entry.backend.clone(),
-                                model_file_mtime_secs: live_mtime,
-                                logit_fingerprint: meas.logit_fingerprint.clone(),
-                            },
+                        CachedNativeBaseline {
+                            model: entry.model.clone(),
+                            native_tps_p50: entry.native_tps_p50,
+                            native_ttft_ms_p50: entry.native_ttft_ms_p50,
+                            measured_at_unix_secs: entry.measured_at_unix_secs,
+                            samples: entry.samples,
+                            backend: entry.backend.clone(),
+                            model_file_mtime_secs: live_mtime,
+                            logit_fingerprint: meas.logit_fingerprint.clone(),
+                        },
                         );
                         if let Err(err) = save_cache(cp, &cache) {
                             tracing::warn!(

@@ -9,6 +9,7 @@ This repo (`closedmesh`) contains closedmesh — a Rust binary that pools GPUs o
 | Doc | What it covers |
 |---|---|
 | `README.md` | Usage, install, CLI flags, examples |
+| `docs/VERIFICATION.md` | Model-identity peer verification: fingerprints, audit loop, `CLOSEDMESH_VERIFY_ENFORCE`, privacy boundary |
 | `CONTRIBUTING.md` | Build from source, dev workflow, UI dev |
 | `RELEASE.md` | Release process (build, bundle, tag, GitHub release) |
 | `ROADMAP.md` | Future directions |

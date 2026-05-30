@@ -343,6 +343,7 @@ scripts/                 Release, install, smoke-test scripts
 - [docs/CLI.md](docs/CLI.md) — full CLI reference
 - [docs/AGENTS.md](docs/AGENTS.md) — Goose, Claude Code, pi, OpenCode, curl, blackboard
 - [docs/BENCHMARKS.md](docs/BENCHMARKS.md) — benchmark numbers and context
+- [docs/VERIFICATION.md](docs/VERIFICATION.md) — model-identity peer verification (fingerprints, the audit loop, observe vs enforce, privacy boundary)
 - [CONTRIBUTING.md](CONTRIBUTING.md) — local development and build workflows
 - [PLUGINS.md](PLUGINS.md) — plugin system and blackboard internals
 - [closedmesh/docs/VIRTUAL_LLM.md](closedmesh/docs/VIRTUAL_LLM.md) — inter-model collaboration design

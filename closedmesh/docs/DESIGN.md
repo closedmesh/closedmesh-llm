@@ -18,7 +18,9 @@ src/
 │   ├── election.rs          Per-model host election, tensor split, llama-server lifecycle
 │   ├── launch.rs            rpc-server and llama-server process management
 │   ├── moe.rs               MoE detection, expert rankings, split orchestration
-│   └── pipeline.rs          Inference pipeline coordination
+│   ├── pipeline.rs          Inference pipeline coordination
+│   ├── native_baseline.rs   Native (no-tunnel) timing baseline + model-identity fingerprint capture
+│   └── verify.rs            Model-identity verification: comparison oracle + verifier loop (see docs/VERIFICATION.md)
 ├── mesh/mod.rs              Node struct, QUIC endpoint, gossip, peer management, mesh identity
 ├── models/
 │   ├── capabilities.rs      Vision/audio/multimodal/reasoning capability inference
