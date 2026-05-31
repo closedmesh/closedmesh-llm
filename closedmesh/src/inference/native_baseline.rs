@@ -31,17 +31,22 @@
 //!   capability. v0.66.52 raised the count to 3 (sorted, middle value
 //!   wins). The `samples` field on the wire was always there for this;
 //!   the gossip schema didn't need to change.
-//! - The synthetic prompt asks for ~80–128 output tokens with `temperature=0`
-//!   and a fixed seed, so the same model produces the same shape of
-//!   output across runs. This is not an apples-to-apples comparison
-//!   with through-mesh traffic (which has variable prompt + output
-//!   shapes); it is a *baseline* the through-mesh number can be
-//!   referenced against.
-//! - Inter-sample delay is 1 s so consecutive runs don't race the same
-//!   prompt cache state, but small enough that the whole 3-sample
-//!   sweep finishes in ~30 s on Apple Silicon. Failed samples in a
-//!   sweep are dropped silently; we still publish a median across the
-//!   surviving subset (down to 1) rather than blank the cache.
+//! - Each sample asks for ~80–128 output tokens with `temperature=0`. The
+//!   first sample sends the fixed deterministic probe (which also produces
+//!   the gossiped model-identity fingerprint); the remaining samples send
+//!   *unique* cache-busting probes ([`probe_messages_for`] with a fresh
+//!   nonce). This is deliberate: v0.66.49 → v0.66.56 sent the *same* probe
+//!   for all 3 samples, so llama-server's prompt-KV cache replayed it and
+//!   the published TTFT was ~20x optimistic (a cache hit, not a real
+//!   prefill). Unique probes force a real prefill per sample, so the
+//!   baseline reflects what a first-time user prompt actually pays. This is
+//!   still not apples-to-apples with through-mesh traffic (variable prompt +
+//!   output shapes); it is a *baseline* the through-mesh number references.
+//! - Inter-sample delay is 1 s to let the GPU command queue drain between
+//!   runs, small enough that the whole 3-sample sweep finishes in ~30 s on
+//!   Apple Silicon. Failed samples in a sweep are dropped silently; we still
+//!   publish a median across the surviving subset (down to 1) rather than
+//!   blank the cache.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -72,11 +77,11 @@ pub(crate) const MAX_TOKENS: u32 = 128;
 /// run without inflating measurement time past ~30 s. See module-level
 /// methodology note for why this isn't 1 anymore.
 const SAMPLES_PER_REFRESH: u32 = 3;
-/// Pause between consecutive samples in a single refresh sweep. Long
-/// enough that prompt-cache state from the previous run isn't reused
-/// (llama-server's prompt cache TTL is much higher, but the delay also
-/// gives the GPU command queue a moment to drain), short enough that
-/// 3 samples still finish in ~30 s on Apple Silicon.
+/// Pause between consecutive samples in a single refresh sweep. Gives the
+/// GPU command queue a moment to drain between runs; short enough that 3
+/// samples still finish in ~30 s on Apple Silicon. Note: this delay does
+/// *not* defeat prompt-cache reuse (llama-server's cache TTL is far longer) —
+/// that is why timing samples now use unique probes, not the same prompt.
 const INTER_SAMPLE_DELAY: Duration = Duration::from_secs(1);
 /// How many decoded tokens the fingerprint covers. The greedy decode of a
 /// fixed prompt is a strong model-identity signal; a bounded prefix lets a
@@ -433,10 +438,22 @@ pub struct BaselineMeasurement {
 /// measure TTFT + decode rate. Streaming so TTFT is the byte-level
 /// time-to-first-chunk, not the request total.
 ///
+/// `messages` is the probe to send. Pass [`probe_messages`] for the fixed
+/// deterministic reference (so the fingerprint stays comparable across
+/// peers) or [`probe_messages_for`] with a fresh nonce for a unique,
+/// cache-busting timing sample. `capture_fingerprint` must be `true` only
+/// for the fixed probe: a unique probe's fingerprint is not comparable to
+/// any reference, so timing samples leave it `None` and never feed the
+/// gossiped value.
+///
 /// Errors when the request times out, returns a non-200, or doesn't
 /// produce any output tokens. Callers log + retain the previous cached
 /// baseline rather than blanking the gossiped value.
-pub async fn measure_baseline(req: &BaselineRequest) -> anyhow::Result<BaselineMeasurement> {
+pub async fn measure_baseline(
+    req: &BaselineRequest,
+    messages: Vec<serde_json::Value>,
+    capture_fingerprint: bool,
+) -> anyhow::Result<BaselineMeasurement> {
     let client = reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .build()
@@ -445,7 +462,7 @@ pub async fn measure_baseline(req: &BaselineRequest) -> anyhow::Result<BaselineM
     let url = format!("http://127.0.0.1:{}/v1/chat/completions", req.http_port);
     let body = serde_json::json!({
         "model": req.model,
-        "messages": probe_messages(),
+        "messages": messages,
         "max_tokens": MAX_TOKENS,
         "temperature": 0,
         "seed": PROBE_SEED,
@@ -510,13 +527,21 @@ pub async fn measure_baseline(req: &BaselineRequest) -> anyhow::Result<BaselineM
     }
     let native_tps_p50 = (completion_tokens as f64) / secs;
 
-    // Build the deterministic fingerprint from the same buffered body.
-    // No extra request; the probe already streamed it.
-    let (output_text, tokens) = parse_output_and_tokens_from_sse(&buf);
-    let logit_fingerprint = if output_text.is_empty() {
-        None
+    // Build the deterministic fingerprint from the same buffered body — but
+    // only for the fixed reference probe. Unique cache-busting timing probes
+    // produce per-probe output that isn't comparable to any reference, so we
+    // skip the build and leave the fingerprint `None`; this keeps the gossiped
+    // fingerprint exactly the fixed-probe one (or `None`), never a stray
+    // timing-probe hash. No extra request; the probe already streamed it.
+    let logit_fingerprint = if capture_fingerprint {
+        let (output_text, tokens) = parse_output_and_tokens_from_sse(&buf);
+        if output_text.is_empty() {
+            None
+        } else {
+            Some(build_fingerprint(&tokens, &output_text))
+        }
     } else {
-        Some(build_fingerprint(&tokens, &output_text))
+        None
     };
 
     Ok(BaselineMeasurement {
@@ -614,8 +639,10 @@ fn median_measurement(
     tps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     ttft.sort();
     let mid = samples.len() / 2;
-    // The probe is deterministic (temp=0/seed=42), so every surviving
-    // sample's fingerprint should be identical; take the first present.
+    // Only the fixed-probe sample (index 0) carries a fingerprint; the
+    // cache-busting timing samples leave it `None`. `find_map` therefore
+    // yields the fixed-probe fingerprint when sample 0 succeeded, else `None`
+    // — never a stray timing-probe hash.
     let logit_fingerprint = samples.iter().find_map(|m| m.logit_fingerprint.clone());
     let sample_count = samples.len() as u32;
     Some((
@@ -633,6 +660,18 @@ fn median_measurement(
     ))
 }
 
+/// A per-sample nonce for the cache-busting timing probe. Time-derived so it
+/// differs across samples (the inter-sample delay guarantees distinct nanos)
+/// and across refreshes, so [`probe_messages_for`] yields a prompt
+/// llama-server's prompt-KV cache has never seen — forcing a real prefill.
+fn baseline_timing_nonce(sample_index: u32) -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+        .wrapping_add(sample_index as u64)
+}
+
 /// Run [`measure_baseline`] up to `n` times with a 1 s gap between
 /// samples and return the median TPS / TTFT across the runs that
 /// succeeded. `Err` only when *every* sample failed; partial sample
@@ -648,7 +687,20 @@ async fn measure_baseline_median(
         if i > 0 {
             tokio::time::sleep(INTER_SAMPLE_DELAY).await;
         }
-        match measure_baseline(req).await {
+        // Sample 0 sends the fixed deterministic probe: it yields the
+        // canonical gossiped fingerprint plus one timing sample. Samples 1..
+        // send unique, cache-busting probes so TTFT reflects real first-time
+        // prefill instead of llama-server's prompt-KV cache replaying an
+        // identical prompt (the v0.66.49 bug: 3 back-to-back identical probes
+        // made samples 2/3 cache hits, so the median TTFT was ~20x optimistic).
+        // With n=3 the lone fixed-probe sample is the extreme on both axes, so
+        // the median excludes it and reports realistic timing.
+        let (messages, capture_fp) = if i == 0 {
+            (probe_messages(), true)
+        } else {
+            (probe_messages_for(baseline_timing_nonce(i)), false)
+        };
+        match measure_baseline(req, messages, capture_fp).await {
             Ok(m) => samples.push(m),
             Err(e) => {
                 tracing::warn!(
@@ -948,6 +1000,34 @@ mod tests {
         // (nonce + TOPICS.len()) differ.
         let same_topic = probe_messages_for(7 + PROBE_TOPICS.len() as u64);
         assert_ne!(a, same_topic);
+    }
+
+    /// The v0.66.57 baseline-honesty fix: a refresh sweep must send a
+    /// *distinct* prompt for every sample (sample 0 = fixed reference probe,
+    /// samples 1.. = unique cache-busting probes), otherwise llama-server's
+    /// prompt-KV cache replays an identical prompt and the published TTFT is
+    /// a ~20x-optimistic cache hit instead of a real prefill.
+    #[test]
+    fn baseline_refresh_sends_distinct_probe_per_sample() {
+        fn user_text(msgs: &[serde_json::Value]) -> String {
+            msgs.iter()
+                .find(|m| m["role"] == "user")
+                .and_then(|m| m["content"].as_str())
+                .unwrap_or_default()
+                .to_string()
+        }
+        let mut texts = std::collections::HashSet::new();
+        // Sample 0: fixed deterministic probe.
+        assert!(texts.insert(user_text(&probe_messages())));
+        // Samples 1..: unique probes keyed by the per-sample timing nonce.
+        for i in 1..SAMPLES_PER_REFRESH {
+            let probe = probe_messages_for(baseline_timing_nonce(i));
+            assert!(
+                texts.insert(user_text(&probe)),
+                "sample {i} probe collided with an earlier probe in the sweep"
+            );
+        }
+        assert_eq!(texts.len(), SAMPLES_PER_REFRESH as usize);
     }
 
     #[test]
