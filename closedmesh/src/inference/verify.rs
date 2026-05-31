@@ -103,8 +103,7 @@ pub fn compare_fingerprints(
     // An exact hash match is a clean positive; a mismatch with no prefix is
     // ambiguous (expected across backends), so we decline to judge.
     if reference.prefix_tokens.is_empty() || candidate.prefix_tokens.is_empty() {
-        if !reference.output_sha256.is_empty()
-            && reference.output_sha256 == candidate.output_sha256
+        if !reference.output_sha256.is_empty() && reference.output_sha256 == candidate.output_sha256
         {
             return FingerprintVerdict::Match {
                 prefix_agreement: 1.0,
@@ -198,7 +197,12 @@ impl Default for VerifierConfig {
 
 fn enforce_from_env() -> bool {
     std::env::var(ENFORCE_ENV)
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -636,7 +640,15 @@ mod tests {
         let r = fp(&ten(), "h1");
         let wrong = fp(
             &[
-                "Hola", " mundo", " esto", " es", " otro", " modelo", " muy", " distinto", " aqui",
+                "Hola",
+                " mundo",
+                " esto",
+                " es",
+                " otro",
+                " modelo",
+                " muy",
+                " distinto",
+                " aqui",
                 " vale",
             ],
             "h2",

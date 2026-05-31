@@ -229,7 +229,11 @@ pub(crate) fn build_fingerprint(tokens: &[String], full_text: &str) -> LogitFing
     let mut hasher = Sha256::new();
     hasher.update(full_text.as_bytes());
     let output_sha256 = hex::encode(hasher.finalize());
-    let prefix_tokens = tokens.iter().take(FINGERPRINT_PREFIX_LEN).cloned().collect();
+    let prefix_tokens = tokens
+        .iter()
+        .take(FINGERPRINT_PREFIX_LEN)
+        .cloned()
+        .collect();
     LogitFingerprint {
         token_count: tokens.len() as u32,
         output_sha256,
@@ -794,16 +798,16 @@ pub fn spawn_collector(
                         let mut cache = load_cache(cp);
                         cache.entries.insert(
                             model.clone(),
-                        CachedNativeBaseline {
-                            model: entry.model.clone(),
-                            native_tps_p50: entry.native_tps_p50,
-                            native_ttft_ms_p50: entry.native_ttft_ms_p50,
-                            measured_at_unix_secs: entry.measured_at_unix_secs,
-                            samples: entry.samples,
-                            backend: entry.backend.clone(),
-                            model_file_mtime_secs: live_mtime,
-                            logit_fingerprint: meas.logit_fingerprint.clone(),
-                        },
+                            CachedNativeBaseline {
+                                model: entry.model.clone(),
+                                native_tps_p50: entry.native_tps_p50,
+                                native_ttft_ms_p50: entry.native_ttft_ms_p50,
+                                measured_at_unix_secs: entry.measured_at_unix_secs,
+                                samples: entry.samples,
+                                backend: entry.backend.clone(),
+                                model_file_mtime_secs: live_mtime,
+                                logit_fingerprint: meas.logit_fingerprint.clone(),
+                            },
                         );
                         if let Err(err) = save_cache(cp, &cache) {
                             tracing::warn!(
