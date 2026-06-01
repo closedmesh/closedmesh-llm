@@ -356,8 +356,37 @@ fn classify_peer_split_role(
         };
     }
 
-    // We have ≥1 co-serving peer for `model`. The host of that model is the
-    // anchor of the split group (if any). Build the SplitGroup payload.
+    // Multi-host replication honesty gate (Jun 1 2026, the dense-Qwen3-8B
+    // "moe_shard" miscall): when two or more peers each independently route
+    // HTTP for this model, they are replicas — every one of them holds the
+    // whole model and serves a request end-to-end, and the entry node simply
+    // load-balances across them. That is NOT a pipeline split (one host
+    // pooling VRAM from layer-providing rpc workers) and no peer is "a shard"
+    // of anything. The pre-gate code blindly tagged ≥2 routing hosts as
+    // `moe_shard` with a pooled `split_group`, so two boxes each solo-serving
+    // a dense 8B showed up on the dashboard as a 2-way MoE group that did not
+    // exist. The peer-level classifier also can't tell dense replication from
+    // a genuine MoE expert-shard layout without GGUF metadata (see the doc
+    // comment above) — the model-level `split_kind` is the source of truth for
+    // moe-vs-multi_host — so the honest per-peer badge for replicas is silence.
+    // This gate is robust to the model-size gossip being absent, which would
+    // otherwise bypass the solo-fit gate above and resurrect the bogus badge.
+    let independent_routing_hosts = all_peers
+        .iter()
+        .filter(|p| p.id != peer.id && p.routes_http_model(model))
+        .count()
+        + if peer.routes_http_model(model) { 1 } else { 0 };
+    if independent_routing_hosts >= 2 {
+        return PeerSplitClassification {
+            role: None,
+            group: None,
+            moe_shard: None,
+        };
+    }
+
+    // Exactly one routing host plus a non-routing cohort ⇒ a genuine
+    // pipeline-parallel split: the model didn't fit solo, so the elected host
+    // pools VRAM from rpc-worker peers. Build the SplitGroup payload.
     let mut peer_ids: Vec<String> = std::iter::once(peer.id.fmt_short().to_string())
         .chain(cohort.iter().map(|c| c.id.fmt_short().to_string()))
         .collect();
@@ -376,28 +405,12 @@ fn classify_peer_split_role(
 
     let group = SplitGroupPayload {
         model: model.to_string(),
-        host_id: host_id.clone(),
+        host_id,
         peer_ids,
         total_group_vram_gb,
     };
 
-    // Count all Host-role peers (including self if applicable) that route
-    // this model. Multiple hosts ⇒ MoE / multi-host, never a single
-    // pipeline-host with workers.
-    let total_routing_hosts = all_peers
-        .iter()
-        .filter(|p| p.id != peer.id && p.routes_http_model(model))
-        .count()
-        + if peer.routes_http_model(model) { 1 } else { 0 };
-
-    let role = if total_routing_hosts >= 2 {
-        // Multiple Hosts serving the same model means independent shards
-        // (MoE) or simple multi-host load balancing. The peer-level classifier
-        // can't distinguish between those without GGUF metadata; it picks the
-        // more informative label and lets the model-level classifier override
-        // via `split_kind`.
-        Some("moe_shard".to_string())
-    } else if peer.routes_http_model(model) {
+    let role = if peer.routes_http_model(model) {
         Some("pipeline_host".to_string())
     } else if matches!(peer.role, mesh::NodeRole::Worker) {
         Some("pipeline_worker".to_string())
@@ -405,23 +418,12 @@ fn classify_peer_split_role(
         None
     };
 
-    let moe_shard = if matches!(role.as_deref(), Some("moe_shard")) {
-        Some(MoeShardPayload {
-            model: model.to_string(),
-            total_shards: total_routing_hosts as u32,
-        })
-    } else {
-        None
-    };
-
-    let _ = host; // host info already encoded in `host_id` above.
-
     let _ = my_vram_gb; // kept for symmetry with future weight-aware branches
 
     PeerSplitClassification {
         role,
         group: Some(group),
-        moe_shard,
+        moe_shard: None,
     }
 }
 
@@ -629,6 +631,26 @@ fn classify_local_split_role(
         };
     }
 
+    // Multi-host replication honesty gate (mirror of `classify_peer_split_role`):
+    // if another peer already routes HTTP for this model AND we route it too
+    // (we're a host), there are ≥2 independent full hosts — replicas the entry
+    // node load-balances, not a pipeline split. We hold the whole model, so we
+    // are not "a shard"; surface no per-peer split badge and let the
+    // model-level `split_kind` carry moe-vs-multi_host. Robust to absent
+    // model-size gossip (which bypasses the solo-fit gate above).
+    let other_routing_hosts = all_peers
+        .iter()
+        .filter(|p| p.routes_http_model(model))
+        .count();
+    let independent_routing_hosts = other_routing_hosts + if is_host { 1 } else { 0 };
+    if independent_routing_hosts >= 2 {
+        return PeerSplitClassification {
+            role: None,
+            group: None,
+            moe_shard: None,
+        };
+    }
+
     let mut peer_ids: Vec<String> = std::iter::once(self_id.to_string())
         .chain(cohort.iter().map(|c| c.id.fmt_short().to_string()))
         .collect();
@@ -650,41 +672,23 @@ fn classify_local_split_role(
 
     let group = SplitGroupPayload {
         model: model.to_string(),
-        host_id: host_id.clone(),
+        host_id,
         peer_ids,
         total_group_vram_gb,
     };
 
     let i_am_host = host_peer.map(|_| false).unwrap_or(is_host);
 
-    // If multiple peers also have Host role for this model, treat ourselves
-    // as one shard of an MoE / multi-host deployment.
-    let other_host_count = all_peers
-        .iter()
-        .filter(|p| p.routes_http_model(model))
-        .count();
-
-    let role = if other_host_count >= 1 && is_host {
-        Some("moe_shard".to_string())
-    } else if i_am_host {
+    let role = if i_am_host {
         Some("pipeline_host".to_string())
     } else {
         Some("pipeline_worker".to_string())
     };
 
-    let moe_shard = if matches!(role.as_deref(), Some("moe_shard")) {
-        Some(MoeShardPayload {
-            model: model.to_string(),
-            total_shards: (other_host_count + 1) as u32,
-        })
-    } else {
-        None
-    };
-
     PeerSplitClassification {
         role,
         group: Some(group),
-        moe_shard,
+        moe_shard: None,
     }
 }
 
@@ -2755,7 +2759,15 @@ mod tests {
     }
 
     #[test]
-    fn classify_peer_split_role_marks_moe_shard_for_dual_hosts() {
+    fn classify_peer_split_role_treats_dual_routing_hosts_as_replicas() {
+        // Two peers that each independently route HTTP for the same model are
+        // replicas (the entry node load-balances across them) — every one
+        // holds the whole model end-to-end. The peer-level classifier must NOT
+        // fabricate a `moe_shard` / split_group here: it can't tell dense
+        // replication from a genuine MoE expert-shard layout without GGUF
+        // metadata, so the honest per-peer badge is silence and MoE-ness is
+        // carried by the model-level `split_kind`. (Regression: a dense
+        // Qwen3-8B replicated on two boxes showed up as a 2-way `moe_shard`.)
         let host_a = make_test_peer(
             30,
             mesh::NodeRole::Host { http_port: 9337 },
@@ -2773,10 +2785,44 @@ mod tests {
         let peers = vec![host_a.clone(), host_b.clone()];
 
         let class = classify_peer_split_role(&host_a, &peers, 16.0);
-        assert_eq!(class.role.as_deref(), Some("moe_shard"));
-        let shard = class.moe_shard.expect("moe_shard populated for dual host");
-        assert_eq!(shard.model, "Qwen3-30B-A3B");
-        assert_eq!(shard.total_shards, 2);
+        assert_eq!(
+            class.role, None,
+            "two independent routing hosts are replicas, not a shard/split"
+        );
+        assert!(class.group.is_none());
+        assert!(class.moe_shard.is_none());
+    }
+
+    #[test]
+    fn classify_local_split_role_treats_dual_routing_hosts_as_replicas() {
+        // Mirror of the peer-level replica gate for the local node: when we
+        // are a Host serving a model AND another peer also routes it, we are
+        // one of N replicas, not a shard. `my_split_role` must stay silent so
+        // the dashboard's "you're contributing part of model Z" card doesn't
+        // fire for a node that holds the whole model.
+        let peer = make_test_peer(
+            41,
+            mesh::NodeRole::Host { http_port: 9337 },
+            vec!["Qwen3-8B-Q4_K_M"],
+            vec!["Qwen3-8B-Q4_K_M"],
+            true,
+        );
+        let peers = vec![peer];
+        let class = classify_local_split_role(
+            "selflocalnode",
+            true,  // is_host — we route HTTP for the model too
+            false, // is_client
+            &["Qwen3-8B-Q4_K_M".to_string()],
+            &["Qwen3-8B-Q4_K_M".to_string()],
+            16.0,
+            &peers,
+        );
+        assert_eq!(
+            class.role, None,
+            "local host + another routing host = replicas, not a shard/split"
+        );
+        assert!(class.group.is_none());
+        assert!(class.moe_shard.is_none());
     }
 
     #[test]
