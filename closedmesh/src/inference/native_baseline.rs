@@ -164,6 +164,13 @@ fn current_schema_version() -> u32 {
     1
 }
 
+/// Runtime crate version. Stamped on every cache entry so a runtime upgrade
+/// busts the baseline cache even when the model file is byte-identical: a new
+/// release can change launch flags (e.g. v0.66.59 enabled no-think serving),
+/// which changes both the timing baseline and the model-identity fingerprint,
+/// and the mtime/TTL freshness keys can't see a flag change.
+const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedNativeBaseline {
     pub model: String,
@@ -184,6 +191,13 @@ pub struct CachedNativeBaseline {
     /// and off by default — see that module for the observe-vs-enforce policy.
     #[serde(default)]
     pub logit_fingerprint: Option<LogitFingerprint>,
+    /// Runtime crate version that wrote this entry (see [`RUNTIME_VERSION`]).
+    /// `None` for caches written before this field existed → treated as stale
+    /// so they get re-measured under the current runtime. A version mismatch
+    /// busts the cache because a release can change launch flags that alter
+    /// the baseline/fingerprint without touching the model file.
+    #[serde(default)]
+    pub runtime_version: Option<String>,
 }
 
 /// Deterministic model-identity fingerprint captured from the same
@@ -547,11 +561,26 @@ pub async fn measure_baseline(
     // fingerprint exactly the fixed-probe one (or `None`), never a stray
     // timing-probe hash. No extra request; the probe already streamed it.
     let logit_fingerprint = if capture_fingerprint {
-        let (output_text, tokens) = parse_output_and_tokens_from_sse(&buf);
-        if output_text.is_empty() {
-            None
-        } else {
-            Some(build_fingerprint(&tokens, &output_text))
+        // The gossiped fingerprint has to line up with what the verifier
+        // compares against, and the verifier always probes non-streaming on
+        // both sides (`local_probe_fingerprint` / `remote_probe_fingerprint`).
+        // Streaming logprobs are lossy under speculative decoding — several
+        // draft-accepted tokens can arrive in one chunk behind a single
+        // logprob entry — so parsing the SSE stream yields a token list that
+        // wouldn't line up with the reference (observed: gossiped prefix
+        // `["Direct", " objective", ...]` vs reference `["Direct",
+        // " measurement", " provides", " objective", ...]`). Capture the
+        // gossiped fingerprint from the same canonical non-streaming probe
+        // (one extra request, fixed sample only, once per refresh). Fall back
+        // to the streaming buffer only if that probe fails, so a transient
+        // error still yields *some* fingerprint rather than none.
+        match local_probe_fingerprint(req.http_port, &req.model, probe_messages(), PROBE_SEED).await
+        {
+            Ok(fp) => Some(fp),
+            Err(_) => {
+                let (output_text, tokens) = parse_output_and_tokens_from_sse(&buf);
+                (!output_text.is_empty()).then(|| build_fingerprint(&tokens, &output_text))
+            }
         }
     } else {
         None
@@ -603,6 +632,15 @@ fn parse_completion_tokens_from_sse_tail(buf: &[u8]) -> Option<u64> {
 /// keep gossiping it while the new run executes) but a refresh tick
 /// kicks off in the background.
 pub fn is_fresh(entry: &CachedNativeBaseline, model_file_mtime_secs: Option<u64>) -> bool {
+    // A runtime upgrade can change launch flags (e.g. enabling no-think
+    // serving) which changes the baseline and the fingerprint even though the
+    // model file is byte-identical. The mtime/TTL keys below can't see that, so
+    // bust the cache whenever the entry was written by a different runtime
+    // version. `None` (pre-stamp caches) is treated as stale for the same
+    // reason — re-measure once under the current runtime to stamp it.
+    if entry.runtime_version.as_deref() != Some(RUNTIME_VERSION) {
+        return false;
+    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -816,6 +854,7 @@ pub fn spawn_collector(
                                 backend: entry.backend.clone(),
                                 model_file_mtime_secs: live_mtime,
                                 logit_fingerprint: meas.logit_fingerprint.clone(),
+                                runtime_version: Some(RUNTIME_VERSION.to_string()),
                             },
                         );
                         if let Err(err) = save_cache(cp, &cache) {
@@ -896,6 +935,7 @@ mod tests {
                 backend: "metal".to_string(),
                 model_file_mtime_secs: Some(1_747_640_000),
                 logit_fingerprint: None,
+                runtime_version: Some(RUNTIME_VERSION.to_string()),
             },
         );
 
@@ -924,11 +964,45 @@ mod tests {
             backend: "metal".to_string(),
             model_file_mtime_secs: Some(1_000_000),
             logit_fingerprint: None,
+            runtime_version: Some(RUNTIME_VERSION.to_string()),
         };
         // Same mtime → fresh.
         assert!(is_fresh(&entry, Some(1_000_000)));
         // Different mtime → not fresh, force re-run.
         assert!(!is_fresh(&entry, Some(2_000_000)));
+    }
+
+    #[test]
+    fn is_fresh_invalidates_on_runtime_version_change() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let base = CachedNativeBaseline {
+            model: "x".to_string(),
+            native_tps_p50: 10.0,
+            native_ttft_ms_p50: 100,
+            measured_at_unix_secs: now,
+            samples: 1,
+            backend: "metal".to_string(),
+            model_file_mtime_secs: Some(1_000_000),
+            logit_fingerprint: None,
+            runtime_version: Some(RUNTIME_VERSION.to_string()),
+        };
+        // Current version + same mtime → fresh.
+        assert!(is_fresh(&base, Some(1_000_000)));
+        // Different runtime version → stale, even with matching mtime/TTL.
+        let stale_version = CachedNativeBaseline {
+            runtime_version: Some("0.0.0-old".to_string()),
+            ..base.clone()
+        };
+        assert!(!is_fresh(&stale_version, Some(1_000_000)));
+        // Pre-stamp cache (None) → stale.
+        let unstamped = CachedNativeBaseline {
+            runtime_version: None,
+            ..base
+        };
+        assert!(!is_fresh(&unstamped, Some(1_000_000)));
     }
 
     fn meas(tps: f64, ttft: u64) -> BaselineMeasurement {
@@ -978,6 +1052,7 @@ mod tests {
             backend: "metal".to_string(),
             model_file_mtime_secs: Some(1_000_000),
             logit_fingerprint: None,
+            runtime_version: Some(RUNTIME_VERSION.to_string()),
         };
         assert!(!is_fresh(&entry, Some(1_000_000)));
     }
@@ -1098,6 +1173,7 @@ mod tests {
                     output_sha256: "abc".to_string(),
                     prefix_tokens: vec!["hi".to_string()],
                 }),
+                runtime_version: Some(RUNTIME_VERSION.to_string()),
             },
         );
         save_cache(&path, &cache).unwrap();
