@@ -21,7 +21,7 @@
 
 ---
 
-ClosedMesh LLM is the open-source inference engine behind [ClosedMesh](https://closedmesh.com) — a private LLM product for teams and individuals that don't want to send their conversations to a third-party LLM API. The chat product runs in the browser. The runtime in this repo runs on the machines you already own and presents them as one OpenAI-compatible API.
+ClosedMesh LLM is the open-source inference engine behind [ClosedMesh](https://closedmesh.com) — a private LLM product for teams and individuals that don't want to send their conversations to a third-party LLM API. It's built for the work open-weight models already do well — summarizing documents and codebases, classifying and labeling data at scale, long-running background agents, synthetic-data generation — where keeping data in-house and keeping per-token costs flat matter more than shaving a second off every reply. The chat product runs in the browser. The runtime in this repo runs on the machines you already own and presents them as one OpenAI-compatible API.
 
 The design principle: **the unit of work is a session, not a token.** On residential and laptop-class networks, per-token cross-machine traffic is fatal — RTTs are 20–200 ms, bandwidth is variable, and any architecture that puts the network on the per-token critical path collapses to <1 t/s. So we don't:
 
