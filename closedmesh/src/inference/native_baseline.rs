@@ -83,6 +83,11 @@ const SAMPLES_PER_REFRESH: u32 = 3;
 /// *not* defeat prompt-cache reuse (llama-server's cache TTL is far longer) —
 /// that is why timing samples now use unique probes, not the same prompt.
 const INTER_SAMPLE_DELAY: Duration = Duration::from_secs(1);
+/// How long to wait before retrying a refresh that was deferred because the
+/// node was busy serving real traffic (idle-gating). Short relative to the
+/// TTL/2 steady-state cadence so a popular host still publishes a clean
+/// baseline from its next idle gap instead of going stale for hours.
+const BUSY_RETRY_DELAY: Duration = Duration::from_secs(120);
 /// How many decoded tokens the fingerprint covers. The greedy decode of a
 /// fixed prompt is a strong model-identity signal; a bounded prefix lets a
 /// verifier compare with tolerance instead of demanding an exact
@@ -391,11 +396,7 @@ pub(crate) fn build_fingerprint(
     let mut hasher = Sha256::new();
     hasher.update(full_text.as_bytes());
     let output_sha256 = hex::encode(hasher.finalize());
-    let prefix_tokens = tokens
-        .iter()
-        .take(FINGERPRINT_PREFIX_LEN)
-        .cloned()
-        .collect();
+    let prefix_tokens = tokens.iter().take(FINGERPRINT_PREFIX_LEN).cloned().collect();
     let top_k_tokens = top_k_tokens
         .iter()
         .take(FINGERPRINT_PREFIX_LEN)
@@ -903,20 +904,48 @@ fn baseline_timing_nonce(sample_index: u32) -> u64 {
         .wrapping_add(sample_index as u64)
 }
 
+/// Why a fresh measurement didn't produce a clean published baseline.
+enum BaselineError {
+    /// The node was serving real traffic for every sample window, so no
+    /// uncontended sample was taken. Transient — keep the prior clean value
+    /// and retry on a short cadence.
+    Busy,
+    /// Every sample errored (timeout, non-200, no output). Genuine failure.
+    Failed(anyhow::Error),
+}
+
 /// Run [`measure_baseline`] up to `n` times with a 1 s gap between
 /// samples and return the median TPS / TTFT across the runs that
 /// succeeded. `Err` only when *every* sample failed; partial sample
 /// sets (1 of 3, 2 of 3) still produce a usable measurement so a
 /// flaky network blip doesn't blank a peer's published baseline.
+///
+/// **Idle-gated.** Each sample is only kept if no real request was in flight
+/// on `node` for the whole sample window (checked immediately before and after
+/// the call). A sample that overlaps live traffic is contended — the GPU is
+/// shared, so decode tok/s reads far below the true rate — and would otherwise
+/// be cached as "truth" and gossiped for hours (the 25-vs-121 tok/s
+/// discrepancy that made this signal untrustworthy for the perf-profile
+/// verifier). If every sample is contended this returns
+/// [`BaselineError::Busy`] so the caller keeps the prior clean value and
+/// retries soon, rather than publishing a contended number.
 async fn measure_baseline_median(
+    node: &crate::mesh::Node,
     req: &BaselineRequest,
     n: u32,
-) -> anyhow::Result<(BaselineMeasurement, u32)> {
+) -> Result<(BaselineMeasurement, u32), BaselineError> {
     let mut samples: Vec<BaselineMeasurement> = Vec::with_capacity(n as usize);
     let mut last_err: Option<anyhow::Error> = None;
+    let mut skipped_busy = false;
     for i in 0..n {
         if i > 0 {
             tokio::time::sleep(INTER_SAMPLE_DELAY).await;
+        }
+        // Don't measure while a real request shares the GPU — the sample would
+        // read low and poison the gossiped baseline.
+        if node.inflight_requests() > 0 {
+            skipped_busy = true;
+            continue;
         }
         // Sample 0 sends the fixed deterministic probe: it yields the
         // canonical gossiped fingerprint plus one timing sample. Samples 1..
@@ -932,7 +961,15 @@ async fn measure_baseline_median(
             (probe_messages_for(baseline_timing_nonce(i)), false)
         };
         match measure_baseline(req, messages, capture_fp).await {
-            Ok(m) => samples.push(m),
+            Ok(m) => {
+                // Re-check: if a request started during the sample window the
+                // tail of the decode was contended — discard it.
+                if node.inflight_requests() > 0 {
+                    skipped_busy = true;
+                } else {
+                    samples.push(m);
+                }
+            }
             Err(e) => {
                 tracing::warn!(
                     target: "closedmesh::native_baseline",
@@ -944,9 +981,18 @@ async fn measure_baseline_median(
             }
         }
     }
-    median_measurement(samples, req.backend.clone()).ok_or_else(|| {
-        last_err.unwrap_or_else(|| anyhow::anyhow!("all native baseline samples failed"))
-    })
+    if let Some(out) = median_measurement(samples, req.backend.clone()) {
+        return Ok(out);
+    }
+    // No clean sample. Distinguish "node too busy" (keep prior, retry soon)
+    // from "all samples errored" (genuine failure).
+    if skipped_busy {
+        Err(BaselineError::Busy)
+    } else {
+        Err(BaselineError::Failed(
+            last_err.unwrap_or_else(|| anyhow::anyhow!("all native baseline samples failed")),
+        ))
+    }
 }
 
 /// Settle delay before issuing the first synthetic measurement. Lets
@@ -1010,7 +1056,7 @@ pub fn spawn_collector(
                 http_port,
                 backend: backend.clone(),
             };
-            match measure_baseline_median(&req, SAMPLES_PER_REFRESH).await {
+            match measure_baseline_median(&node, &req, SAMPLES_PER_REFRESH).await {
                 Ok((meas, sample_count)) => {
                     let entry = NativeBaselineEntry {
                         model: model.clone(),
@@ -1025,17 +1071,17 @@ pub fn spawn_collector(
                         let mut cache = load_cache(cp);
                         cache.entries.insert(
                             model.clone(),
-                            CachedNativeBaseline {
-                                model: entry.model.clone(),
-                                native_tps_p50: entry.native_tps_p50,
-                                native_ttft_ms_p50: entry.native_ttft_ms_p50,
-                                measured_at_unix_secs: entry.measured_at_unix_secs,
-                                samples: entry.samples,
-                                backend: entry.backend.clone(),
-                                model_file_mtime_secs: live_mtime,
-                                logit_fingerprint: meas.logit_fingerprint.clone(),
-                                runtime_version: Some(RUNTIME_VERSION.to_string()),
-                            },
+                        CachedNativeBaseline {
+                            model: entry.model.clone(),
+                            native_tps_p50: entry.native_tps_p50,
+                            native_ttft_ms_p50: entry.native_ttft_ms_p50,
+                            measured_at_unix_secs: entry.measured_at_unix_secs,
+                            samples: entry.samples,
+                            backend: entry.backend.clone(),
+                            model_file_mtime_secs: live_mtime,
+                            logit_fingerprint: meas.logit_fingerprint.clone(),
+                            runtime_version: Some(RUNTIME_VERSION.to_string()),
+                        },
                         );
                         if let Err(err) = save_cache(cp, &cache) {
                             tracing::warn!(
@@ -1056,7 +1102,20 @@ pub fn spawn_collector(
                     );
                     node.record_native_baseline(entry).await;
                 }
-                Err(err) => {
+                Err(BaselineError::Busy) => {
+                    // Node was serving real traffic for every sample window.
+                    // Keep the prior clean baseline and retry on a short cadence
+                    // so we grab the next idle gap rather than waiting TTL/2.
+                    tracing::debug!(
+                        target: "closedmesh::native_baseline",
+                        model = %model,
+                        port = http_port,
+                        "native baseline deferred — node busy, retrying soon"
+                    );
+                    tokio::time::sleep(BUSY_RETRY_DELAY).await;
+                    continue;
+                }
+                Err(BaselineError::Failed(err)) => {
                     tracing::warn!(
                         target: "closedmesh::native_baseline",
                         model = %model,
@@ -1079,6 +1138,53 @@ pub fn spawn_collector(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn measure_baseline_median_defers_when_node_busy() {
+        // A real request in flight must prevent a (contended) sample from being
+        // taken or published — that contention is exactly what made native_tps
+        // read 5x low and untrustworthy for the perf-profile verifier. With the
+        // node busy, the port is never even contacted; we must get `Busy` so the
+        // collector keeps the prior clean value and retries soon.
+        let node = crate::mesh::tests::make_test_node(crate::mesh::NodeRole::Host { http_port: 0 })
+            .await
+            .unwrap();
+        let _guard = node.begin_inflight_request();
+        assert!(node.inflight_requests() > 0);
+
+        let req = BaselineRequest {
+            model: "test-model".to_string(),
+            http_port: 0, // never contacted — the busy check short-circuits first
+            backend: "cpu".to_string(),
+        };
+        let result = measure_baseline_median(&node, &req, 1).await;
+        assert!(
+            matches!(result, Err(BaselineError::Busy)),
+            "busy node must defer, not measure a contended sample"
+        );
+    }
+
+    #[tokio::test]
+    async fn measure_baseline_median_reports_failed_when_idle_but_unreachable() {
+        // Idle node but a dead llama-server port: this is a genuine failure, not
+        // a busy-defer. The collector should warn and keep the prior value via
+        // the TTL/2 path, not the short busy-retry path.
+        let node = crate::mesh::tests::make_test_node(crate::mesh::NodeRole::Host { http_port: 0 })
+            .await
+            .unwrap();
+        assert_eq!(node.inflight_requests(), 0);
+
+        let req = BaselineRequest {
+            model: "test-model".to_string(),
+            http_port: 1, // nothing listening → connection refused
+            backend: "cpu".to_string(),
+        };
+        let result = measure_baseline_median(&node, &req, 1).await;
+        assert!(
+            matches!(result, Err(BaselineError::Failed(_))),
+            "idle + unreachable must surface as a genuine failure, not Busy"
+        );
+    }
 
     #[test]
     fn parse_usage_from_sse_tail_extracts_completion_tokens() {
