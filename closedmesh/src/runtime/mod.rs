@@ -3057,22 +3057,42 @@ async fn run_auto(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("serve mode requires an instance runtime"))?
         .clone();
-    let rpc_handle = launch::start_rpc_server(
-        &runtime_arc,
-        &bin_dir,
-        cli.llama_flavor,
-        startup_rpc_backend_device(cli.device.as_deref(), primary_startup_model.as_ref())?,
-        Some(&model),
-    )
-    .await?;
-    tracing::info!(
-        "rpc-server on 127.0.0.1:{} (pid {}) serving {model_name}",
-        rpc_handle.port,
-        rpc_handle.pid
-    );
+    // Lazy rpc-server (prototype): do NOT spawn at startup. A solo node never
+    // joins a pipeline split, so an always-on rpc-server only holds an idle GPU
+    // context + VRAM (proven non-perf — see internal/RESILIENCE.md v0.66.69).
+    // The per-model election loop brings it up on the pipeline-worker edge via
+    // `LazyRpcServer`. The tunnel starts pointing at port 0 (its inbound RPC
+    // handler already drops streams while no rpc-server is up); `set_rpc_port`
+    // repoints it when the server comes up / goes down.
+    let rpc_device =
+        startup_rpc_backend_device(cli.device.as_deref(), primary_startup_model.as_ref())?
+            .map(|s| s.to_string());
 
-    let tunnel_mgr =
-        tunnel::Manager::start(node.clone(), rpc_handle.port, channels.rpc, channels.http).await?;
+    let tunnel_mgr = tunnel::Manager::start(node.clone(), 0, channels.rpc, channels.http).await?;
+
+    let lazy_rpc = crate::inference::lazy_rpc::LazyRpcServer::new(
+        crate::inference::lazy_rpc::LazyRpcParams {
+            runtime: runtime_arc.clone(),
+            bin_dir: bin_dir.clone(),
+            flavor: cli.llama_flavor,
+            device: rpc_device,
+            gguf: Some(model.clone()),
+        },
+        tunnel_mgr.clone(),
+        node.clone(),
+        crate::inference::lazy_rpc::RPC_IDLE_TIMEOUT,
+    );
+    // Idle-teardown loop: drop the rpc-server once no per-model election loop
+    // holds it (zero holders) for longer than the idle timeout.
+    {
+        let lazy_rpc_tick = lazy_rpc.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                lazy_rpc_tick.tick().await;
+            }
+        });
+    }
 
     // Election publishes per-model targets
     let (target_tx, target_rx) = tokio::sync::watch::channel(election::ModelTargets::default());
@@ -3315,6 +3335,7 @@ async fn run_auto(
         .and_then(|model| model.pinned_gpu.clone());
     let (primary_stop_tx, primary_stop_rx) = tokio::sync::watch::channel(false);
     let primary_runtime = runtime_arc.clone();
+    let lazy_rpc_primary = lazy_rpc.clone();
     let dashboard_processes_for_primary_task = dashboard_processes.clone();
     let primary_task = tokio::spawn(async move {
         election::election_loop(
@@ -3323,7 +3344,7 @@ async fn run_auto(
                 node: node2,
                 tunnel_mgr: tunnel_mgr2,
                 ingress_http_port: api_port,
-                rpc_port: rpc_handle.port,
+                lazy_rpc: lazy_rpc_primary,
                 bin_dir: bin_dir2,
                 model: model2,
                 model_name: model_name_for_election,
@@ -3467,6 +3488,7 @@ async fn run_auto(
             }
             let extra_node = node.clone();
             let extra_tunnel = tunnel_mgr.clone();
+            let extra_lazy_rpc = lazy_rpc.clone();
             let extra_bin = bin_dir.clone();
             let extra_path = extra_model.resolved_path.clone();
             let extra_mmproj = extra_model.mmproj_path.clone();
@@ -3498,7 +3520,7 @@ async fn run_auto(
                         node: extra_node,
                         tunnel_mgr: extra_tunnel,
                         ingress_http_port: api_port_extra,
-                        rpc_port: 0,
+                        lazy_rpc: extra_lazy_rpc,
                         bin_dir: extra_bin,
                         model: extra_path,
                         model_name: extra_model_name.clone(),
@@ -3926,7 +3948,7 @@ async fn run_auto(
 
     node.set_serving_models(Vec::new()).await;
     node.set_hosted_models(Vec::new()).await;
-    rpc_handle.shutdown().await;
+    lazy_rpc.shutdown().await;
     if let Some(rt) = runtime {
         let outstanding_refs = std::sync::Arc::strong_count(&rt);
         if outstanding_refs == 1 {

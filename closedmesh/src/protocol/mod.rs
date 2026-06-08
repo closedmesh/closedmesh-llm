@@ -558,6 +558,7 @@ mod tests {
             system_ram_bytes: 0,
             model_timings: vec![],
             native_baselines: vec![],
+            rpc_ready: None,
             capability: crate::mesh::NodeCapability::default(),
         }
     }
@@ -1239,6 +1240,7 @@ mod tests {
             system_ram_bytes: 0,
             model_timings: vec![],
             native_baselines: vec![],
+            rpc_ready: None,
             capability: None,
         };
         let proto_pa = local_ann_to_proto_ann(&ann);
@@ -1298,6 +1300,7 @@ mod tests {
             system_ram_bytes: 0,
             model_timings: vec![],
             native_baselines: vec![],
+            rpc_ready: None,
             capability: None,
         };
 
@@ -1405,6 +1408,7 @@ mod tests {
                 },
             ],
             native_baselines: vec![],
+            rpc_ready: None,
             capability: None,
         };
 
@@ -2092,6 +2096,7 @@ mod tests {
             system_ram_bytes: 0,
             model_timings: vec![],
             native_baselines: vec![],
+            rpc_ready: None,
             capability: None,
         };
 
@@ -2140,6 +2145,7 @@ mod tests {
             system_ram_bytes: 0,
             model_timings: vec![],
             native_baselines: vec![],
+            rpc_ready: None,
             capability: None,
         };
 

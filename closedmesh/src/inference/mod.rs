@@ -2,6 +2,7 @@ pub(crate) mod consult;
 pub(crate) mod election;
 pub(crate) mod keepwarm;
 pub(crate) mod launch;
+pub(crate) mod lazy_rpc;
 pub(crate) mod loading_watchdog;
 pub(crate) mod moe;
 pub(crate) mod native_baseline;

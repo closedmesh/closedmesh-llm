@@ -894,6 +894,13 @@ fn build_dense_launch_plan(
         .iter()
         .filter(|p| matches!(p.role, NodeRole::Worker) || p.is_assigned_model(model_name))
         .filter(|p| !matches!(p.role, NodeRole::Client))
+        // Lazy rpc-server gate: skip a worker whose on-demand rpc-server is
+        // down (`Some(false)`). `None` (legacy, always-on rpc) and `Some(true)`
+        // both pass. This is what keeps the host from dialing a still-cold
+        // worker and tripping the v0.66.36 HELLO-failure blacklist — the
+        // worker brings its rpc up (gossiping `rpc_ready=true`) as soon as it
+        // sees the split is needed, and only then becomes selectable.
+        .filter(|p| p.rpc_ready != Some(false))
         .filter(|p| !matches!(p.rtt_ms, Some(rtt) if rtt > mesh::MAX_SPLIT_RTT_MS))
         .collect();
     candidates.sort_by_key(|p| (p.rtt_ms.unwrap_or(u32::MAX), p.id));
@@ -1932,7 +1939,12 @@ pub struct ElectionLoopParams {
     pub node: mesh::Node,
     pub tunnel_mgr: tunnel::Manager,
     pub ingress_http_port: u16,
-    pub rpc_port: u16,
+    /// On-demand rpc-server lifecycle. The loop `acquire()`s it while this
+    /// node is a pipeline WORKER for the model (split needed and we're not the
+    /// host) and `release()`s it otherwise, so a solo node never holds an idle
+    /// rpc-server. The host never dials its own rpc-server (it uses its local
+    /// GPU backend directly), so only the worker role drives this.
+    pub lazy_rpc: Arc<crate::inference::lazy_rpc::LazyRpcServer>,
     pub bin_dir: std::path::PathBuf,
     pub model: std::path::PathBuf,
     pub model_name: String,
@@ -2467,7 +2479,7 @@ pub async fn election_loop(
         node,
         tunnel_mgr,
         ingress_http_port,
-        rpc_port: _rpc_port,
+        lazy_rpc,
         bin_dir,
         model,
         model_name,
@@ -2488,6 +2500,11 @@ pub async fn election_loop(
     // Track the actual running launch topology so we only restart on real split changes.
     let mut last_running_plan: Option<DenseRunningPlan> = None;
     let mut currently_host = false;
+    // Lazy rpc: RAII hold on the on-demand rpc-server while we act as a
+    // pipeline worker for this model. `Some` ⇒ held; toggled on the
+    // `requires_split && !i_am_host` edge so we spawn/teardown once per edge,
+    // and dropped automatically on any loop exit (release covers every path).
+    let mut worker_rpc_hold: Option<crate::inference::lazy_rpc::WorkerRpcHold> = None;
     let mut current_local_port: Option<u16> = None;
     let mut llama_process: Option<launch::InferenceServerProcess> = None;
     // v0.66.38 fitter watchdog: stamped on every successful launch, cleared
@@ -2849,6 +2866,38 @@ pub async fn election_loop(
             }
             should_dup
         };
+
+        // Lazy rpc-server: we need it up exactly when we're a pipeline WORKER
+        // for this model — a split is required and we are not the elected
+        // host. Bringing it up gossips `rpc_ready=true` so a split host (which
+        // gates its cohort on readiness) can dial us without tripping the
+        // v0.66.36 HELLO-failure blacklist. A solo node, or the host itself,
+        // never holds an rpc-server. Toggled on the edge so the cold spawn
+        // happens once, not every gossip tick.
+        let want_worker_rpc = requires_split && !i_am_host;
+        if want_worker_rpc && worker_rpc_hold.is_none() {
+            match lazy_rpc.acquire_hold().await {
+                Ok(hold) => {
+                    worker_rpc_hold = Some(hold);
+                    tracing::info!(
+                        model = %model_name,
+                        "lazy rpc-server up: acting as pipeline worker"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        model = %model_name,
+                        "failed to start rpc-server for pipeline-worker role: {e:#}"
+                    );
+                }
+            }
+        } else if !want_worker_rpc && worker_rpc_hold.is_some() {
+            worker_rpc_hold = None;
+            tracing::info!(
+                model = %model_name,
+                "released rpc-server hold (no longer a pipeline worker)"
+            );
+        }
 
         // Sticky-cohort guard: skip restart if we're already host AND either
         // the freshly-planned cohort is identical to what's running OR the
@@ -4739,6 +4788,7 @@ mod tests {
             system_ram_bytes: 0,
             model_timings: vec![],
             native_baselines: vec![],
+            rpc_ready: None,
             capability: crate::mesh::NodeCapability::default(),
         }
     }

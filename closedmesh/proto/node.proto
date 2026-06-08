@@ -48,6 +48,7 @@ message PeerAnnouncement {
   uint64 system_ram_bytes = 37;                     // Total system RAM (sysinfo::System::total_memory). 0 = legacy peer; election treats as unknown.
   repeated ModelTiming model_timings = 38;          // v0.66.41 Phase 1 marketplace metrics: per-model TPS p50 and TTFT p50 over a rolling 1h window of local-inference completions. Empty for legacy peers and for peers with no recent local serving.
   repeated NativeBaseline native_baselines = 39;    // v0.66.49 Phase 3.0 benchmark honesty: per-model native llama-server TPS / TTFT measured by issuing a synthetic chat directly to 127.0.0.1:llama_port (no entry tunnel, no auth, no routing). Paired with `model_timings` lets the catalog show the through-mesh / native ratio. Empty for legacy peers and for peers that haven't completed a baseline run yet.
+  optional bool rpc_ready = 40;                      // Lazy rpc-server (prototype): true when this peer's on-demand rpc-server is up and reachable for pipeline splits; false when torn down to reclaim idle VRAM. ABSENT (None) = legacy peer with an always-on rpc-server — a split host MUST treat absent as "ready" so it does not exclude pre-lazy workers.
 }
 
 // v0.66.41 Phase 1 marketplace metrics. Each entry summarises a single

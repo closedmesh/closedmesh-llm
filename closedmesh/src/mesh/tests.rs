@@ -53,6 +53,7 @@ pub(crate) async fn make_test_node(role: super::NodeRole) -> Result<Node> {
         available_models: Arc::new(Mutex::new(Vec::new())),
         requested_models: Arc::new(Mutex::new(Vec::new())),
         native_baselines: Arc::new(Mutex::new(HashMap::new())),
+        rpc_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         model_demand: Arc::new(std::sync::Mutex::new(HashMap::new())),
         mesh_id: Arc::new(Mutex::new(None)),
         first_joined_mesh_ts: Arc::new(Mutex::new(None)),
@@ -729,6 +730,7 @@ fn make_test_peer_info(peer_id: EndpointId) -> PeerInfo {
         system_ram_bytes: 0,
         model_timings: vec![],
         native_baselines: vec![],
+        rpc_ready: None,
         capability: super::NodeCapability::default(),
     }
 }
@@ -1397,6 +1399,7 @@ fn gossip_frame_roundtrip_preserves_scanned_model_metadata() {
         system_ram_bytes: 0,
         model_timings: vec![],
         native_baselines: vec![],
+        rpc_ready: None,
         capability: None,
     };
 
@@ -1623,6 +1626,7 @@ fn transitive_peer_update_refreshes_metadata_fields() {
         system_ram_bytes: 0,
         model_timings: vec![],
         native_baselines: vec![],
+        rpc_ready: None,
         capability: None,
     };
 
@@ -1700,6 +1704,7 @@ fn transitive_peer_merge_preserves_richer_direct_address() {
         system_ram_bytes: 0,
         model_timings: vec![],
         native_baselines: vec![],
+        rpc_ready: None,
         capability: None,
     };
 
@@ -1756,6 +1761,7 @@ fn transitive_peer_merge_preserves_richer_direct_address() {
         system_ram_bytes: 0,
         model_timings: vec![],
         native_baselines: vec![],
+        rpc_ready: None,
         capability: None,
     };
     apply_transitive_ann(&mut existing, &richer_addr, &ann2);
@@ -2306,6 +2312,7 @@ fn transitive_peer_update_refreshes_last_mentioned() {
         system_ram_bytes: 0,
         model_timings: vec![],
         native_baselines: vec![],
+        rpc_ready: None,
         capability: None,
     };
 
@@ -3218,6 +3225,7 @@ fn make_test_peer(id: EndpointId, rtt_ms: Option<u32>, vram_gb: u64) -> PeerInfo
         system_ram_bytes: 0,
         model_timings: vec![],
         native_baselines: vec![],
+        rpc_ready: None,
         capability: super::NodeCapability::default(),
     }
 }
@@ -3862,6 +3870,7 @@ async fn make_test_node_with_owner(
         available_models: Arc::new(Mutex::new(Vec::new())),
         requested_models: Arc::new(Mutex::new(Vec::new())),
         native_baselines: Arc::new(Mutex::new(HashMap::new())),
+        rpc_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         model_demand: Arc::new(std::sync::Mutex::new(HashMap::new())),
         mesh_id: Arc::new(Mutex::new(None)),
         first_joined_mesh_ts: Arc::new(Mutex::new(None)),

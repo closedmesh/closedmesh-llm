@@ -136,6 +136,15 @@ impl Manager {
         tracing::info!("Tunnel manager: http_port updated to {port}");
     }
 
+    /// Update the local rpc-server port for inbound RPC tunnel streams.
+    /// Mirrors `set_http_port`: the lazy rpc lifecycle sets this to the live
+    /// port when a split is forming and back to 0 when the rpc-server is torn
+    /// down. The inbound RPC handler already drops streams while this is 0.
+    pub fn set_rpc_port(&self, port: u16) {
+        self.rpc_port.store(port, Ordering::Relaxed);
+        tracing::info!("Tunnel manager: rpc_port updated to {port}");
+    }
+
     /// Wait until we have at least `n` peers with active tunnels
     pub async fn wait_for_peers(&self, n: usize) -> Result<()> {
         let mut rx = self.node.peer_change_rx.clone();

@@ -731,6 +731,11 @@ pub(crate) struct PeerAnnouncement {
     /// native ratio per `(peer, model)` pair. Empty for pre-v0.66.49 peers
     /// and for peers that haven't completed a baseline run yet.
     pub(crate) native_baselines: Vec<NativeBaselineEntry>,
+    /// Lazy rpc-server readiness (prototype). `Some(true)` = on-demand
+    /// rpc-server is up and dialable for splits; `Some(false)` = torn down to
+    /// reclaim idle VRAM; `None` = legacy peer with an always-on rpc-server.
+    /// A split host treats `None` as ready (never excludes a pre-lazy worker).
+    pub(crate) rpc_ready: Option<bool>,
     /// Normalized capability advertisement used for capability-aware routing.
     /// Older peers that don't set this get back-filled from `gpu_*` / `hardware`
     /// when they're upgraded to a `PeerInfo`.
@@ -848,6 +853,11 @@ pub struct PeerInfo {
     /// baseline run yet. The catalog pairs each entry with the matching
     /// `ModelTimingEntry` to display the mesh overhead tax.
     pub native_baselines: Vec<NativeBaselineEntry>,
+    /// Lazy rpc-server readiness (prototype). `Some(true)`/`Some(false)` track
+    /// this peer's on-demand rpc-server; `None` = legacy always-on peer. Split
+    /// election treats `None` and `Some(true)` as dialable, `Some(false)` as
+    /// not-yet-ready (skip until the worker brings its rpc-server up).
+    pub rpc_ready: Option<bool>,
     /// Normalized capability for routing. Always populated — back-filled from
     /// the legacy GPU fields when the announcement didn't include it.
     pub capability: NodeCapability,
@@ -971,6 +981,7 @@ impl PeerInfo {
             system_ram_bytes: ann.system_ram_bytes,
             model_timings: ann.model_timings.clone(),
             native_baselines: ann.native_baselines.clone(),
+            rpc_ready: ann.rpc_ready,
             capability: ann.capability.clone().unwrap_or_else(|| {
                 capability::backfill_from_legacy(
                     ann.gpu_name.as_deref(),
@@ -1202,6 +1213,12 @@ pub struct Node {
     /// surfaced on `/api/status` as
     /// `native_tps_p50_by_model` / `native_ttft_ms_p50_by_model`.
     native_baselines: Arc<Mutex<HashMap<String, NativeBaselineEntry>>>,
+    /// Lazy rpc-server readiness for THIS node (prototype). `true` once the
+    /// on-demand rpc-server is up and the tunnel points at it; `false` when
+    /// torn down. Gossiped as `PeerAnnouncement::rpc_ready = Some(...)` (self
+    /// is never legacy/`None`). Split hosts gate worker selection on the
+    /// gossiped value.
+    rpc_ready: Arc<std::sync::atomic::AtomicBool>,
     /// Mesh-wide demand map — merged from gossip + local API requests.
     /// This is the single source of truth for "what does the mesh want?"
     model_demand: Arc<std::sync::Mutex<HashMap<String, ModelDemand>>>,
@@ -1787,6 +1804,23 @@ impl Node {
         map.values().cloned().collect()
     }
 
+    /// Update this node's lazy rpc-server readiness and regossip on change so
+    /// split hosts learn promptly that we are (or are no longer) dialable as a
+    /// pipeline worker. See `inference::lazy_rpc`.
+    pub async fn set_local_rpc_ready(&self, ready: bool) {
+        let prev = self
+            .rpc_ready
+            .swap(ready, std::sync::atomic::Ordering::Relaxed);
+        if prev != ready {
+            self.regossip().await;
+        }
+    }
+
+    /// Current lazy rpc-server readiness for THIS node.
+    pub fn local_rpc_ready(&self) -> bool {
+        self.rpc_ready.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// v0.66.41 Phase 1 marketplace metrics: feed a per-model TPS / TTFT
     /// sample into the rolling 1h window held by `RoutingMetrics`.
     /// Called from `route_local_attempt` on every successful local
@@ -2066,6 +2100,7 @@ impl Node {
                     })
                     .unwrap_or_default(),
             )),
+            rpc_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             model_demand: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mesh_id: Arc::new(Mutex::new(None)),
             first_joined_mesh_ts: Arc::new(Mutex::new(None)),
@@ -2178,6 +2213,7 @@ impl Node {
             available_models: Arc::new(Mutex::new(Vec::new())),
             requested_models: Arc::new(Mutex::new(Vec::new())),
             native_baselines: Arc::new(Mutex::new(HashMap::new())),
+            rpc_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             model_demand: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mesh_id: Arc::new(Mutex::new(None)),
             first_joined_mesh_ts: Arc::new(Mutex::new(None)),

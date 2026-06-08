@@ -37,6 +37,7 @@ pub(super) fn peer_meaningfully_changed(old: &PeerInfo, new: &PeerInfo) -> bool 
         || old.version != new.version
         || old.owner_summary != new.owner_summary
         || old.gpu_reserved_bytes != new.gpu_reserved_bytes
+        || old.rpc_ready != new.rpc_ready
 }
 
 fn merge_first_joined_mesh_ts(existing: &mut Option<u64>, incoming: Option<u64>) {
@@ -112,6 +113,12 @@ pub(super) fn apply_transitive_ann(
     existing.requested_models = ann.requested_models.clone();
     existing.owner_attestation = ann.owner_attestation.clone();
     existing.inflight_requests = ann.inflight_requests;
+    // rpc_ready: owner-authoritative + dynamic. Guard against a legacy relay
+    // (which can't see the field, so sends None) stomping a known value — same
+    // discipline as the v0.66.50 empty-transitive-ann fix.
+    if ann.rpc_ready.is_some() {
+        existing.rpc_ready = ann.rpc_ready;
+    }
     if ann.model_source.is_some() {
         existing.model_source = ann.model_source.clone();
     }
@@ -521,6 +528,9 @@ impl Node {
             existing.owner_attestation = ann.owner_attestation.clone();
             existing.owner_summary = owner_summary.clone();
             existing.inflight_requests = ann.inflight_requests;
+            // Direct gossip is authoritative; a new peer always reports
+            // Some(..), a legacy peer always None — both are the truth.
+            existing.rpc_ready = ann.rpc_ready;
             existing.served_model_descriptors = ann.served_model_descriptors.clone();
             existing.served_model_runtime = ann.served_model_runtime.clone();
             if ann.version.is_some() {
@@ -825,6 +835,9 @@ impl Node {
                     owner_attestation: p.owner_attestation.clone(),
                     inflight_requests: p.inflight_requests,
                     system_ram_bytes: p.system_ram_bytes,
+                    // Relay the peer's own rpc readiness unchanged — only the
+                    // peer knows whether its lazy rpc-server is up.
+                    rpc_ready: p.rpc_ready,
                     // v0.66.41 Phase 1: relay the peer's gossiped model
                     // timings unchanged. We only re-announce what they
                     // told us; we never substitute our own measurements
@@ -901,6 +914,9 @@ impl Node {
             owner_attestation: my_owner_attestation,
             inflight_requests: self.inflight_requests(),
             system_ram_bytes: self.system_ram_bytes,
+            // Lazy rpc-server readiness. Self is never legacy, so always
+            // Some(..): split hosts can gate worker selection on it.
+            rpc_ready: Some(self.local_rpc_ready()),
             // v0.66.41 Phase 1 marketplace metrics: snapshot the local
             // node's per-model TPS / TTFT rolling-1h window and ship it
             // to peers. Empty when this node hasn't served any model
@@ -981,6 +997,7 @@ mod tests {
             system_ram_bytes: 0,
             model_timings: vec![],
             native_baselines: vec![],
+            rpc_ready: None,
             capability: None,
         }
     }
@@ -1155,6 +1172,53 @@ mod tests {
     fn test_meaningfully_changed_first_joined_mesh_ts() {
         let old_peer = test_peer(Some(100));
         let new_peer = test_peer(Some(200));
+
+        assert!(peer_meaningfully_changed(&old_peer, &new_peer));
+    }
+
+    /// `rpc_ready` (v0.66.70 lazy rpc-server) is owner-authoritative and
+    /// *dynamic* — a worker flips it false→true the instant it brings its
+    /// on-demand rpc-server up, and back to false on idle teardown. A split
+    /// host gates its launch plan on this bit, so a stomp here would either
+    /// strand a ready worker out of the candidate set or, worse, dial a still
+    /// -cold one and trip the HELLO-blacklist. Unlike `model_timings` /
+    /// `native_baselines` (guarded by `is_empty`), this is an `Option<bool>`,
+    /// so the legacy-relay guard is `ann.rpc_ready.is_some()`: a legacy peer
+    /// that can't see the field sends `None` and must not blank a known value.
+    #[test]
+    fn test_apply_transitive_ann_guards_rpc_ready() {
+        let mut existing = test_peer(Some(100));
+        existing.rpc_ready = Some(true);
+
+        // Legacy relay (field invisible -> None) must NOT stomp the known bit.
+        let mut ann = test_announcement(Some(100));
+        ann.rpc_ready = None;
+        apply_transitive_ann(&mut existing, &test_addr(0x33), &ann);
+        assert_eq!(
+            existing.rpc_ready,
+            Some(true),
+            "None in a transitive ann (legacy relay) must not blank a known rpc_ready"
+        );
+
+        // A current peer relaying the owner's real state (teardown) wins.
+        ann.rpc_ready = Some(false);
+        apply_transitive_ann(&mut existing, &test_addr(0x33), &ann);
+        assert_eq!(
+            existing.rpc_ready,
+            Some(false),
+            "Some(false) is the owner's authoritative teardown signal and must apply"
+        );
+    }
+
+    /// A worker bringing its lazy rpc-server up/down must trigger regossip so
+    /// the split host re-evaluates its candidate set promptly — the flip is the
+    /// whole point of the gossiped bit.
+    #[test]
+    fn test_meaningfully_changed_rpc_ready() {
+        let mut old_peer = test_peer(Some(100));
+        let mut new_peer = test_peer(Some(100));
+        old_peer.rpc_ready = Some(false);
+        new_peer.rpc_ready = Some(true);
 
         assert!(peer_meaningfully_changed(&old_peer, &new_peer));
     }
