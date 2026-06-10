@@ -229,7 +229,7 @@ mod tests {
         days.insert(today - 3, 40); // in window (within 7 days)
         days.insert(today - 7, 999); // outside window (8th day back)
         days.insert(today - 30, 999); // long expired
-        // window_totals must only sum in-window buckets.
+                                      // window_totals must only sum in-window buckets.
         assert_eq!(state.window_totals(today).get(&m), Some(&140));
         // prune must physically drop the expired buckets.
         state.prune(today);
