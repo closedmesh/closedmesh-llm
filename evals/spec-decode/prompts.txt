@@ -1,0 +1,13 @@
+# Conversational prompts for the spec-decode A/B gate (one per line).
+# Lines starting with # and blank lines are ignored. Fed raw to the
+# native /completion endpoint at temp=0. Acceptance on conversational
+# text is what gate #4 cares about; swap in chat-templated lines if you
+# want template-faithful numbers.
+Explain why the sky appears blue during the day and red at sunset.
+Write a short professional email declining a meeting invitation politely.
+Summarize the plot of Romeo and Juliet in three sentences.
+List five practical tips for improving sleep quality and briefly justify each.
+Describe the difference between TCP and UDP for a junior engineer.
+Give step-by-step instructions for making a basic vegetable stir-fry.
+What were the main causes of the First World War? Answer in a short paragraph.
+Explain the concept of compound interest with a simple numeric example.
