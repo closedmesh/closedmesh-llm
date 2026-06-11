@@ -1,6 +1,6 @@
 [package]
 name = "closedmesh"
-version = "0.66.73"
+version = "0.66.74"
 edition = "2021"
 
 [[bin]]
