@@ -1783,13 +1783,6 @@ async fn route_local_attempt(
         Ok(mut upstream) => {
             let _inflight = node.begin_inflight_request();
             let _ = upstream.set_nodelay(true);
-            // v0.66.41 Phase 1: TTFT measurement starts at the moment
-            // the upstream connection is established (and `prefetched`
-            // is about to be written). This intentionally excludes the
-            // TCP-connect time so the published number is what users
-            // experience for the second and subsequent requests on a
-            // warm llama-server, not the cold-connect outlier.
-            let request_committed_at = std::time::Instant::now();
             if let Err(err) = upstream.write_all(prefetched).await {
                 tracing::warn!(
                     "API proxy: failed to forward buffered request to local backend proxy on {port}: {err}"
@@ -1799,8 +1792,6 @@ async fn route_local_attempt(
             match probe_http_response_local(&mut upstream).await {
                 Ok(probe) => {
                     let status_code = probe.status_code;
-                    let first_byte_at = std::time::Instant::now();
-                    let ttft = first_byte_at.duration_since(request_committed_at);
                     match relay_probed_response(
                         tcp_stream,
                         &mut upstream,
@@ -1811,31 +1802,26 @@ async fn route_local_attempt(
                     .await
                     {
                         Ok(result) => {
-                            // v0.66.41 Phase 1: record the per-model
-                            // TPS / TTFT sample for the rolling-1h
-                            // window that gets gossiped to peers and
-                            // surfaced as the Catalog metrics on
-                            // `closedmesh.com/status`. We only record
-                            // on success with non-zero `completion_tokens`;
-                            // failures and zero-token responses (rejects,
-                            // empty bodies) are deliberately excluded to
-                            // avoid skewing the median with non-decode
-                            // outcomes.
-                            if let RouteAttemptResult::Delivered {
-                                status_code: code,
-                                completion_tokens: Some(tokens),
-                            } = result
-                            {
-                                if (200..300).contains(&code) && tokens > 0 {
-                                    let decode_duration = first_byte_at.elapsed();
-                                    node.record_local_inference_completion(
-                                        model,
-                                        ttft,
-                                        decode_duration,
-                                        tokens,
-                                    );
-                                }
-                            }
+                            // Per-model TPS/TTFT recording for local
+                            // completions lives *solely* in
+                            // `backend_proxy::relay_with_metrics` — the
+                            // upstream we just relayed through. Every local
+                            // `InferenceTarget` (`Local` on the solo Host path,
+                            // `MoeLocal`/`Local` on the MoE paths) is a
+                            // backend-proxy port, not a raw llama port (see the
+                            // `InferenceTarget::Local(local_proxy_port)` /
+                            // `build_moe_targets(..)` construction in
+                            // `election.rs`), so recording here as well
+                            // double-counted every localhost-origin request —
+                            // and did so with a looser TTFT anchor, since this
+                            // layer's clock additionally includes the
+                            // ingress→backend-proxy hop. That skewed the
+                            // gossiped p50 asymmetrically against the production
+                            // tunnel path, which only ever reaches the backend
+                            // proxy and therefore records exactly once. `model`
+                            // is kept on the signature for the routing-dispatch
+                            // contract but is intentionally unused here.
+                            let _ = model;
                             result
                         }
                         Err(err) => {
