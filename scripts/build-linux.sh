@@ -262,6 +262,14 @@ cmake_flags=(
     -DGGML_RPC=ON
     -DBUILD_SHARED_LIBS=OFF
     -DLLAMA_OPENSSL=OFF
+    # We build only our own targets (rpc-server, llama-server, llama-moe-*),
+    # never llama.cpp's own test suite. Building the tests wastes compile time
+    # and disk — and on the CUDA runner the test binaries (test-jinja,
+    # test-chat-peg-parser) exhausted /tmp and failed the v0.66.76 release with
+    # "No space left on device". The Windows build already disables these
+    # (scripts/build-windows.ps1); match it here for every Linux backend.
+    -DLLAMA_BUILD_TESTS=OFF
+    -DGGML_BUILD_TESTS=OFF
 )
 
 if [[ "$BACKEND" == "cpu" ]]; then
