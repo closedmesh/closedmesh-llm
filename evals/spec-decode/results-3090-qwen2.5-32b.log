@@ -1,0 +1,54 @@
+==================================================
+ARM: baseline   args: []
+==================================================
+  prompt[0] median=37.15 t/s  ('Explain why the sky appears blue during the day ')
+  prompt[1] median=37.15 t/s  ('Write a short professional email declining a mee')
+  prompt[2] median=37.53 t/s  ('Summarize the plot of Romeo and Juliet in three ')
+  prompt[3] median=37.00 t/s  ('List five practical tips for improving sleep qua')
+  prompt[4] median=37.02 t/s  ('Describe the difference between TCP and UDP for ')
+  prompt[5] median=37.04 t/s  ('Give step-by-step instructions for making a basi')
+  prompt[6] median=37.29 t/s  ('What were the main causes of the First World War')
+  prompt[7] median=37.26 t/s  ('Explain the concept of compound interest with a ')
+RESULT baseline median_tps=37.148 mean_tps=37.177 samples=24
+ACCEPT baseline n/a (baseline / no draft)
+==================================================
+ARM: spec_n3   args: [-md /workspace/.hf_home/hub/models--Qwen--Qwen2.5-0.5B-Instruct-GGUF/snapshots/9217f5db79a29953eb74d5343926648285ec7e67/qwen2.5-0.5b-instruct-q4_k_m.gguf --spec-type draft-simple -ngld 99 --spec-draft-n-max 3]
+==================================================
+  prompt[0] median=45.07 t/s  ('Explain why the sky appears blue during the day ')
+  prompt[1] median=46.59 t/s  ('Write a short professional email declining a mee')
+  prompt[2] median=35.70 t/s  ('Summarize the plot of Romeo and Juliet in three ')
+  prompt[3] median=49.22 t/s  ('List five practical tips for improving sleep qua')
+  prompt[4] median=49.89 t/s  ('Describe the difference between TCP and UDP for ')
+  prompt[5] median=54.45 t/s  ('Give step-by-step instructions for making a basi')
+  prompt[6] median=46.66 t/s  ('What were the main causes of the First World War')
+  prompt[7] median=57.23 t/s  ('Explain the concept of compound interest with a ')
+RESULT spec_n3 median_tps=48.159 mean_tps=47.750 samples=24
+ACCEPT spec_n3 mean=0.5985 (n=25)
+==================================================
+ARM: spec_n5   args: [-md /workspace/.hf_home/hub/models--Qwen--Qwen2.5-0.5B-Instruct-GGUF/snapshots/9217f5db79a29953eb74d5343926648285ec7e67/qwen2.5-0.5b-instruct-q4_k_m.gguf --spec-type draft-simple -ngld 99 --spec-draft-n-max 5]
+==================================================
+  prompt[0] median=40.35 t/s  ('Explain why the sky appears blue during the day ')
+  prompt[1] median=42.90 t/s  ('Write a short professional email declining a mee')
+  prompt[2] median=31.23 t/s  ('Summarize the plot of Romeo and Juliet in three ')
+  prompt[3] median=47.40 t/s  ('List five practical tips for improving sleep qua')
+  prompt[4] median=45.94 t/s  ('Describe the difference between TCP and UDP for ')
+  prompt[5] median=53.31 t/s  ('Give step-by-step instructions for making a basi')
+  prompt[6] median=38.85 t/s  ('What were the main causes of the First World War')
+  prompt[7] median=56.49 t/s  ('Explain the concept of compound interest with a ')
+RESULT spec_n5 median_tps=44.234 mean_tps=44.282 samples=24
+ACCEPT spec_n5 mean=0.4864 (n=25)
+==================================================
+ARM: spec_n8   args: [-md /workspace/.hf_home/hub/models--Qwen--Qwen2.5-0.5B-Instruct-GGUF/snapshots/9217f5db79a29953eb74d5343926648285ec7e67/qwen2.5-0.5b-instruct-q4_k_m.gguf --spec-type draft-simple -ngld 99 --spec-draft-n-max 8]
+==================================================
+  prompt[0] median=40.32 t/s  ('Explain why the sky appears blue during the day ')
+  prompt[1] median=48.14 t/s  ('Write a short professional email declining a mee')
+  prompt[2] median=34.42 t/s  ('Summarize the plot of Romeo and Juliet in three ')
+  prompt[3] median=56.03 t/s  ('List five practical tips for improving sleep qua')
+  prompt[4] median=57.27 t/s  ('Describe the difference between TCP and UDP for ')
+  prompt[5] median=69.52 t/s  ('Give step-by-step instructions for making a basi')
+  prompt[6] median=50.93 t/s  ('What were the main causes of the First World War')
+  prompt[7] median=72.94 t/s  ('Explain the concept of compound interest with a ')
+RESULT spec_n8 median_tps=51.517 mean_tps=53.328 samples=24
+ACCEPT spec_n8 mean=0.3476 (n=25)
+==================================================
+DONE. Summary (grep RESULT/ACCEPT above).
