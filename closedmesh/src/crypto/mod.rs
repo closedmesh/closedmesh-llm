@@ -3,6 +3,7 @@ mod error;
 mod keychain;
 mod keys;
 mod keystore;
+mod model_ad;
 mod ownership;
 
 pub use self::envelope::{open_message, seal_message, OpenedMessage, SignedEncryptedEnvelope};
@@ -18,6 +19,11 @@ pub(crate) use self::keystore::write_keystore_bytes_atomically;
 pub use self::keystore::{
     default_keystore_path, keystore_exists, keystore_metadata, load_keystore, save_keystore,
     KeystoreInfo,
+};
+pub use self::model_ad::{
+    sign_model_advertisement, verify_model_advertisement, ModelAdStatus, ModelAdSummary,
+    ModelAdvertisementClaim, ModelClaim, SignedModelAdvertisement, DEFAULT_MODEL_AD_TTL_MS,
+    MODEL_AD_VERSION,
 };
 pub use self::ownership::{
     certificate_needs_renewal, default_node_ownership_path, default_trust_store_path,

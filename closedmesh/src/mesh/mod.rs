@@ -21,9 +21,10 @@ use std::sync::Arc;
 use tokio::sync::{watch, Mutex};
 
 use crate::crypto::{
-    default_node_ownership_path, save_node_ownership, sign_node_ownership, verify_node_ownership,
-    OwnershipStatus, OwnershipSummary, SignedNodeOwnership, TrustPolicy, TrustStore,
-    DEFAULT_NODE_CERT_LIFETIME_SECS,
+    default_node_ownership_path, save_node_ownership, sign_node_ownership,
+    verify_model_advertisement, verify_node_ownership, ModelAdSummary, OwnershipStatus,
+    OwnershipSummary, SignedModelAdvertisement, SignedNodeOwnership, TrustPolicy, TrustStore,
+    DEFAULT_MODEL_AD_TTL_MS, DEFAULT_NODE_CERT_LIFETIME_SECS,
 };
 use crate::inference::moe;
 use crate::protocol::*;
@@ -740,6 +741,12 @@ pub(crate) struct PeerAnnouncement {
     /// Older peers that don't set this get back-filled from `gpu_*` / `hardware`
     /// when they're upgraded to a `PeerInfo`.
     pub(crate) capability: Option<NodeCapability>,
+    /// v0.66.x Phase 3.1: owner-signed attestation over this peer's per-model
+    /// performance claims (the trust-sensitive subset of `model_timings` /
+    /// `native_baselines`). `None` for legacy peers and peers with no owner key.
+    /// Self re-signs its own snapshot every gossip round; relayed peers carry
+    /// the original signature unchanged so it survives transitive hops.
+    pub(crate) model_advertisement: Option<SignedModelAdvertisement>,
 }
 
 /// v0.66.41 Phase 1: per-model serving timing summary carried on
@@ -777,6 +784,17 @@ pub struct NativeBaselineEntry {
     /// reported — the verifier still re-probes; this is the consensus
     /// substrate + cheap pre-screen, not a trusted claim on its own.
     pub logit_fingerprint: Option<crate::inference::native_baseline::LogitFingerprint>,
+}
+
+/// v0.66.x Phase 3.1: the model-advertisement state carried on a `PeerInfo`.
+/// Bundles the peer's raw owner-signed advertisement (kept so we can relay it
+/// to further hops unchanged) with the locally-computed verification verdict.
+/// Defaults to "no advertisement, Unsigned summary" so the many `PeerInfo`
+/// construction sites (tests, election fixtures) don't all need to thread it.
+#[derive(Debug, Clone, Default)]
+pub struct ModelAdState {
+    pub advertisement: Option<SignedModelAdvertisement>,
+    pub summary: ModelAdSummary,
 }
 
 #[derive(Debug, Clone)]
@@ -861,6 +879,11 @@ pub struct PeerInfo {
     /// Normalized capability for routing. Always populated — back-filled from
     /// the legacy GPU fields when the announcement didn't include it.
     pub capability: NodeCapability,
+    /// v0.66.x Phase 3.1: owner-signed model-advertisement state. The raw
+    /// advertisement is relayed to further hops unchanged; `summary` carries
+    /// this node's verification verdict (trusted / untrusted-owner / forged /
+    /// stale / unsigned) for `/api/status` and future trust-aware routing.
+    pub model_ad: ModelAdState,
 }
 
 #[derive(Debug)]
@@ -942,6 +965,7 @@ impl PeerInfo {
         addr: EndpointAddr,
         ann: &PeerAnnouncement,
         owner_summary: OwnershipSummary,
+        model_ad_summary: ModelAdSummary,
     ) -> Self {
         Self {
             id,
@@ -990,6 +1014,10 @@ impl PeerInfo {
                     &ann.serving_models,
                 )
             }),
+            model_ad: ModelAdState {
+                advertisement: ann.model_advertisement.clone(),
+                summary: model_ad_summary,
+            },
         }
     }
 
@@ -1261,6 +1289,10 @@ pub struct Node {
     plugin_manager: Arc<Mutex<Option<crate::plugin::PluginManager>>>,
     display_name: Arc<Mutex<Option<String>>>,
     owner_attestation: Arc<Mutex<Option<SignedNodeOwnership>>>,
+    /// Owner signing key, retained so each gossip round can sign a fresh
+    /// model advertisement over the current metric snapshot (Phase 3.1).
+    /// `None` when the node was started without an owner key.
+    owner_keypair: Arc<Option<crate::crypto::OwnerKeypair>>,
     owner_summary: Arc<Mutex<OwnershipSummary>>,
     trust_store: Arc<Mutex<TrustStore>>,
     trust_policy: TrustPolicy,
@@ -2058,16 +2090,21 @@ impl Node {
             .as_ref()
             .map(|config| config.trust_policy)
             .unwrap_or_default();
-        let owner_attestation = match owner_config
+        // Pull the node label out before consuming `owner_config` for the
+        // keypair below (the attestation refresh needs it).
+        let owner_node_label = owner_config
             .as_ref()
-            .and_then(|config| config.keypair.as_ref())
-        {
+            .and_then(|config| config.node_label.clone());
+        // Move the owner keypair out of the config — the Node retains it so
+        // `collect_announcements` can sign a fresh model advertisement each
+        // gossip round (Phase 3.1). This consumes `owner_config`, so every
+        // other field read from it must happen above this point.
+        let owner_keypair = owner_config.and_then(|config| config.keypair);
+        let owner_attestation = match owner_keypair.as_ref() {
             Some(keypair) => Some(load_or_refresh_owner_attestation(
                 keypair,
                 endpoint.id(),
-                owner_config
-                    .as_ref()
-                    .and_then(|config| config.node_label.clone()),
+                owner_node_label,
                 hostname.clone(),
             )?),
             None => None,
@@ -2152,6 +2189,7 @@ impl Node {
             plugin_manager: Arc::new(Mutex::new(None)),
             display_name: Arc::new(Mutex::new(None)),
             owner_attestation: Arc::new(Mutex::new(owner_attestation)),
+            owner_keypair: Arc::new(owner_keypair),
             owner_summary: Arc::new(Mutex::new(owner_summary)),
             trust_store: Arc::new(Mutex::new(trust_store)),
             trust_policy,
@@ -2262,6 +2300,7 @@ impl Node {
             plugin_manager: Arc::new(Mutex::new(None)),
             display_name: Arc::new(Mutex::new(None)),
             owner_attestation: Arc::new(Mutex::new(None)),
+            owner_keypair: Arc::new(None),
             owner_summary: Arc::new(Mutex::new(OwnershipSummary::default())),
             trust_store: Arc::new(Mutex::new(TrustStore::default())),
             trust_policy: TrustPolicy::Off,

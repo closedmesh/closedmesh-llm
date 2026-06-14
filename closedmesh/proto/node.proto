@@ -49,6 +49,38 @@ message PeerAnnouncement {
   repeated ModelTiming model_timings = 38;          // v0.66.41 Phase 1 marketplace metrics: per-model TPS p50 and TTFT p50 over a rolling 1h window of local-inference completions. Empty for legacy peers and for peers with no recent local serving.
   repeated NativeBaseline native_baselines = 39;    // v0.66.49 Phase 3.0 benchmark honesty: per-model native llama-server TPS / TTFT measured by issuing a synthetic chat directly to 127.0.0.1:llama_port (no entry tunnel, no auth, no routing). Paired with `model_timings` lets the catalog show the through-mesh / native ratio. Empty for legacy peers and for peers that haven't completed a baseline run yet.
   optional bool rpc_ready = 40;                      // Lazy rpc-server (prototype): true when this peer's on-demand rpc-server is up and reachable for pipeline splits; false when torn down to reclaim idle VRAM. ABSENT (None) = legacy peer with an always-on rpc-server — a split host MUST treat absent as "ready" so it does not exclude pre-lazy workers.
+  optional SignedModelAdvertisement model_advertisement = 41;  // v0.66.x Phase 3.1: owner-signed attestation over this peer's per-model performance claims (the `model_timings` / `native_baselines` subset). Lets a verifier reject metrics forged by a malicious transitive relay. Absent for legacy peers and peers with no owner key.
+}
+
+// v0.66.x Phase 3.1 — owner-signed model advertisement. Binds a peer's
+// per-model performance claims (the trust-sensitive subset of model_timings /
+// native_baselines) to its owner Ed25519 key so the claims survive transitive
+// relay unforgeable. The `node_endpoint_id` is part of the signed payload, so a
+// relay cannot reattach a valid advertisement to a different node. A node
+// re-signs its current snapshot each gossip round (`issued_at_unix_ms` +
+// verifier-side TTL = replay protection). Signature is over the same canonical,
+// model-name-sorted byte encoding the runtime computes in
+// `crypto::model_ad::canonical_claim_bytes`.
+message SignedModelAdvertisement {
+  uint32 version = 1;
+  string owner_id = 2;
+  bytes owner_sign_public_key = 3;   // 32 bytes
+  bytes node_endpoint_id = 4;        // 32 bytes
+  uint64 issued_at_unix_ms = 5;
+  repeated SignedModelClaim models = 6;
+  bytes signature = 7;               // Ed25519 over canonical claim bytes
+}
+
+message SignedModelClaim {
+  string model = 1;
+  optional string quant = 2;
+  optional double measured_tps_p50 = 3;
+  optional double measured_ttft_ms_p50 = 4;
+  uint32 samples_in_window = 5;
+  optional double native_tps_p50 = 6;
+  optional double native_ttft_ms_p50 = 7;
+  optional string native_backend = 8;
+  optional string native_logit_fingerprint = 9;
 }
 
 // v0.66.41 Phase 1 marketplace metrics. Each entry summarises a single

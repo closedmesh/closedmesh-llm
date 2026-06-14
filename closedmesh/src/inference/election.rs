@@ -4790,6 +4790,7 @@ mod tests {
             native_baselines: vec![],
             rpc_ready: None,
             capability: crate::mesh::NodeCapability::default(),
+            model_ad: Default::default(),
         }
     }
 

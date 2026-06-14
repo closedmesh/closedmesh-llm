@@ -453,6 +453,17 @@ impl Node {
             self.trust_policy,
             current_time_unix_ms(),
         );
+        // Phase 3.1: verify the owner-signed model advertisement against this
+        // exact peer id + the local trust store. Advisory for now (surfaced on
+        // /api/status); does not gate peer acceptance.
+        let model_ad_summary = verify_model_advertisement(
+            ann.model_advertisement.as_ref(),
+            id.as_bytes(),
+            &trust_store,
+            self.trust_policy,
+            current_time_unix_ms(),
+            DEFAULT_MODEL_AD_TTL_MS,
+        );
         if !policy_accepts_peer(self.trust_policy, &owner_summary) {
             let mut state = self.state.lock().await;
             let last_status = state.policy_rejected_peers.get(&id).cloned();
@@ -527,6 +538,10 @@ impl Node {
             }
             existing.owner_attestation = ann.owner_attestation.clone();
             existing.owner_summary = owner_summary.clone();
+            existing.model_ad = ModelAdState {
+                advertisement: ann.model_advertisement.clone(),
+                summary: model_ad_summary.clone(),
+            };
             existing.inflight_requests = ann.inflight_requests;
             // Direct gossip is authoritative; a new peer always reports
             // Some(..), a legacy peer always None — both are the truth.
@@ -634,7 +649,7 @@ impl Node {
             ann.available_models,
             state.peers.len() + 1
         );
-        let mut peer = PeerInfo::from_announcement(id, addr, ann, owner_summary);
+        let mut peer = PeerInfo::from_announcement(id, addr, ann, owner_summary, model_ad_summary);
         if recovered {
             peer.moe_recovered_at = Some(now);
         }
@@ -687,6 +702,17 @@ impl Node {
             self.trust_policy,
             current_time_unix_ms(),
         );
+        // Phase 3.1: verify the relayed advertisement against this peer id. The
+        // signature covers the originating node id, so a forged/misattached
+        // advertisement is caught even when it arrives via a third-party relay.
+        let model_ad_summary = verify_model_advertisement(
+            ann.model_advertisement.as_ref(),
+            id.as_bytes(),
+            &trust_store,
+            self.trust_policy,
+            current_time_unix_ms(),
+            DEFAULT_MODEL_AD_TTL_MS,
+        );
         if !policy_accepts_peer(self.trust_policy, &owner_summary) {
             let mut state = self.state.lock().await;
             if state.peers.remove(&id).is_some() {
@@ -705,6 +731,10 @@ impl Node {
             let old_peer = existing.clone();
             let serving_changed = apply_transitive_ann(existing, addr, ann);
             existing.owner_summary = owner_summary;
+            existing.model_ad = ModelAdState {
+                advertisement: ann.model_advertisement.clone(),
+                summary: model_ad_summary,
+            };
             // Refresh last_mentioned: the bridge peer vouches for this peer
             // being alive (collect_announcements already filters stale peers).
             // We update last_mentioned (not last_seen) so that PeerDown
@@ -743,7 +773,8 @@ impl Node {
             // New transitive peer — not directly verified, so set last_seen to
             // epoch (not "now") to avoid incorrectly silencing PeerDown reports.
             // last_mentioned = now keeps the peer alive for the prune window.
-            let mut peer = PeerInfo::from_announcement(id, addr.clone(), ann, owner_summary);
+            let mut peer =
+                PeerInfo::from_announcement(id, addr.clone(), ann, owner_summary, model_ad_summary);
             // Mark as never directly seen — only transitively mentioned.
             // `checked_sub` instead of `-`: on Windows `Instant` is anchored to
             // QueryPerformanceCounter ticks since system boot, so within the
@@ -768,6 +799,55 @@ impl Node {
             .await;
             if imported_ranking {
                 self.refresh_served_model_descriptors().await;
+            }
+        }
+    }
+
+    /// Phase 3.1: build an owner-signed advertisement over the node's current
+    /// per-model metric snapshot. Returns `None` when the node has no owner key
+    /// or when nothing has been measured yet (an empty advertisement carries no
+    /// trust value). The signed claims are exactly the `model_timings` /
+    /// `native_baselines` subset that a malicious relay could otherwise forge,
+    /// merged per model so each model produces one claim.
+    fn build_self_model_advertisement(
+        &self,
+        timings: &[ModelTimingEntry],
+        baselines: &[NativeBaselineEntry],
+    ) -> Option<crate::crypto::SignedModelAdvertisement> {
+        let keypair = self.owner_keypair.as_ref().as_ref()?;
+        let mut by_model: std::collections::BTreeMap<String, crate::crypto::ModelClaim> =
+            std::collections::BTreeMap::new();
+        for t in timings {
+            let claim = by_model.entry(t.model.clone()).or_default();
+            claim.model = t.model.clone();
+            claim.measured_tps_p50 = Some(t.measured_tps_p50);
+            claim.measured_ttft_ms_p50 = Some(t.measured_ttft_ms_p50 as f64);
+            claim.samples_in_window = t.samples_in_window as u32;
+        }
+        for b in baselines {
+            let claim = by_model.entry(b.model.clone()).or_default();
+            claim.model = b.model.clone();
+            claim.native_tps_p50 = Some(b.native_tps_p50);
+            claim.native_ttft_ms_p50 = Some(b.native_ttft_ms_p50 as f64);
+            claim.native_backend = Some(b.backend.clone());
+            claim.native_logit_fingerprint = b
+                .logit_fingerprint
+                .as_ref()
+                .map(|fp| fp.output_sha256.clone());
+        }
+        let models: Vec<crate::crypto::ModelClaim> = by_model.into_values().collect();
+        if models.is_empty() {
+            return None;
+        }
+        match crate::crypto::sign_model_advertisement(
+            keypair,
+            self.endpoint.id().as_bytes(),
+            models,
+        ) {
+            Ok(ad) => Some(ad),
+            Err(err) => {
+                tracing::warn!("Phase 3.1: failed to sign model advertisement: {err}");
+                None
             }
         }
     }
@@ -849,10 +929,37 @@ impl Node {
                     // performance, anything we add here would be noise.
                     native_baselines: p.native_baselines.clone(),
                     capability: Some(p.capability.clone()),
+                    // Phase 3.1: relay the peer's own owner-signed advertisement
+                    // unchanged — the signature covers its node id + metrics, so
+                    // it survives this transitive hop and we never re-sign for
+                    // another owner.
+                    model_advertisement: p.model_ad.advertisement.clone(),
                 })
                 .collect()
         };
         let my_first_joined_mesh_ts = *self.first_joined_mesh_ts.lock().await;
+        // v0.66.41 Phase 1 marketplace metrics: snapshot the local node's
+        // per-model TPS / TTFT rolling-1h window. Empty when this node hasn't
+        // served any model locally yet — see `ModelTimingEntry` for why empty
+        // != "measured zero".
+        let my_model_timings: Vec<ModelTimingEntry> = self
+            .model_timings_snapshot()
+            .into_iter()
+            .map(|(model, snap)| ModelTimingEntry {
+                model,
+                measured_tps_p50: snap.measured_tps_p50,
+                measured_ttft_ms_p50: snap.measured_ttft_ms_p50,
+                samples_in_window: snap.samples_in_window,
+            })
+            .collect();
+        // v0.66.49 Phase 3.0: native baselines measured directly against the
+        // local llama-server (no mesh involved).
+        let my_native_baselines = self.native_baselines_snapshot().await;
+        // v0.66.x Phase 3.1: sign this exact metric snapshot under the owner
+        // key so peers can reject relayed forgeries. `None` when the node has
+        // no owner key or nothing measured yet.
+        let my_model_advertisement =
+            self.build_self_model_advertisement(&my_model_timings, &my_native_baselines);
         announcements.push(PeerAnnouncement {
             addr: self.endpoint.addr(),
             role: my_role,
@@ -917,30 +1024,11 @@ impl Node {
             // Lazy rpc-server readiness. Self is never legacy, so always
             // Some(..): split hosts can gate worker selection on it.
             rpc_ready: Some(self.local_rpc_ready()),
-            // v0.66.41 Phase 1 marketplace metrics: snapshot the local
-            // node's per-model TPS / TTFT rolling-1h window and ship it
-            // to peers. Empty when this node hasn't served any model
-            // locally yet (or the last sample expired out of the
-            // window), which is the right wire shape — see
-            // `ModelTimingEntry` for why empty != "measured zero".
-            model_timings: self
-                .model_timings_snapshot()
-                .into_iter()
-                .map(|(model, snap)| ModelTimingEntry {
-                    model,
-                    measured_tps_p50: snap.measured_tps_p50,
-                    measured_ttft_ms_p50: snap.measured_ttft_ms_p50,
-                    samples_in_window: snap.samples_in_window,
-                })
-                .collect(),
-            // v0.66.49 Phase 3.0: snapshot the local node's per-model
-            // native baselines (synthetic chats issued directly to
-            // 127.0.0.1:llama_port, no mesh involved) for gossip. Empty
-            // when this node hasn't completed a baseline run yet —
-            // baselines only land after the model is `Ready` and a
-            // synthetic prompt has returned successfully.
-            native_baselines: self.native_baselines_snapshot().await,
+            model_timings: my_model_timings,
+            native_baselines: my_native_baselines,
             capability: self.local_node_capability().await,
+            // Phase 3.1: owner-signed attestation over the snapshot above.
+            model_advertisement: my_model_advertisement,
         });
         announcements
     }
@@ -999,6 +1087,7 @@ mod tests {
             native_baselines: vec![],
             rpc_ready: None,
             capability: None,
+            model_advertisement: None,
         }
     }
 
@@ -1008,6 +1097,7 @@ mod tests {
             test_addr(0x22),
             &test_announcement(ts),
             OwnershipSummary::default(),
+            ModelAdSummary::default(),
         )
     }
 

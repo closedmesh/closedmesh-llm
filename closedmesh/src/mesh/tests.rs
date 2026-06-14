@@ -77,6 +77,7 @@ pub(crate) async fn make_test_node(role: super::NodeRole) -> Result<Node> {
         plugin_manager: Arc::new(Mutex::new(None)),
         display_name: Arc::new(Mutex::new(None)),
         owner_attestation: Arc::new(Mutex::new(None)),
+        owner_keypair: Arc::new(None),
         owner_summary: Arc::new(Mutex::new(OwnershipSummary::default())),
         trust_store: Arc::new(Mutex::new(TrustStore::default())),
         trust_policy: TrustPolicy::Off,
@@ -733,6 +734,7 @@ fn make_test_peer_info(peer_id: EndpointId) -> PeerInfo {
         native_baselines: vec![],
         rpc_ready: None,
         capability: super::NodeCapability::default(),
+        model_ad: Default::default(),
     }
 }
 
@@ -1402,6 +1404,7 @@ fn gossip_frame_roundtrip_preserves_scanned_model_metadata() {
         native_baselines: vec![],
         rpc_ready: None,
         capability: None,
+        model_advertisement: None,
     };
 
     let proto_pa = local_ann_to_proto_ann(&local_ann);
@@ -1629,6 +1632,7 @@ fn transitive_peer_update_refreshes_metadata_fields() {
         native_baselines: vec![],
         rpc_ready: None,
         capability: None,
+        model_advertisement: None,
     };
 
     apply_transitive_ann(&mut existing, &addr, &ann);
@@ -1707,6 +1711,7 @@ fn transitive_peer_merge_preserves_richer_direct_address() {
         native_baselines: vec![],
         rpc_ready: None,
         capability: None,
+        model_advertisement: None,
     };
 
     apply_transitive_ann(&mut existing, &weak_addr, &ann);
@@ -1764,6 +1769,7 @@ fn transitive_peer_merge_preserves_richer_direct_address() {
         native_baselines: vec![],
         rpc_ready: None,
         capability: None,
+        model_advertisement: None,
     };
     apply_transitive_ann(&mut existing, &richer_addr, &ann2);
 
@@ -2315,6 +2321,7 @@ fn transitive_peer_update_refreshes_last_mentioned() {
         native_baselines: vec![],
         rpc_ready: None,
         capability: None,
+        model_advertisement: None,
     };
 
     apply_transitive_ann(&mut peer, &addr, &ann);
@@ -2587,6 +2594,7 @@ fn remote_model_scans_are_ignored_after_gossip() {
         addr.clone(),
         &local_ann,
         OwnershipSummary::default(),
+        ModelAdSummary::default(),
     );
     peers.insert(peer_id, peer_info);
 
@@ -3228,6 +3236,7 @@ fn make_test_peer(id: EndpointId, rtt_ms: Option<u32>, vram_gb: u64) -> PeerInfo
         native_baselines: vec![],
         rpc_ready: None,
         capability: super::NodeCapability::default(),
+        model_ad: Default::default(),
     }
 }
 
@@ -3895,6 +3904,7 @@ async fn make_test_node_with_owner(
         plugin_manager: Arc::new(Mutex::new(None)),
         display_name: Arc::new(Mutex::new(None)),
         owner_attestation: Arc::new(Mutex::new(Some(owner_attestation))),
+        owner_keypair: Arc::new(None),
         owner_summary: Arc::new(Mutex::new(owner_summary)),
         trust_store: Arc::new(Mutex::new(trust_store)),
         trust_policy: TrustPolicy::Off,

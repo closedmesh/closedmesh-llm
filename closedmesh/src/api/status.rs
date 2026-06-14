@@ -1,5 +1,5 @@
 use super::{RuntimeModelPayload, RuntimeProcessPayload};
-use crate::crypto::{OwnershipStatus, OwnershipSummary};
+use crate::crypto::{ModelAdStatus, ModelAdSummary, OwnershipStatus, OwnershipSummary};
 use crate::network::{affinity, metrics};
 use crate::system::hardware::expand_gpu_names;
 use serde::Serialize;
@@ -252,6 +252,11 @@ pub(super) struct WakeableNode {
 pub(super) struct PeerPayload {
     pub(super) id: String,
     pub(super) owner: OwnershipPayload,
+    /// v0.66.x Phase 3.1: verdict of verifying this peer's owner-signed model
+    /// advertisement (the trust-sensitive subset of its performance claims)
+    /// against the local trust store. `verified=false` with `status=unsigned`
+    /// for legacy peers and peers with no owner key.
+    pub(super) model_ad: ModelAdPayload,
     pub(super) role: String,
     pub(super) state: NodeState,
     pub(super) models: Vec<String>,
@@ -441,6 +446,41 @@ pub(super) fn build_ownership_payload(summary: &OwnershipSummary) -> OwnershipPa
         expires_at_unix_ms: summary.expires_at_unix_ms,
         node_label: summary.node_label.clone(),
         hostname_hint: summary.hostname_hint.clone(),
+    }
+}
+
+/// v0.66.x Phase 3.1: serialized verdict of verifying a peer's owner-signed
+/// model advertisement against the local trust store. `verified` is the field
+/// the UI keys on; `status` carries the specific reason when it's false.
+#[derive(Serialize, Default)]
+pub(super) struct ModelAdPayload {
+    pub(super) status: String,
+    pub(super) verified: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) owner_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) issued_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub(super) model_count: usize,
+}
+
+pub(super) fn build_model_ad_payload(summary: &ModelAdSummary) -> ModelAdPayload {
+    ModelAdPayload {
+        status: match summary.status {
+            ModelAdStatus::Verified => "verified",
+            ModelAdStatus::Unsigned => "unsigned",
+            ModelAdStatus::InvalidSignature => "invalid_signature",
+            ModelAdStatus::MismatchedNodeId => "mismatched_node_id",
+            ModelAdStatus::Stale => "stale",
+            ModelAdStatus::RevokedOwner => "revoked_owner",
+            ModelAdStatus::UntrustedOwner => "untrusted_owner",
+            ModelAdStatus::UnsupportedProtocol => "unsupported_protocol",
+        }
+        .to_string(),
+        verified: summary.verified,
+        owner_id: summary.owner_id.clone(),
+        issued_at_unix_ms: summary.issued_at_unix_ms,
+        model_count: summary.model_count,
     }
 }
 
@@ -687,6 +727,7 @@ mod tests {
         let peer = PeerPayload {
             id: "test-id".to_string(),
             owner: test_owner_payload(),
+            model_ad: Default::default(),
             role: "Worker".to_string(),
             state: NodeState::Standby,
             models: vec![],
@@ -724,6 +765,7 @@ mod tests {
         let peer = PeerPayload {
             id: "test-id".to_string(),
             owner: test_owner_payload(),
+            model_ad: Default::default(),
             role: "Worker".to_string(),
             state: NodeState::Standby,
             models: vec![],
@@ -1005,6 +1047,7 @@ mod tests {
         let peer = PeerPayload {
             id: "test-id".to_string(),
             owner: test_owner_payload(),
+            model_ad: Default::default(),
             role: "Host".to_string(),
             state: NodeState::Serving,
             models: vec![],
@@ -1049,6 +1092,7 @@ mod tests {
         let peer = PeerPayload {
             id: "test-id".to_string(),
             owner: test_owner_payload(),
+            model_ad: Default::default(),
             role: "Host".to_string(),
             state: NodeState::Serving,
             models: vec![],
@@ -1107,6 +1151,7 @@ mod tests {
         let peer = PeerPayload {
             id: "test-id".to_string(),
             owner: test_owner_payload(),
+            model_ad: Default::default(),
             role: "Host".to_string(),
             state: NodeState::Serving,
             models: vec![],

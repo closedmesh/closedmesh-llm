@@ -560,6 +560,7 @@ mod tests {
             native_baselines: vec![],
             rpc_ready: None,
             capability: crate::mesh::NodeCapability::default(),
+            model_ad: Default::default(),
         }
     }
 
@@ -1242,6 +1243,7 @@ mod tests {
             native_baselines: vec![],
             rpc_ready: None,
             capability: None,
+            model_advertisement: None,
         };
         let proto_pa = local_ann_to_proto_ann(&ann);
         assert_eq!(
@@ -1302,6 +1304,7 @@ mod tests {
             native_baselines: vec![],
             rpc_ready: None,
             capability: None,
+            model_advertisement: None,
         };
 
         let proto_pa = local_ann_to_proto_ann(&ann);
@@ -1410,6 +1413,7 @@ mod tests {
             native_baselines: vec![],
             rpc_ready: None,
             capability: None,
+            model_advertisement: None,
         };
 
         let proto_pa = local_ann_to_proto_ann(&ann);
@@ -1426,6 +1430,118 @@ mod tests {
         assert_eq!(roundtripped.model_timings[1].model, "Llama-3.3-70B-Q4_K_M");
         assert_eq!(roundtripped.model_timings[1].measured_ttft_ms_p50, 1100);
         assert_eq!(roundtripped.model_timings[1].samples_in_window, 2);
+    }
+
+    /// Phase 3.1: an owner-signed model advertisement must survive the full
+    /// gossip wire path (local → proto → local) byte-identical AND still verify
+    /// against the node id it was signed for. This is the security guarantee
+    /// that lets a verifier reject metrics a malicious relay fabricated: if any
+    /// layer of convert.rs dropped or mangled a signed field, the round-tripped
+    /// signature would no longer validate and this test fails loudly.
+    #[test]
+    fn test_proto_round_trip_signed_model_advertisement_verifies() {
+        let secret = SecretKey::from_bytes(&[0xD1; 32]);
+        let peer_id = EndpointId::from(secret.public());
+        let owner = crate::crypto::OwnerKeypair::generate();
+        let advertisement = crate::crypto::sign_model_advertisement(
+            &owner,
+            peer_id.as_bytes(),
+            vec![crate::crypto::ModelClaim {
+                model: "Qwen3-32B-Q4_K_M".to_string(),
+                measured_tps_p50: Some(14.5),
+                measured_ttft_ms_p50: Some(320.0),
+                samples_in_window: 7,
+                native_tps_p50: Some(18.1),
+                native_backend: Some("metal".to_string()),
+                native_logit_fingerprint: Some("abc123".to_string()),
+                ..Default::default()
+            }],
+        )
+        .expect("signing must succeed");
+
+        let ann = super::PeerAnnouncement {
+            addr: EndpointAddr {
+                id: peer_id,
+                addrs: Default::default(),
+            },
+            role: super::NodeRole::Host { http_port: 3131 },
+            first_joined_mesh_ts: None,
+            models: vec![],
+            vram_bytes: 0,
+            model_source: None,
+            serving_models: vec![],
+            hosted_models: None,
+            available_models: vec![],
+            requested_models: vec![],
+            version: None,
+            model_demand: HashMap::new(),
+            mesh_id: None,
+            gpu_name: None,
+            hostname: None,
+            is_soc: None,
+            gpu_vram: None,
+            gpu_reserved_bytes: None,
+            gpu_mem_bandwidth_gbps: None,
+            gpu_compute_tflops_fp32: None,
+            gpu_compute_tflops_fp16: None,
+            available_model_metadata: vec![],
+            experts_summary: None,
+            available_model_sizes: HashMap::new(),
+            served_model_descriptors: vec![],
+            served_model_runtime: vec![],
+            owner_attestation: None,
+            inflight_requests: 0,
+            system_ram_bytes: 0,
+            model_timings: vec![],
+            native_baselines: vec![],
+            rpc_ready: None,
+            capability: None,
+            model_advertisement: Some(advertisement.clone()),
+        };
+
+        let proto_pa = local_ann_to_proto_ann(&ann);
+        let (_, roundtripped) =
+            proto_ann_to_local(&proto_pa).expect("proto_ann_to_local must succeed");
+        let round_ad = roundtripped
+            .model_advertisement
+            .expect("signed advertisement must survive the round trip");
+        assert_eq!(
+            round_ad, advertisement,
+            "advertisement must be byte-identical"
+        );
+
+        // The round-tripped advertisement still verifies against the correct
+        // node id with an empty (default-trust) store.
+        let summary = crate::crypto::verify_model_advertisement(
+            Some(&round_ad),
+            peer_id.as_bytes(),
+            &crate::crypto::TrustStore::default(),
+            crate::crypto::TrustPolicy::Off,
+            round_ad.claim.issued_at_unix_ms,
+            crate::crypto::DEFAULT_MODEL_AD_TTL_MS,
+        );
+        assert!(
+            summary.is_verified(),
+            "round-tripped ad must verify: {summary:?}"
+        );
+        assert_eq!(summary.model_count, 1);
+
+        // A relay that reattaches the same advertisement to a DIFFERENT node id
+        // is caught: verification fails with MismatchedNodeId.
+        let other_id = EndpointId::from(SecretKey::from_bytes(&[0xD2; 32]).public());
+        let forged = crate::crypto::verify_model_advertisement(
+            Some(&round_ad),
+            other_id.as_bytes(),
+            &crate::crypto::TrustStore::default(),
+            crate::crypto::TrustPolicy::Off,
+            round_ad.claim.issued_at_unix_ms,
+            crate::crypto::DEFAULT_MODEL_AD_TTL_MS,
+        );
+        assert!(!forged.is_verified());
+        assert_eq!(
+            forged.status,
+            crate::crypto::ModelAdStatus::MismatchedNodeId
+        );
     }
 
     /// Legacy peers (<= v0.66.40) gossip a PeerAnnouncement without the
@@ -2098,6 +2214,7 @@ mod tests {
             native_baselines: vec![],
             rpc_ready: None,
             capability: None,
+            model_advertisement: None,
         };
 
         let proto_pa = local_ann_to_proto_ann(&ann_with_timestamp);
@@ -2147,6 +2264,7 @@ mod tests {
             native_baselines: vec![],
             rpc_ready: None,
             capability: None,
+            model_advertisement: None,
         };
 
         let proto_pa = local_ann_to_proto_ann(&ann_without_timestamp);

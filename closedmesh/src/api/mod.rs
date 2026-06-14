@@ -1585,6 +1585,7 @@ impl MeshApi {
                 PeerPayload {
                     id: p.id.fmt_short().to_string(),
                     owner: build_ownership_payload(&p.owner_summary),
+                    model_ad: crate::api::status::build_model_ad_payload(&p.model_ad.summary),
                     role: match p.role {
                         mesh::NodeRole::Worker => "Worker".into(),
                         mesh::NodeRole::Host { .. } => "Host".into(),
@@ -3072,6 +3073,7 @@ mod tests {
             native_baselines: vec![],
             rpc_ready: None,
             capability: crate::mesh::NodeCapability::default(),
+            model_ad: Default::default(),
         }
     }
 
@@ -3356,6 +3358,7 @@ mod tests {
             native_baselines: vec![],
             rpc_ready: None,
             capability: crate::mesh::NodeCapability::default(),
+            model_ad: Default::default(),
         }
     }
 

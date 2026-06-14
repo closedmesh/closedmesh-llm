@@ -106,6 +106,92 @@ fn proto_owner_attestation_to_local(
     }
 }
 
+fn local_model_ad_to_proto(
+    ad: &crate::crypto::SignedModelAdvertisement,
+) -> Option<crate::proto::node::SignedModelAdvertisement> {
+    let owner_sign_public_key = match hex::decode(&ad.claim.owner_sign_public_key) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            tracing::warn!(
+                "dropping local model advertisement from gossip: invalid owner_sign_public_key hex: {err}"
+            );
+            return None;
+        }
+    };
+    let node_endpoint_id = match hex::decode(&ad.claim.node_endpoint_id) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            tracing::warn!(
+                "dropping local model advertisement from gossip: invalid node_endpoint_id hex: {err}"
+            );
+            return None;
+        }
+    };
+    let signature = match hex::decode(&ad.signature) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            tracing::warn!(
+                "dropping local model advertisement from gossip: invalid signature hex: {err}"
+            );
+            return None;
+        }
+    };
+    Some(crate::proto::node::SignedModelAdvertisement {
+        version: ad.claim.version,
+        owner_id: ad.claim.owner_id.clone(),
+        owner_sign_public_key,
+        node_endpoint_id,
+        issued_at_unix_ms: ad.claim.issued_at_unix_ms,
+        models: ad
+            .claim
+            .models
+            .iter()
+            .map(|m| crate::proto::node::SignedModelClaim {
+                model: m.model.clone(),
+                quant: m.quant.clone(),
+                measured_tps_p50: m.measured_tps_p50,
+                measured_ttft_ms_p50: m.measured_ttft_ms_p50,
+                samples_in_window: m.samples_in_window,
+                native_tps_p50: m.native_tps_p50,
+                native_ttft_ms_p50: m.native_ttft_ms_p50,
+                native_backend: m.native_backend.clone(),
+                native_logit_fingerprint: m.native_logit_fingerprint.clone(),
+            })
+            .collect(),
+        signature,
+    })
+}
+
+fn proto_model_ad_to_local(
+    ad: &crate::proto::node::SignedModelAdvertisement,
+) -> crate::crypto::SignedModelAdvertisement {
+    crate::crypto::SignedModelAdvertisement {
+        claim: crate::crypto::ModelAdvertisementClaim {
+            version: ad.version,
+            owner_id: ad.owner_id.clone(),
+            owner_sign_public_key: hex::encode(&ad.owner_sign_public_key),
+            node_endpoint_id: hex::encode(&ad.node_endpoint_id),
+            issued_at_unix_ms: ad.issued_at_unix_ms,
+            models: ad
+                .models
+                .iter()
+                .map(|m| crate::crypto::ModelClaim {
+                    model: m.model.clone(),
+                    quant: m.quant.clone(),
+                    measured_tps_p50: m.measured_tps_p50,
+                    measured_ttft_ms_p50: m.measured_ttft_ms_p50,
+                    samples_in_window: m.samples_in_window,
+                    native_tps_p50: m.native_tps_p50,
+                    native_ttft_ms_p50: m.native_ttft_ms_p50,
+                    native_backend: m.native_backend.clone(),
+                    native_logit_fingerprint: m.native_logit_fingerprint.clone(),
+                })
+                .collect(),
+        },
+        signature: hex::encode(&ad.signature),
+    }
+}
+
 fn local_source_kind_to_proto(kind: crate::mesh::ModelSourceKind) -> i32 {
     match kind {
         crate::mesh::ModelSourceKind::Catalog => {
@@ -536,6 +622,11 @@ pub(crate) fn local_ann_to_proto_ann(
                 }),
             })
             .collect(),
+        // Phase 3.1: owner-signed advertisement, byte-encoded for the wire.
+        model_advertisement: ann
+            .model_advertisement
+            .as_ref()
+            .and_then(local_model_ad_to_proto),
     }
 }
 
@@ -741,6 +832,10 @@ pub(crate) fn proto_ann_to_local(
             .capability
             .as_ref()
             .and_then(crate::mesh::NodeCapability::from_proto),
+        // Phase 3.1: decode the owner-signed advertisement back to the local
+        // hex-string form. Verification happens at ingest (add_peer /
+        // update_transitive_peer), not here.
+        model_advertisement: pa.model_advertisement.as_ref().map(proto_model_ad_to_local),
     };
     crate::mesh::backfill_legacy_descriptors(&mut ann);
     Some((addr, ann))
