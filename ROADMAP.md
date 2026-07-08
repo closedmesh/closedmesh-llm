@@ -2,6 +2,17 @@
 
 High-level directions for closedmesh. Not promises — just things we're thinking about.
 
+> **Status (2026-07):** the active roadmap is the phased plan tracked on
+> [closedmesh.com/updates](https://closedmesh.com/updates). Current phase:
+> **catalog + reputation** — peer-signed model advertisements, a reputation
+> accumulator, and routing demotion for peers that miss their advertised
+> performance, on top of the shipped model-identity verification
+> (see [docs/VERIFICATION.md](docs/VERIFICATION.md)). Cross-peer speculative
+> decoding was benchmarked and **shelved** (2026-06): best-case ~1.3–1.4×
+> with zero network hop, below the bar where a WAN hop pays for itself.
+> Items below are longer-horizon ideas, some predating the session-first
+> replication architecture — read them with that lens.
+
 ## Smart model router ✅ (Phase 1)
 
 Implemented. Heuristic classifier detects Code/Reasoning/Chat/Creative/ToolCall with Quick/Moderate/Deep complexity. Task-dominant scoring ensures the right model handles each request. Tool capability is a hard filter. Multi-model per node with auto packs by VRAM tier.

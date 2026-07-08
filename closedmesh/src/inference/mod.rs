@@ -8,5 +8,6 @@ pub(crate) mod moe;
 pub(crate) mod native_baseline;
 pub(crate) mod perf_profile;
 pub(crate) mod pipeline;
+pub(crate) mod reputation;
 pub(crate) mod verify;
 pub(crate) mod virtual_llm;

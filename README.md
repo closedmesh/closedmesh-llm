@@ -26,7 +26,7 @@ ClosedMesh LLM is the open-source inference engine behind [ClosedMesh](https://c
 The design principle: **the unit of work is a session, not a token.** On residential and laptop-class networks, per-token cross-machine traffic is fatal — RTTs are 20–200 ms, bandwidth is variable, and any architecture that puts the network on the per-token critical path collapses to <1 t/s. So we don't:
 
 - **Replication is the default.** If a model fits on one machine, it runs there end-to-end at full quality. The mesh's job is to find the best peer for each session, not to stitch weights across slow links.
-- **Speculative decoding is the multi-peer mode that pays off.** A small fast draft peer proposes 4–8 tokens; a larger verifier peer accepts them in one batched forward pass. The network hop amortises across many tokens, both peers earn for the same session.
+- **Speculative decoding is a single-node opt-in, not a multi-peer route.** A small draft model proposes 4–8 tokens that the verifier accepts in one batched forward pass — a real win when both models run on the same box. The cross-peer variant was benchmarked and shelved (2026-06): even the single-GPU best case ceilinged at ~1.3–1.4×, and a WAN hop per draft→verify cycle erases that.
 - **Models can collaborate during inference.** A text-only model consults a vision peer for image captions; an uncertain model gets a second opinion from a different architecture; small models nudge a stuck verifier out of repetition loops. The caller sees one seamless response.
 - **Every node exposes the same local API** at `http://localhost:9337/v1`.
 
@@ -40,7 +40,7 @@ M-series unified memory turns a $2.5–4.5k laptop into a 30B–70B-capable infe
 
 | Piece | Repo | What it is |
 |---|---|---|
-| Chat product surface | private | The Next.js chat UI hosted at `closedmesh.com` and the local controller installed on each teammate's machine. |
+| Chat product surface | [`closedmesh/closedmesh`](https://github.com/closedmesh/closedmesh) | The Next.js chat UI hosted at `closedmesh.com` and the desktop app / local controller. |
 | Inference runtime | **this repo** (`closedmesh/closedmesh-llm`) | The `closedmesh` binary. OpenAI-compatible API, peer-to-peer mesh, pipeline + MoE parallelism, capability-aware routing. |
 
 The two are versioned and released independently. Most teams only ever install the runtime — the chat product talks to it for them.
@@ -139,7 +139,7 @@ Use only pinnable `Stable ID` / `stable_id` values from `closedmesh gpus` for pi
 ClosedMesh LLM keeps the user-facing surface simple: talk to `localhost:9337`, pick a model, and let the mesh decide how to serve it. The decision tree, in order:
 
 1. **One peer fits the model?** Run it solo on that peer, end-to-end, full speed, zero per-token network overhead. This is the default and the case the runtime is optimised for.
-2. **Two peers can pair via speculative decoding?** Run a small fast draft model on one peer and a larger verifier on another peer. The draft proposes 4–8 tokens, the verifier accepts them in one batched forward pass. Both peers earn for the same session, the network hop amortises across many tokens, and acceptance rates of 70–80 % give a meaningful throughput win on residential WAN.
+2. **Speculative decoding on that peer?** If the serving peer also holds a compatible small draft model, it can propose 4–8 tokens that the verifier accepts in one batched forward pass — an opt-in, same-box throughput win. (Cross-peer draft/verify pairing was benchmarked and shelved in 2026-06: best-case speedup ~1.3–1.4× even with zero network hop, below the bar at which the added WAN latency pays for itself.)
 3. **Multi-model collaboration?** A text-only model silently consults a vision peer for image captions; an uncertain model gets a second opinion from a different architecture; a stuck verifier gets nudged out of a repetition loop. The caller sees one seamless response — they don't know multiple models collaborated. See [closedmesh/docs/VIRTUAL_LLM.md](closedmesh/docs/VIRTUAL_LLM.md).
 4. **Multi-model serving** — different peers serve different models simultaneously. The API proxy peeks at the `model` field in each request and routes to the right peer via QUIC tunnel. `/v1/models` lists everything advertised by the mesh.
 5. **Demand-aware rebalancing** — a unified demand map tracks which models the mesh wants (from `--model` flags, API requests, and gossip). Demand signals propagate across peers and decay via TTL. Standby peers auto-promote to serve unserved models with active demand, or rebalance when one model is significantly hotter than others.
@@ -152,7 +152,7 @@ HTTP streaming is latency-tolerant; per-token RPC is latency-multiplied. So `lla
 ### Throughput optimisations
 
 - **Zero-transfer GGUF loading** — `SET_TENSOR_GGUF` tells rpc-server to read weights from local disk. Dropped model load from 111 s → 5 s.
-- **Speculative decoding** — local draft model proposes tokens, the verifier accepts them in one batched forward pass. +38 % throughput on code (75 % acceptance) when both peers are local; positive even across residential WAN at expected RTTs.
+- **Speculative decoding (same box)** — local draft model proposes tokens, the verifier accepts them in one batched forward pass. +38 % throughput on code (75 % acceptance) when draft and verifier share a machine. The cross-peer variant is shelved: measured best case ~1.3–1.4× with no network hop, which a residential RTT per draft→verify cycle erases.
 - **RPC round-trip reduction** — cached `get_alloc_size`, skip GGUF lookups for intermediates. Per-token round-trips: 558 → 8 (used by the fallback splits below).
 - **Direct server-to-server transfers** — intermediate tensors pushed directly between rpc-servers via TCP, not relayed through the client (also used by the fallback splits).
 

@@ -1241,6 +1241,22 @@ pub struct Node {
     /// surfaced on `/api/status` as
     /// `native_tps_p50_by_model` / `native_ttft_ms_p50_by_model`.
     native_baselines: Arc<Mutex<HashMap<String, NativeBaselineEntry>>>,
+    /// v0.66.x Phase 3.2 reputation accumulator: persistent per-`(peer, model)`
+    /// EWMA trust score folded from verifier sample-and-verify verdicts.
+    /// Entry-local; loaded from `~/.closedmesh/reputation.json` at startup,
+    /// written back on every audit, and surfaced on `/api/status` as
+    /// `reputation_by_model`. Observe-mode — does NOT gate routing (that stays
+    /// the verifier's flag-gated consecutive-mismatch demotion). Keyed by the
+    /// full peer id string so it survives restarts and matches the status
+    /// builder's `peer.id.to_string()` lookup.
+    reputation: Arc<
+        Mutex<
+            HashMap<
+                crate::inference::reputation::RepKey,
+                crate::inference::reputation::ReputationScore,
+            >,
+        >,
+    >,
     /// Lazy rpc-server readiness for THIS node (prototype). `true` once the
     /// on-demand rpc-server is up and the tunnel points at it; `false` when
     /// torn down. Gossiped as `PeerAnnouncement::rpc_ready = Some(...)` (self
@@ -1752,6 +1768,48 @@ impl Node {
         state
             .verify_verdicts
             .insert((peer_id, model.to_string()), rec);
+        drop(state);
+
+        // Phase 3.2: fold this verdict into the persistent reputation
+        // accumulator and write it back to disk. Folding is cheap; the JSON
+        // file is small and audits are infrequent, so a synchronous write here
+        // is fine and mirrors the native-baseline cache pattern. Keyed by the
+        // full peer id string so the score survives restarts.
+        let rep_key = (peer_id.to_string(), model.to_string());
+        let snapshot = {
+            let mut rep = self.reputation.lock().await;
+            let prev = rep.get(&rep_key).cloned();
+            let updated = crate::inference::reputation::fold(
+                prev,
+                verdict,
+                now_secs(),
+                crate::inference::reputation::DEFAULT_ALPHA,
+            );
+            rep.insert(rep_key, updated);
+            rep.clone()
+        };
+        if let Some(path) = crate::inference::reputation::store_path() {
+            if let Err(e) = crate::inference::reputation::save_store(&path, &snapshot) {
+                tracing::debug!(
+                    target: "closedmesh::reputation",
+                    error = %e,
+                    "reputation: failed to persist store"
+                );
+            }
+        }
+    }
+
+    /// Snapshot of the persistent reputation scores, keyed by `(full peer id
+    /// string, model)`. Read by the entry `/api/status` peer payload builder so
+    /// the catalog can render a durable trust chip alongside the hour-bounded
+    /// `verify_by_model` verdict. Pruning happens at load time, not here.
+    pub async fn reputation_snapshot(
+        &self,
+    ) -> HashMap<
+        crate::inference::reputation::RepKey,
+        crate::inference::reputation::ReputationScore,
+    > {
+        self.reputation.lock().await.clone()
     }
 
     /// Snapshot of recent verify verdicts, pruning entries older than one hour
@@ -2224,6 +2282,11 @@ impl Node {
                     })
                     .unwrap_or_default(),
             )),
+            reputation: Arc::new(Mutex::new(
+                crate::inference::reputation::store_path()
+                    .map(|p| crate::inference::reputation::load_store(&p, now_secs()))
+                    .unwrap_or_default(),
+            )),
             rpc_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             model_demand: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mesh_id: Arc::new(Mutex::new(None)),
@@ -2342,6 +2405,7 @@ impl Node {
             available_models: Arc::new(Mutex::new(Vec::new())),
             requested_models: Arc::new(Mutex::new(Vec::new())),
             native_baselines: Arc::new(Mutex::new(HashMap::new())),
+            reputation: Arc::new(Mutex::new(HashMap::new())),
             rpc_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             model_demand: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mesh_id: Arc::new(Mutex::new(None)),

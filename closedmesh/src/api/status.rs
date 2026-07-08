@@ -265,6 +265,13 @@ pub(super) struct PeerPayload {
     /// regardless of whether enforcement is enabled.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub(super) verify_by_model: std::collections::HashMap<String, VerifyPayload>,
+    /// v0.66.x Phase 3.2: persistent reputation score per model the local
+    /// verifier has probed on this peer, keyed by model id. Accumulated EWMA of
+    /// sample-and-verify verdicts (survives restarts), unlike the hour-bounded
+    /// `verify_by_model`. Empty for peers nobody has probed yet (only the entry
+    /// node runs the verifier). Observe-only — does not gate routing.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub(super) reputation_by_model: std::collections::HashMap<String, ReputationPayload>,
     pub(super) role: String,
     pub(super) state: NodeState,
     pub(super) models: Vec<String>,
@@ -485,6 +492,37 @@ pub(super) struct VerifyPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) reason: Option<String>,
     pub(super) checked_at_unix_secs: u64,
+}
+
+/// v0.66.x Phase 3.2: serialized reputation score for one `(peer, model)`. The
+/// UI keys on `grade` (`trusted` | `watch` | `unproven`) for the chip and shows
+/// `score` / `samples` in the tooltip. Unlike `verify_by_model` (hour-bounded,
+/// latest-only), this is the persistent EWMA accumulator that survives entry
+/// restarts. Entry-local; present only for `(peer, model)` pairs the entry
+/// verifier has probed. Observe-only — does not gate routing.
+#[derive(Serialize)]
+pub(super) struct ReputationPayload {
+    pub(super) grade: String,
+    pub(super) score: f64,
+    pub(super) samples: u64,
+    pub(super) matches: u64,
+    pub(super) mismatches: u64,
+    pub(super) last_verdict: String,
+    pub(super) updated_at_unix_secs: u64,
+}
+
+pub(super) fn build_reputation_payload(
+    s: &crate::inference::reputation::ReputationScore,
+) -> ReputationPayload {
+    ReputationPayload {
+        grade: crate::inference::reputation::grade(s).as_str().to_string(),
+        score: s.score,
+        samples: s.samples,
+        matches: s.matches,
+        mismatches: s.mismatches,
+        last_verdict: s.last_verdict.clone(),
+        updated_at_unix_secs: s.updated_at_unix_secs,
+    }
 }
 
 pub(super) fn build_verify_payload(rec: &crate::mesh::VerifyVerdictRecord) -> VerifyPayload {
@@ -763,6 +801,7 @@ mod tests {
             owner: test_owner_payload(),
             model_ad: Default::default(),
             verify_by_model: Default::default(),
+            reputation_by_model: Default::default(),
             role: "Worker".to_string(),
             state: NodeState::Standby,
             models: vec![],
@@ -802,6 +841,7 @@ mod tests {
             owner: test_owner_payload(),
             model_ad: Default::default(),
             verify_by_model: Default::default(),
+            reputation_by_model: Default::default(),
             role: "Worker".to_string(),
             state: NodeState::Standby,
             models: vec![],
@@ -1085,6 +1125,7 @@ mod tests {
             owner: test_owner_payload(),
             model_ad: Default::default(),
             verify_by_model: Default::default(),
+            reputation_by_model: Default::default(),
             role: "Host".to_string(),
             state: NodeState::Serving,
             models: vec![],
@@ -1131,6 +1172,7 @@ mod tests {
             owner: test_owner_payload(),
             model_ad: Default::default(),
             verify_by_model: Default::default(),
+            reputation_by_model: Default::default(),
             role: "Host".to_string(),
             state: NodeState::Serving,
             models: vec![],
@@ -1191,6 +1233,7 @@ mod tests {
             owner: test_owner_payload(),
             model_ad: Default::default(),
             verify_by_model: Default::default(),
+            reputation_by_model: Default::default(),
             role: "Host".to_string(),
             state: NodeState::Serving,
             models: vec![],

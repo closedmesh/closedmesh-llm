@@ -1563,10 +1563,12 @@ impl MeshApi {
         let my_available_models = node.available_models().await;
         let my_requested_models = node.requested_models().await;
         let verify_snapshot = node.verify_verdicts_snapshot().await;
+        let reputation_snapshot = node.reputation_snapshot().await;
         let peers: Vec<PeerPayload> = all_peers
             .iter()
             .map(|p| {
                 let split_classification = classify_peer_split_role(p, &all_peers, my_vram_gb);
+                let peer_id_str = p.id.to_string();
                 // No "pipeline_host_degraded" wire-level downgrade here —
                 // a healthy pipeline split has the host in
                 // `NodeState::Serving` and every worker in
@@ -1592,6 +1594,19 @@ impl MeshApi {
                         .filter(|((pid, _), _)| *pid == p.id)
                         .map(|((_, model), rec)| {
                             (model.clone(), crate::api::status::build_verify_payload(rec))
+                        })
+                        .collect(),
+                    // v0.66.x Phase 3.2: durable reputation accumulator,
+                    // filtered to this peer. Keyed by full peer id string to
+                    // match how the verifier wrote it.
+                    reputation_by_model: reputation_snapshot
+                        .iter()
+                        .filter(|((pid, _), _)| pid == &peer_id_str)
+                        .map(|((_, model), s)| {
+                            (
+                                model.clone(),
+                                crate::api::status::build_reputation_payload(s),
+                            )
                         })
                         .collect(),
                     role: match p.role {
