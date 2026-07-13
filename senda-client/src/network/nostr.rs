@@ -440,8 +440,10 @@ pub fn auto_model_pack(vram_gb: f64) -> Vec<String> {
             models: &["GLM-4.7-Flash-Q4_K_M"],
         },
         Pack {
+            // Fast expert-sharded MoE: activates ~3B params/token, so it decodes
+            // far faster through the mesh than a dense 27B at the same footprint.
             min_vram: 24.0,
-            models: &["Qwen3.5-27B-Q4_K_M"],
+            models: &["Qwen3-30B-A3B-Q4_K_M"],
         },
         Pack {
             min_vram: 8.0,
@@ -479,7 +481,7 @@ pub fn auto_model_pack(vram_gb: f64) -> Vec<String> {
 pub fn demand_seed_models() -> Vec<String> {
     vec![
         "Qwen3-Coder-Next-Q4_K_M".into(),
-        "Qwen3.5-27B-Q4_K_M".into(),
+        "Qwen3-30B-A3B-Q4_K_M".into(),
         "GLM-4.7-Flash-Q4_K_M".into(),
         "Qwen3-8B-Q4_K_M".into(),
         "Qwen3-4B-Q4_K_M".into(),
@@ -520,9 +522,9 @@ mod auto_pack_tests {
     }
 
     #[test]
-    fn pack_24gb_vision() {
+    fn pack_24gb_moe() {
         let pack = auto_model_pack(24.0);
-        assert_eq!(pack, vec!["Qwen3.5-27B-Q4_K_M"]);
+        assert_eq!(pack, vec!["Qwen3-30B-A3B-Q4_K_M"]);
     }
 
     #[test]
@@ -552,7 +554,7 @@ mod auto_pack_tests {
     #[test]
     fn pack_between_tiers_falls_through() {
         let pack = auto_model_pack(40.0);
-        assert_eq!(pack, vec!["Qwen3.5-27B-Q4_K_M"]);
+        assert_eq!(pack, vec!["Qwen3-30B-A3B-Q4_K_M"]);
     }
 
     #[test]
