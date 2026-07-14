@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "network.senda"
-version = "0.66.86"
+version = "0.66.87"
 
 val androidArtifactId = "senda-android"
 
