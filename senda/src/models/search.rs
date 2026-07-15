@@ -63,10 +63,14 @@ struct RepoArtifactCandidate {
     file: String,
 }
 
-pub fn search_catalog_models(query: &str) -> Vec<&'static catalog::CatalogModel> {
+pub fn search_catalog_models(
+    query: &str,
+    include_hidden: bool,
+) -> Vec<&'static catalog::CatalogModel> {
     let q = query.to_lowercase();
     let mut results: Vec<_> = catalog::MODEL_CATALOG
         .iter()
+        .filter(|model| include_hidden || model.listed)
         .filter(|model| {
             model.name.to_lowercase().contains(&q)
                 || model.file.to_lowercase().contains(&q)

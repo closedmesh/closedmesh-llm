@@ -18,6 +18,10 @@ pub struct CatalogModel {
     pub moe: Option<MoeConfig>,
     pub extra_files: Vec<CatalogAsset>,
     pub mmproj: Option<CatalogAsset>,
+    /// Whether this entry is part of the curated set surfaced to users.
+    /// Display surfaces show only `listed` models; resolution and acquisition
+    /// paths always see the full catalog. Defaults to `true` when absent.
+    pub listed: bool,
 }
 
 impl CatalogModel {
@@ -54,6 +58,12 @@ struct CatalogModelJson {
     #[serde(default)]
     extra_files: Vec<CatalogAsset>,
     mmproj: Option<CatalogAsset>,
+    #[serde(default = "default_listed")]
+    listed: bool,
+}
+
+fn default_listed() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -83,6 +93,7 @@ impl CatalogModel {
             moe: raw.moe.map(MoeConfig::from_json),
             extra_files: raw.extra_files,
             mmproj: raw.mmproj,
+            listed: raw.listed,
         }
     }
 }
@@ -121,6 +132,13 @@ pub fn find_model(query: &str) -> Option<&'static CatalogModel> {
         })
 }
 
+/// The curated set of catalog models (`listed` entries). Resolution and
+/// acquisition paths must keep iterating [`MODEL_CATALOG`] directly so hidden
+/// ids referenced by existing configs still resolve.
+pub fn listed_models() -> Vec<&'static CatalogModel> {
+    MODEL_CATALOG.iter().filter(|m| m.listed).collect()
+}
+
 pub fn parse_hf_resolve_url_parts(url: &str) -> Option<(&str, Option<&str>, &str)> {
     let tail = url
         .strip_prefix("https://huggingface.co/")
@@ -144,7 +162,7 @@ pub fn huggingface_repo_url(url: &str) -> Option<String> {
 pub fn list_models() {
     eprintln!("Available models:");
     eprintln!();
-    for m in MODEL_CATALOG.iter() {
+    for m in listed_models() {
         let draft_info = if let Some(d) = m.draft.as_deref() {
             format!(" (draft: {})", d)
         } else {

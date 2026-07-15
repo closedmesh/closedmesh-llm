@@ -17,6 +17,9 @@ pub enum ModelSearchSort {
 pub enum ModelsCommand {
     /// List built-in recommended models.
     Recommended {
+        /// Include hidden (non-curated) catalog entries.
+        #[arg(long)]
+        all: bool,
         /// Emit JSON output.
         #[arg(long)]
         json: bool,
@@ -43,6 +46,9 @@ pub enum ModelsCommand {
     /// List built-in catalog models.
     #[command(hide = true)]
     List {
+        /// Include hidden (non-curated) catalog entries.
+        #[arg(long)]
+        all: bool,
         /// Emit JSON output.
         #[arg(long)]
         json: bool,
@@ -61,6 +67,9 @@ pub enum ModelsCommand {
         /// Search only the built-in catalog.
         #[arg(long)]
         catalog: bool,
+        /// Include hidden (non-curated) catalog entries in catalog search.
+        #[arg(long)]
+        all: bool,
         /// Maximum number of results to show.
         #[arg(long, default_value = "20")]
         limit: usize,

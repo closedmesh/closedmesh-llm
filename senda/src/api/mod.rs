@@ -4,6 +4,7 @@
 //!   GET  /api/status    — live mesh state plus local-only routing metrics (JSON)
 //!   GET  /api/models    — mesh model inventory plus local-only routing metrics (JSON)
 //!   GET  /api/search    — catalog or Hugging Face model search with the same JSON payload as `senda models search --json`
+//!   GET  /api/catalog   — curated model catalog (listed entries; ?all=true for hidden too)
 //!   GET  /api/model-interests — local explicit-interest readback (JSON)
 //!   POST /api/model-interests — register local explicit interest for a canonical model ref
 //!   DELETE /api/model-interests/{model_ref} — clear local explicit interest
@@ -3868,9 +3869,12 @@ mod tests {
         let state = build_test_mesh_api().await;
         let (addr, handle) = spawn_management_test_server(state).await;
 
+        // Qwen3-Coder-Next is a hidden (non-curated) catalog entry; opt into
+        // hidden results with `all=true` to exercise the canonical-ref contract
+        // against a known fixture.
         let response = send_management_request(
             addr,
-            "GET /api/search?q=Qwen3-Coder-Next&catalog=true&artifact=gguf&limit=5&sort=trending HTTP/1.1\r\nHost: localhost\r\n\r\n".into(),
+            "GET /api/search?q=Qwen3-Coder-Next&catalog=true&all=true&artifact=gguf&limit=5&sort=trending HTTP/1.1\r\nHost: localhost\r\n\r\n".into(),
         )
         .await;
 
@@ -3906,7 +3910,7 @@ mod tests {
 
         let response = send_management_request(
             addr,
-            "GET /api/search?q=Qwen3-Coder-Next&catalog=true&artifact=gguf&limit=999&sort=parameters-desc HTTP/1.1\r\nHost: localhost\r\n\r\n".into(),
+            "GET /api/search?q=Qwen3-Coder-Next&catalog=true&all=true&artifact=gguf&limit=999&sort=parameters-desc HTTP/1.1\r\nHost: localhost\r\n\r\n".into(),
         )
         .await;
 
@@ -3941,6 +3945,53 @@ mod tests {
         );
 
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_api_catalog_returns_listed_models_and_all_toggle() {
+        // Each test server accepts a single connection, so spawn one per request.
+        let (addr, handle) = spawn_management_test_server(build_test_mesh_api().await).await;
+        let response = send_management_request(
+            addr,
+            "GET /api/catalog HTTP/1.1\r\nHost: localhost\r\n\r\n".into(),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 200"));
+        let payload = json_body(&response);
+        assert_eq!(payload["ok"], json!(true));
+        assert_eq!(payload["source"], json!("catalog"));
+        let curated = payload["catalog"].as_array().cloned().unwrap_or_default();
+        assert!(!curated.is_empty());
+        assert!(
+            curated.iter().all(|entry| entry["listed"] == json!(true)),
+            "default response must contain only listed models"
+        );
+        assert!(
+            curated
+                .iter()
+                .any(|entry| entry["id"] == json!("Qwen3-8B-Q4_K_M")),
+            "curated set should include the default model"
+        );
+        handle.abort();
+
+        let (all_addr, all_handle) =
+            spawn_management_test_server(build_test_mesh_api().await).await;
+        let all_response = send_management_request(
+            all_addr,
+            "GET /api/catalog?all=true HTTP/1.1\r\nHost: localhost\r\n\r\n".into(),
+        )
+        .await;
+        assert!(all_response.starts_with("HTTP/1.1 200"));
+        let all_payload = json_body(&all_response);
+        let full = all_payload["catalog"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            full.len() > curated.len(),
+            "?all=true must expose hidden entries too"
+        );
+        all_handle.abort();
     }
 
     #[tokio::test]

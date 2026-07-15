@@ -28,6 +28,7 @@ pub async fn run_model_search(
     _prefer_gguf: bool,
     prefer_mlx: bool,
     catalog_only: bool,
+    include_hidden: bool,
     limit: usize,
     sort: ModelSearchSort,
     json_output: bool,
@@ -42,7 +43,7 @@ pub async fn run_model_search(
     let search_sort = map_search_sort(sort);
 
     if catalog_only {
-        let results: Vec<_> = search_catalog_models(&query)
+        let results: Vec<_> = search_catalog_models(&query, include_hidden)
             .into_iter()
             .filter(|model| match filter {
                 SearchArtifactFilter::Gguf => !catalog_model_is_mlx(model),
@@ -127,9 +128,13 @@ pub async fn run_model_search(
     formatter.render_hf_results(&query, filter, search_sort, &results)
 }
 
-pub fn run_model_recommended(json_output: bool) -> Result<()> {
+pub fn run_model_recommended(include_hidden: bool, json_output: bool) -> Result<()> {
     let formatter = models_formatter(json_output);
-    let models: Vec<_> = catalog::MODEL_CATALOG.iter().collect();
+    let models: Vec<_> = if include_hidden {
+        catalog::MODEL_CATALOG.iter().collect()
+    } else {
+        catalog::listed_models()
+    };
     formatter.render_recommended(&models)
 }
 
@@ -298,8 +303,8 @@ pub async fn run_model_download(
 
 pub async fn dispatch_models_command(command: &ModelsCommand) -> Result<()> {
     match command {
-        ModelsCommand::Recommended { json } | ModelsCommand::List { json } => {
-            run_model_recommended(*json)?
+        ModelsCommand::Recommended { all, json } | ModelsCommand::List { all, json } => {
+            run_model_recommended(*all, *json)?
         }
         ModelsCommand::Installed { json } => run_model_installed(*json)?,
         ModelsCommand::Cleanup {
@@ -312,10 +317,11 @@ pub async fn dispatch_models_command(command: &ModelsCommand) -> Result<()> {
             gguf,
             mlx,
             catalog,
+            all,
             limit,
             sort,
             json,
-        } => run_model_search(query, *gguf, *mlx, *catalog, *limit, *sort, *json).await?,
+        } => run_model_search(query, *gguf, *mlx, *catalog, *all, *limit, *sort, *json).await?,
         ModelsCommand::Show { model, json } => run_model_show(model, *json).await?,
         ModelsCommand::Download { model, draft, json } => {
             run_model_download(model, *draft, *json).await?

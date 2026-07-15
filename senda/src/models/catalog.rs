@@ -39,6 +39,12 @@ pub struct CatalogModel {
     /// Multimodal projector for vision models.
     /// When set, llama-server is launched with `--mmproj <file>`.
     pub mmproj: Option<CatalogAsset>,
+    /// Whether this entry is part of the curated set surfaced to users.
+    /// Display/search/menu surfaces show only `listed` models; resolution,
+    /// download, MoE, draft, and alias paths always see the full catalog so
+    /// existing configs referencing a hidden id keep resolving. Defaults to
+    /// `true` when absent from JSON.
+    pub listed: bool,
 }
 
 impl CatalogModel {
@@ -82,6 +88,12 @@ struct CatalogModelJson {
     #[serde(default)]
     extra_files: Vec<CatalogAsset>,
     mmproj: Option<CatalogAsset>,
+    #[serde(default = "default_listed")]
+    listed: bool,
+}
+
+fn default_listed() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -111,6 +123,7 @@ impl CatalogModel {
             moe: raw.moe.map(MoeConfig::from_json),
             extra_files: raw.extra_files,
             mmproj: raw.mmproj,
+            listed: raw.listed,
         }
     }
 }
@@ -154,6 +167,14 @@ pub fn find_model(query: &str) -> Option<&'static CatalogModel> {
                 .iter()
                 .find(|m| m.name.to_lowercase().contains(&q))
         })
+}
+
+/// The curated set of catalog models (`listed` entries). This is the source of
+/// truth for what users see in the CLI, admin API, and website. Resolution and
+/// acquisition paths must keep iterating [`MODEL_CATALOG`] directly so hidden
+/// ids referenced by existing configs still resolve.
+pub fn listed_models() -> Vec<&'static CatalogModel> {
+    MODEL_CATALOG.iter().filter(|m| m.listed).collect()
 }
 
 /// True when `query` names this catalog row by its id, its managed filename,
@@ -1624,7 +1645,7 @@ fn print_transfer_status(
 pub fn list_models() {
     eprintln!("Available models:");
     eprintln!();
-    for m in MODEL_CATALOG.iter() {
+    for m in listed_models() {
         let draft_info = if let Some(d) = m.draft.as_deref() {
             format!(" (draft: {})", d)
         } else {
@@ -1640,6 +1661,49 @@ pub fn list_models() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The curated set (`listed` entries) is what the CLI, admin API, and
+    /// website surface. Every listed model — and any draft it points at — must
+    /// resolve, and legacy/hidden ids must stay out of the curated set.
+    #[test]
+    fn listed_models_are_curated_and_resolve() {
+        let listed = listed_models();
+        assert!(
+            (1..=20).contains(&listed.len()),
+            "unexpected curated catalog size {} — keep the surfaced set small",
+            listed.len()
+        );
+        for model in &listed {
+            assert!(model.listed);
+            assert!(find_catalog_model_by_query(&model.name).is_some());
+            if let Some(draft) = model.draft.as_deref() {
+                assert!(
+                    find_catalog_model_by_query(draft).is_some(),
+                    "listed model {} references missing draft {draft}",
+                    model.name
+                );
+            }
+        }
+        let names: Vec<&str> = listed.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"Qwen3-8B-Q4_K_M"), "default must be listed");
+        assert!(
+            !names.contains(&"Mixtral-8x7B-Instruct-v0.1-Q4_K_M"),
+            "retired legacy model must stay hidden"
+        );
+    }
+
+    /// The runtime crate and the mesh-client crate ship the same catalog. They
+    /// drifted once (the client was missing the Mixtral-8x7B rows); keep them
+    /// byte-identical so a model edit can't land in one crate only.
+    #[test]
+    fn catalog_json_matches_client_crate() {
+        let runtime = include_str!("catalog.json");
+        let client = include_str!("../../../senda-client/src/models/catalog.json");
+        assert_eq!(
+            runtime, client,
+            "senda and senda-client catalog.json have drifted — keep them identical"
+        );
+    }
 
     /// Only the three weight-bearing suffixes should opt into post-download
     /// verification. Misclassifying tokenizer/chat-template JSON as a
@@ -2104,6 +2168,7 @@ mod tests {
             moe: None,
             extra_files: Vec::new(),
             mmproj: None,
+            listed: true,
         };
 
         {
@@ -2150,6 +2215,7 @@ mod tests {
             moe: None,
             extra_files: Vec::new(),
             mmproj: None,
+            listed: true,
         };
 
         let label = model.name.clone();

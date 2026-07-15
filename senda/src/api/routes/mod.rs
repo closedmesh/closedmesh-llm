@@ -1,3 +1,4 @@
+mod catalog;
 mod chat;
 mod discover;
 mod mesh_hook;
@@ -82,6 +83,10 @@ pub(super) const DISPATCH_REQUEST: DispatchRequestFn =
                 }
                 ("GET", "/api/search") => {
                     search::handle(stream, path).await?;
+                    Ok(true)
+                }
+                ("GET", "/api/catalog") => {
+                    catalog::handle(stream, path).await?;
                     Ok(true)
                 }
                 ("GET", "/api/model-interests") | ("POST", "/api/model-interests") => {

@@ -13,6 +13,7 @@ struct SearchRequest {
     query: String,
     artifact: SearchArtifactFilter,
     catalog_only: bool,
+    include_hidden: bool,
     limit: usize,
     sort: SearchSort,
 }
@@ -24,7 +25,7 @@ pub(super) async fn handle(stream: &mut tokio::net::TcpStream, path: &str) -> an
     };
 
     if request.catalog_only {
-        let results = search_catalog_models(&request.query)
+        let results = search_catalog_models(&request.query, request.include_hidden)
             .into_iter()
             .filter(|model| catalog_model_matches_artifact(model, request.artifact))
             .collect::<Vec<_>>();
@@ -64,6 +65,7 @@ fn parse_request(path: &str) -> Result<SearchRequest, String> {
     let mut query = None;
     let mut artifact = SearchArtifactFilter::Gguf;
     let mut catalog_only = false;
+    let mut include_hidden = false;
     let mut limit = DEFAULT_LIMIT;
     let mut sort = SearchSort::Trending;
 
@@ -73,6 +75,7 @@ fn parse_request(path: &str) -> Result<SearchRequest, String> {
                 "q" => query = Some(value),
                 "artifact" => artifact = parse_artifact(&value)?,
                 "catalog" => catalog_only = parse_bool(&value, "catalog")?,
+                "all" => include_hidden = parse_bool(&value, "all")?,
                 "limit" => limit = parse_limit(&value)?,
                 "sort" => sort = parse_sort(&value)?,
                 _ => {}
@@ -91,6 +94,7 @@ fn parse_request(path: &str) -> Result<SearchRequest, String> {
         query,
         artifact,
         catalog_only,
+        include_hidden,
         limit,
         sort,
     })

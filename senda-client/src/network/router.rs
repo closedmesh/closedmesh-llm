@@ -174,7 +174,7 @@ pub static MODEL_PROFILES: &[ModelProfile] = &[
     },
     // ── Tier 2: Good ────────────────────────────────────────────
     ModelProfile {
-        name: "Qwen3.5-9B-Q4_K_M",
+        name: "Qwen3.5-9B-Vision-Q4_K_M",
         strengths: &[Category::Chat, Category::Code],
         tier: 2,
         tools: false,
@@ -1191,6 +1191,21 @@ mod tests {
         assert!(p.is_some());
         assert_eq!(p.unwrap().name, "MiniMax-M2.5-Q4_K_M");
         assert_eq!(p.unwrap().tier, 4);
+    }
+
+    /// Every routing profile must name a real catalog id. Profiles are a third
+    /// hand-maintained list alongside the two catalog.json copies, so they
+    /// drift silently (the Qwen3.5-9B profile once pointed at a non-existent id
+    /// while the catalog shipped Qwen3.5-9B-Vision). This keeps them honest.
+    #[test]
+    fn all_profiles_resolve_in_catalog() {
+        for p in MODEL_PROFILES {
+            assert!(
+                crate::models::catalog::find_model(p.name).is_some_and(|m| m.name == p.name),
+                "routing profile '{}' has no matching catalog id",
+                p.name
+            );
+        }
     }
 }
 

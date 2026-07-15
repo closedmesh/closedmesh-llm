@@ -1300,6 +1300,33 @@ mod auto_pack_tests {
         deduped.dedup();
         assert_eq!(all.len(), deduped.len());
     }
+
+    /// Auto-serve packs and demand seeds may reference models that are hidden
+    /// from the curated catalog (`listed: false`) — e.g. the small Qwen3-4B
+    /// starter or the frontier Qwen3-Coder-Next / MiniMax tiers. That is fine
+    /// (visibility is display-only), but every referenced id must still RESOLVE
+    /// in the catalog, or node startup would fall through to bare-name Hugging
+    /// Face discovery and crash-loop. This guards the resolution invariant.
+    #[test]
+    fn operational_model_refs_resolve_in_catalog() {
+        use crate::models::catalog;
+        let mut refs: Vec<String> = Vec::new();
+        for vram in [4.0, 8.0, 16.0, 24.0, 50.0, 63.0, 85.0, 206.0] {
+            refs.extend(auto_model_pack(vram));
+        }
+        refs.extend(demand_seed_models());
+        for m in catalog::MODEL_CATALOG.iter() {
+            if let Some(draft) = m.draft.as_deref() {
+                refs.push(draft.to_string());
+            }
+        }
+        for r in &refs {
+            assert!(
+                catalog::find_catalog_model_by_query(r).is_some(),
+                "operational model ref '{r}' does not resolve in the catalog"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
