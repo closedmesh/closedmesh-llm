@@ -1021,8 +1021,14 @@ impl PeerInfo {
         }
     }
 
+    /// True when this peer is in the cohort for `model` — either actively
+    /// advertising it in `serving_models`, or still wanting it via
+    /// `requested_models` after parking (WaitingForCapacity strips
+    /// `serving_models` so status stops lying about "Loading", but the
+    /// peer must remain selectable for a split once capacity arrives).
     pub fn is_assigned_model(&self, model: &str) -> bool {
         self.serving_models.iter().any(|m| m == model)
+            || self.requested_models.iter().any(|m| m == model)
     }
 
     pub fn routable_models(&self) -> Vec<String> {

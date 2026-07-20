@@ -847,6 +847,38 @@ fn effective_local_launch_vram(
     pinned_gpu.map(|gpu| gpu.vram_bytes).unwrap_or(my_vram)
 }
 
+/// Strip `model_name` from gossiped `serving_models` while we cannot launch
+/// (WaitingForCapacity). Leaves `requested_models` alone so
+/// [`mesh::PeerInfo::is_assigned_model`] still puts us in the cohort.
+async fn park_serving_while_waiting(node: &mesh::Node, model_name: &str) {
+    let mut serving = node.serving_models().await;
+    let before = serving.len();
+    serving.retain(|m| m != model_name);
+    if serving.len() == before {
+        return;
+    }
+    node.set_serving_models(serving).await;
+    node.remove_served_model_descriptor(model_name).await;
+    node.regossip().await;
+    tracing::info!(
+        model = %model_name,
+        "parked serving advertisement — waiting for split capacity"
+    );
+}
+
+/// Re-advertise `model_name` in `serving_models` immediately before a real
+/// Solo/Split launch (undoes [`park_serving_while_waiting`]).
+async fn ensure_serving_assignment(node: &mesh::Node, model_name: &str) {
+    let mut serving = node.serving_models().await;
+    if serving.iter().any(|m| m == model_name) {
+        return;
+    }
+    serving.push(model_name.to_string());
+    serving.sort();
+    node.set_serving_models(serving).await;
+    node.regossip().await;
+}
+
 fn build_dense_launch_plan(
     my_vram: u64,
     model_bytes: u64,
@@ -2795,6 +2827,20 @@ pub async fn election_loop(
             &election_peers,
         );
 
+        // Park while capacity is missing: strip this model from
+        // `serving_models` so status/UI stop reporting "Loading" for
+        // hours (Jul 20 2026 — MSI/LYU sat on Gemma 27B with a climbing
+        // timer after the app was quit). `requested_models` keeps us in
+        // the cohort via `is_assigned_model` so a later peer join still
+        // forms a split. Re-advertised in `ensure_serving_assignment`
+        // the moment we actually launch.
+        if matches!(
+            &desired_launch,
+            DenseLaunchPlan::WaitingForCapacity { .. }
+        ) {
+            park_serving_while_waiting(&node, &model_name).await;
+        }
+
         // If our recent `start_llama` attempts have piled up (e.g. all
         // workers behind broken iroh tunnels — see issue #10) we force
         // ourselves out of host candidacy for `HOST_ATTEMPT_BACKOFF` so
@@ -3050,6 +3096,7 @@ pub async fn election_loop(
                             *total_group_vram as f64 / 1e9
                         )),
                     });
+                    // Already parked above; wait for mesh change, not a relaunch loop.
                     update_targets(&node, &model_name, InferenceTarget::None, &target_tx).await;
                     on_change(false, false);
                     if peer_rx.changed().await.is_err() {
@@ -3079,6 +3126,11 @@ pub async fn election_loop(
                 }
             }
             on_change(true, false);
+
+            // We may have parked this model while WaitingForCapacity —
+            // put it back on the wire before llama-server starts so peers
+            // and the dashboard see a real load, not a silent relaunch.
+            ensure_serving_assignment(&node, &model_name).await;
 
             // In solo mode, pass empty model_peers so start_llama won't use any workers
             let peers_for_launch = if matches!(desired_launch, DenseLaunchPlan::Split { .. }) {
