@@ -94,6 +94,18 @@ pub fn config_path(override_path: Option<&Path>) -> Result<PathBuf> {
     if let Ok(path) = std::env::var("SENDA_CONFIG") {
         return Ok(PathBuf::from(path));
     }
+    // Prefer an existing config under USERPROFILE on Windows — Scheduled
+    // Tasks sometimes run without HOME set, and dirs::home_dir() can then
+    // miss the dashboard-written `~\.senda\config.toml`, leaving
+    // [[models]] empty and triggering the --auto surprise-download path.
+    if let Ok(user_profile) = std::env::var("USERPROFILE") {
+        let candidate = PathBuf::from(user_profile)
+            .join(".senda")
+            .join("config.toml");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
     let home = dirs::home_dir().context("Cannot determine home directory")?;
     Ok(home.join(".senda").join("config.toml"))
 }
