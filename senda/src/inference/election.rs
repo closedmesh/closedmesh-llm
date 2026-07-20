@@ -2834,10 +2834,7 @@ pub async fn election_loop(
         // the cohort via `is_assigned_model` so a later peer join still
         // forms a split. Re-advertised in `ensure_serving_assignment`
         // the moment we actually launch.
-        if matches!(
-            &desired_launch,
-            DenseLaunchPlan::WaitingForCapacity { .. }
-        ) {
+        if matches!(&desired_launch, DenseLaunchPlan::WaitingForCapacity { .. }) {
             park_serving_while_waiting(&node, &model_name).await;
         }
 
