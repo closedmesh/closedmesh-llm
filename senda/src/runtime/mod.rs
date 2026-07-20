@@ -3006,7 +3006,7 @@ async fn run_auto(
     let peers_for_selection = node.peers().await;
     let local_fast_vram = node.fast_memory_bytes();
     let all_declared_before = all_declared.clone();
-    let all_declared = election::select_serving_models_for_peer(
+    let all_declared_selected = election::select_serving_models_for_peer(
         local_fast_vram,
         &all_declared,
         &model_bytes_by_name,
@@ -3014,12 +3014,26 @@ async fn run_auto(
         &catalog_demand,
         &peers_for_selection,
     );
-    if all_declared.is_empty() {
-        anyhow::bail!(
-            "per-peer model selection removed every servable model from this peer's \
-             advertisement set; refusing to start with an empty serving list"
-        );
-    }
+    // Never crash-loop on an empty selection. MSI/LYU (2026-07-20) hit
+    // this when a phantom high-VRAM peer made selection drop Gemma; the
+    // process exited, Windows RestartCount respawned it, and the
+    // dashboard sat on yellow "runtime isn't staying up" forever.
+    // Fall back to the pre-selection set so WaitingForCapacity / split
+    // election can still run.
+    let all_declared = if all_declared_selected.is_empty() {
+        let _ = emit_event(OutputEvent::Warning {
+            message: format!(
+                "Per-peer model selection produced an empty set from {:?}; \
+                 keeping the configured models so this peer can join a split \
+                 cohort instead of exiting.",
+                all_declared_before
+            ),
+            context: None,
+        });
+        all_declared_before.clone()
+    } else {
+        all_declared_selected
+    };
     if !all_declared.iter().any(|m| m == &model_name) {
         anyhow::bail!(
             "primary model `{}` was filtered out by per-peer model selection \

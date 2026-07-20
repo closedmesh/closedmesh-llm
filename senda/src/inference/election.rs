@@ -229,9 +229,15 @@ fn peer_can_solo_model(peer: &mesh::PeerInfo, model_bytes: u64) -> bool {
 }
 
 fn any_other_peer_can_solo(model: &str, model_bytes: u64, peers: &[mesh::PeerInfo]) -> bool {
-    peers
-        .iter()
-        .any(|p| p.is_assigned_model(model) && peer_can_solo_model(p, model_bytes))
+    // Require an actual HTTP Host that routes the model — not merely
+    // "assigned + big VRAM". Elevens (2026-07-20) advertised Gemma in
+    // `serving_models` with can_serve_max_gb=26 while stuck
+    // WaitingForCapacity / Worker with empty `hosted_models`. MSI + LYU
+    // then dropped Gemma ("someone else can solo"), hit an empty serving
+    // list, and crash-looped the Windows Scheduled Task.
+    peers.iter().any(|p| {
+        p.routes_http_model(model) && peer_can_solo_model(p, model_bytes)
+    })
 }
 
 fn demand_count(catalog_demand: &std::collections::HashMap<String, u64>, model: &str) -> u64 {
@@ -298,10 +304,17 @@ pub fn select_serving_models_for_peer(
     {
         // Can't solo anything, but another peer can solo at least one
         // requested model — only stay in cohorts for models nobody can solo.
-        for (name, bytes) in flexible {
-            if !any_other_peer_can_solo(&name, bytes, peers) {
-                selected.push(name);
+        for (name, bytes) in &flexible {
+            if !any_other_peer_can_solo(name, *bytes, peers) {
+                selected.push(name.clone());
             }
+        }
+        // Never return empty when the user configured models. An empty
+        // set makes `run_auto` bail and Windows restart-loop. Prefer
+        // advertising the undersized models so election can park in
+        // WaitingForCapacity / form a split.
+        if selected.is_empty() {
+            selected.extend(flexible.into_iter().map(|(m, _)| m));
         }
     } else {
         selected.extend(flexible.into_iter().map(|(m, _)| m));
@@ -6552,6 +6565,70 @@ mod tests {
             selected,
             vec![qwen8],
             "14.5 GB MBA should solo Qwen3-8B and drop Qwen3-32B from its serving set"
+        );
+    }
+
+    /// Elevens-style phantom: Worker advertising Gemma with 26 GB VRAM but
+    /// not an HTTP Host. MSI (6 GB) must still keep Gemma so it can form a
+    /// split with LYU — not drop every model and crash-loop.
+    #[test]
+    fn select_serving_models_keeps_gemma_despite_phantom_high_vram_worker() {
+        let gemma = "google_gemma-3-27b-it-Q4_K_M".to_string();
+        let gemma_bytes = 16_546_404_992u64;
+        let local_vram = 6 * 1024 * 1024 * 1024; // MSI
+        let mut sizes = HashMap::new();
+        sizes.insert(gemma.clone(), gemma_bytes);
+        let elevens_id =
+            iroh::EndpointId::from(iroh::SecretKey::from_bytes(&[99; 32]).public());
+        let elevens = make_dense_peer(elevens_id, 26 * 1024 * 1024 * 1024, Some(140), &gemma);
+        assert!(
+            matches!(elevens.role, NodeRole::Worker),
+            "phantom peer must be Worker (not HTTP Host)"
+        );
+        let selected = select_serving_models_for_peer(
+            local_vram,
+            std::slice::from_ref(&gemma),
+            &sizes,
+            &HashSet::new(),
+            &HashMap::new(),
+            &[elevens],
+        );
+        assert_eq!(
+            selected,
+            vec![gemma],
+            "undersized peer must keep Gemma when the only 'solo-capable' peer \
+             is a non-routing Worker advertisement"
+        );
+    }
+
+    /// A real solo Host for Gemma should make an undersized peer defer
+    /// (drop Gemma) — but selection must not return empty without a
+    /// fallback; with only Gemma requested, keep it rather than [].
+    #[test]
+    fn select_serving_models_does_not_return_empty_when_deferring_only_model() {
+        let gemma = "google_gemma-3-27b-it-Q4_K_M".to_string();
+        let gemma_bytes = 16_546_404_992u64;
+        let local_vram = 6 * 1024 * 1024 * 1024;
+        let mut sizes = HashMap::new();
+        sizes.insert(gemma.clone(), gemma_bytes);
+        let host_id = iroh::EndpointId::from(iroh::SecretKey::from_bytes(&[7; 32]).public());
+        let mut host = make_dense_peer(host_id, 26 * 1024 * 1024 * 1024, Some(50), &gemma);
+        host.role = NodeRole::Host { http_port: 9337 };
+        host.hosted_models = vec![gemma.clone()];
+        host.hosted_models_known = true;
+        let selected = select_serving_models_for_peer(
+            local_vram,
+            std::slice::from_ref(&gemma),
+            &sizes,
+            &HashSet::new(),
+            &HashMap::new(),
+            &[host],
+        );
+        assert_eq!(
+            selected,
+            vec![gemma],
+            "deferring the only configured model must fall back to keeping it \
+             (empty serving list crash-loops Windows)"
         );
     }
 
