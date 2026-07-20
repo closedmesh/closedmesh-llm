@@ -213,6 +213,7 @@ fn host_can_solo_model(host_fast_memory_bytes: u64, model_bytes: u64) -> bool {
 fn serving_mode_from_classification(
     peer: &mesh::PeerInfo,
     split: &PeerSplitClassification,
+    all_peers: &[mesh::PeerInfo],
 ) -> Option<String> {
     if peer.serving_models.is_empty() && peer.hosted_models.is_empty() {
         return None;
@@ -223,7 +224,35 @@ fn serving_mode_from_classification(
     match split.role.as_deref() {
         Some("pipeline_host") => Some("split_host".to_string()),
         Some("pipeline_worker") => Some("split_worker".to_string()),
-        _ => Some("solo".to_string()),
+        _ => {
+            // Never brand a doomed / not-yet-ready load as "solo".
+            //
+            // Two signals (either is enough):
+            //   1. Undersized vs mesh-observed GGUF size (when sizes are
+            //      known locally — gossip strips passive sizes, so this
+            //      often misses).
+            //   2. Worker still advertising serving_models with empty
+            //      hosted_models — the live MSI+Gemma shape: the peer has
+            //      not graduated to a routable Host, so calling it "solo"
+            //      is a lie that makes an 8 GB box look like it chose to
+            //      eat a 16.5 GB model alone.
+            let undersized = peer
+                .serving_models
+                .iter()
+                .chain(peer.hosted_models.iter())
+                .any(|model| {
+                    let bytes = model_bytes_observed_in_mesh(model, all_peers);
+                    bytes > 0 && !host_can_solo_model(peer.fast_memory_bytes(), bytes)
+                });
+            let pending_or_stuck = matches!(peer.role, mesh::NodeRole::Worker)
+                && peer.hosted_models.is_empty()
+                && !peer.serving_models.is_empty();
+            if undersized || pending_or_stuck {
+                Some("waiting".to_string())
+            } else {
+                Some("solo".to_string())
+            }
+        }
     }
 }
 
@@ -1676,7 +1705,11 @@ impl MeshApi {
                         .map(|b| (b.model.clone(), b.native_ttft_ms_p50))
                         .collect(),
                     first_joined_mesh_ts: p.first_joined_mesh_ts,
-                    serving_mode: serving_mode_from_classification(p, &split_classification),
+                    serving_mode: serving_mode_from_classification(
+                        p,
+                        &split_classification,
+                        &all_peers,
+                    ),
                     split_role: split_classification.role,
                     split_group: split_classification.group,
                     moe_shard: split_classification.moe_shard,

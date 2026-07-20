@@ -855,6 +855,16 @@ fn build_dense_launch_plan(
     model_peers: &[mesh::PeerInfo],
 ) -> DenseLaunchPlan {
     let min_vram = (model_bytes as f64 * 1.1) as u64;
+    // Unknown/missing size: never Solo. A zero-byte "model" clears every
+    // `my_vram >= min_vram` check and is exactly how an undersized peer
+    // (MSI 8 GB / Gemma 27B) ends up launching llama-server alone.
+    if model_bytes == 0 || min_vram == 0 {
+        return DenseLaunchPlan::WaitingForCapacity {
+            worker_ids: Vec::new(),
+            total_group_vram: my_vram,
+            min_vram: 1,
+        };
+    }
     // Solo is only appropriate when this node's *fast memory* (GPU VRAM
     // on discrete cards, unified-memory working set on Apple Silicon)
     // can hold the model. Callers pass `my_vram = node.fast_memory_bytes()`,
@@ -2554,7 +2564,13 @@ pub async fn election_loop(
     // `mesh::Node::fast_memory_bytes()` for the full incident log.
     let my_vram = node.fast_memory_bytes();
     let local_launch_vram = effective_local_launch_vram(my_vram, pinned_gpu.as_ref());
-    let model_fits_locally = local_launch_vram >= (model_bytes as f64 * 1.1) as u64;
+    // `model_bytes == 0` must NEVER count as "fits". That was the May 16
+    // phantom-host bug (and today's MSI+Gemma shape): `total_model_bytes`
+    // returns 0 for a missing/unreadable GGUF, then `vram >= 0` is true for
+    // every GPU, `requires_split` flips false, and an 8 GB laptop self-elects
+    // as Solo host of a 16.5 GB model. Refuse until we have a real size.
+    let model_fits_locally =
+        model_bytes > 0 && local_launch_vram >= (model_bytes as f64 * 1.1) as u64;
 
     // Check if this is a MoE model with enough metadata to plan expert routing.
     let moe_config = lookup_moe_config(&model_name, &model);
@@ -4334,6 +4350,24 @@ async fn start_llama(
     );
     let mut worker_ids = match launch_plan {
         DenseLaunchPlan::Solo => {
+            // Belt-and-suspenders: never hand llama-server a Solo launch
+            // when local fast memory cannot hold the model. The planner
+            // above should already refuse this, but a single bad caller
+            // feeding inflated VRAM / zero model_bytes is how MSI ended
+            // up warming Gemma 27B alone on an 8 GB 4070.
+            let min_vram = (model_bytes as f64 * 1.1) as u64;
+            if model_bytes == 0 || local_launch_vram < min_vram {
+                emit_warning(
+                    format!(
+                        "Refusing Solo launch — model is {:.1}GB (need {:.1}GB with headroom), local fast memory is {:.1}GB",
+                        model_bytes as f64 / 1e9,
+                        min_vram as f64 / 1e9,
+                        local_launch_vram as f64 / 1e9
+                    ),
+                    Some(format!("model={model_name}")),
+                );
+                return None;
+            }
             let worker_count = model_peers
                 .iter()
                 .filter(|p| !matches!(p.role, NodeRole::Client))
@@ -4818,6 +4852,47 @@ mod tests {
             ..crate::mesh::NodeCapability::default()
         };
         peer
+    }
+
+    /// Jul 20 2026 regression: zero-sized / missing GGUF must never Solo.
+    /// `total_model_bytes` returns 0 when the path is missing; pre-fix
+    /// `min_vram = 0` and every GPU cleared `my_vram >= 0`, so an 8 GB MSI
+    /// self-elected Solo for Gemma-27B and sat in "warming up" forever.
+    #[test]
+    fn dense_launch_plan_never_solos_unknown_model_size() {
+        let plan = build_dense_launch_plan(
+            8 * 1024 * 1024 * 1024,
+            0,
+            false,
+            "google_gemma-3-27b-it-Q4_K_M",
+            &[],
+        );
+        assert!(
+            matches!(plan, DenseLaunchPlan::WaitingForCapacity { .. }),
+            "unknown model size must Wait, not Solo; got {plan:?}"
+        );
+    }
+
+    /// Jul 20 2026 regression: MSI 8 GB alone must Wait for Gemma 27B
+    /// (~16.5 GB), never Solo. Combined with LYU it should Split.
+    #[test]
+    fn dense_launch_plan_msi_alone_waits_for_gemma27b() {
+        let model = "google_gemma-3-27b-it-Q4_K_M";
+        let msi_vram = 8u64 * 1024 * 1024 * 1024;
+        let model_bytes = (16.5 * 1024.0 * 1024.0 * 1024.0) as u64;
+
+        let alone = build_dense_launch_plan(msi_vram, model_bytes, false, model, &[]);
+        assert!(
+            matches!(alone, DenseLaunchPlan::WaitingForCapacity { .. }),
+            "MSI alone must Wait for Gemma-27B; got {alone:?}"
+        );
+
+        let lyu = make_inflated_peer(make_id(1), 16, 90, Some(10), model);
+        let with_lyu = build_dense_launch_plan(msi_vram, model_bytes, false, model, &[lyu]);
+        assert!(
+            matches!(with_lyu, DenseLaunchPlan::Split { .. }),
+            "MSI+LYU must Split for Gemma-27B; got {with_lyu:?}"
+        );
     }
 
     /// May 13 2026 regression (host-side half): an RTX 4080-SUPER laptop
