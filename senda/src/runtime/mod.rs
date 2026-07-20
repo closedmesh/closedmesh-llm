@@ -2729,8 +2729,7 @@ async fn run_auto(
         // demand assignment.
         let (assignment, from_auto_pack) = if demand_assignment.is_none() && cli.auto && !is_client
         {
-            let pack =
-                nostr::auto_model_pack(node.fast_memory_bytes() as f64 / 1e9);
+            let pack = nostr::auto_model_pack(node.fast_memory_bytes() as f64 / 1e9);
             let on_disk = pack
                 .into_iter()
                 .find(|m| models::find_model_path(m).exists());
