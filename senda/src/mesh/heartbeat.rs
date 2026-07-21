@@ -638,6 +638,10 @@ impl Node {
                     node.state.lock().await.connections.remove(&stale_id);
                 }
 
+                // Force-rehost path: dial HTTP hosts that still have no RTT
+                // and demote their models before the next chat 503.
+                node.probe_undialable_http_hosts().await;
+
                 // GC expired demand entries to prevent unbounded map growth
                 node.gc_demand().await;
             }

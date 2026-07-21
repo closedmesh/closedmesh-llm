@@ -247,9 +247,22 @@ fn any_other_peer_can_solo(model: &str, model_bytes: u64, peers: &[mesh::PeerInf
     // WaitingForCapacity / Worker with empty `hosted_models`. MSI + LYU
     // then dropped Gemma ("someone else can solo"), hit an empty serving
     // list, and crash-looped the Windows Scheduled Task.
+    //
+    // Also require a measured path (`rtt_ms`). An undialable Host that
+    // nobody can proxy to must not suppress local serving — that is how
+    // Elevens kept Gemma loaded while every chat 503'd (2026-07-21).
+    peers.iter().any(|p| {
+        p.routes_http_model(model) && p.rtt_ms.is_some() && peer_can_solo_model(p, model_bytes)
+    })
+}
+
+/// True when a remote peer HTTP-routes `model` and has a measured path
+/// from this node's view (`rtt_ms`). Undialable hosts must not force
+/// standby or suppress force-rehost.
+pub fn dialable_peer_routes_http(model: &str, peers: &[mesh::PeerInfo]) -> bool {
     peers
         .iter()
-        .any(|p| p.routes_http_model(model) && peer_can_solo_model(p, model_bytes))
+        .any(|p| p.routes_http_model(model) && p.rtt_ms.is_some())
 }
 
 fn demand_count(catalog_demand: &std::collections::HashMap<String, u64>, model: &str) -> u64 {
@@ -501,13 +514,17 @@ pub fn peers_for_pipeline_election(model_peers: &[mesh::PeerInfo]) -> Vec<mesh::
 /// total and worker selection do NOT use this filter — see issue #9).
 ///
 /// A peer is viable iff:
-///   1. It currently advertises `NodeRole::Host { .. }` for any model
-///      (already serving — definitely a real candidate), OR
-///   2. We have observed it for less than `HOST_CLAIM_GRACE` (still inside
-///      its grace window — give it time).
+///   1. It currently advertises `NodeRole::Host { .. }` **and** is dialable
+///      (`rtt_ms` measured) — already serving on a path we can use, OR
+///   2. It is a Host still inside `HOST_CLAIM_GRACE` with `rtt_ms = None`
+///      (first gossip may not have stamped RTT yet), OR
+///   3. We have observed it for less than `HOST_CLAIM_GRACE` (still inside
+///      its grace window — give a non-host time to claim).
 ///
 /// Peers we have observed for `>= HOST_CLAIM_GRACE` that are NOT yet hosting
-/// are dropped. Once such a peer eventually does flip to `NodeRole::Host`,
+/// are dropped. Past-grace Hosts with `rtt_ms = None` are also dropped so a
+/// dialable runner-up can force-rehost (Elevens/Gemma, 2026-07-21).
+/// Once such a peer eventually does flip to dialable `NodeRole::Host`,
 /// branch (1) re-admits it on the next election round — the exclusion is
 /// not sticky beyond the actual misbehavior.
 ///
@@ -528,11 +545,15 @@ pub fn viable_host_candidates(
     model_peers
         .iter()
         .filter(|p| {
-            if matches!(p.role, NodeRole::Host { .. }) {
-                return true;
-            }
             let first = first_observed.get(&p.id).copied().unwrap_or(now);
-            now.saturating_duration_since(first) < grace
+            let within_grace = now.saturating_duration_since(first) < grace;
+            if matches!(p.role, NodeRole::Host { .. }) {
+                // Dialable Host always counts. Undialable Host keeps the
+                // grace window (RTT often lands on the first gossip), then
+                // is peeled so force-rehost can elect a dialable peer.
+                return p.rtt_ms.is_some() || within_grace;
+            }
+            within_grace
         })
         .cloned()
         .collect()
@@ -560,7 +581,26 @@ pub fn fallback_host_candidates_after_grace(
     if !viable.is_empty() {
         return viable;
     }
-    let kidnapper_id = election_peers
+    // Peel past-grace undialable Hosts before the stuck-Worker peel.
+    // Otherwise Elevens (Host, rtt=None) stays in the pool forever and
+    // the runner-up can never win solo-bias election.
+    let without_undialable: Vec<mesh::PeerInfo> = election_peers
+        .iter()
+        .filter(|p| {
+            if matches!(p.role, NodeRole::Host { .. }) && p.rtt_ms.is_none() {
+                let first = first_observed.get(&p.id).copied().unwrap_or(now);
+                return now.saturating_duration_since(first) < grace;
+            }
+            true
+        })
+        .cloned()
+        .collect();
+    let pool: &[mesh::PeerInfo] = if without_undialable.is_empty() {
+        election_peers
+    } else {
+        without_undialable.as_slice()
+    };
+    let kidnapper_id = pool
         .iter()
         .filter(|p| !matches!(p.role, NodeRole::Host { .. }))
         .filter(|p| !p.hosted_models.iter().any(|m| m == model_name))
@@ -571,15 +611,11 @@ pub fn fallback_host_candidates_after_grace(
         .max_by_key(|p| (p.fast_memory_bytes(), p.id))
         .map(|p| p.id);
     let Some(kid) = kidnapper_id else {
-        return election_peers.to_vec();
+        return pool.to_vec();
     };
-    let peeled: Vec<mesh::PeerInfo> = election_peers
-        .iter()
-        .filter(|p| p.id != kid)
-        .cloned()
-        .collect();
+    let peeled: Vec<mesh::PeerInfo> = pool.iter().filter(|p| p.id != kid).cloned().collect();
     if peeled.is_empty() {
-        election_peers.to_vec()
+        pool.to_vec()
     } else {
         peeled
     }
@@ -2965,14 +3001,10 @@ pub async fn election_loop(
         } else if model_peers.is_empty() {
             // No other node serving this model — we must host
             true
-        } else if currently_host {
-            // Already running — don't tear down
-            true
         } else {
-            // Another node is already serving this model.
-            // Only spin up a duplicate if there's enough demand:
-            //   - 2+ clients connected, OR
-            //   - 10+ requests in the demand tracker for this model
+            // Solo path: standby / sticky / force-rehost.
+            // Undialable peers (rtt_ms = None) do not count as "already
+            // serving" — that is how Elevens kept Gemma while chat 503'd.
             let n_clients = peers
                 .iter()
                 .filter(|p| matches!(p.role, mesh::NodeRole::Client))
@@ -2984,21 +3016,43 @@ pub async fn election_loop(
                 .unwrap_or(0);
             let force_duplicate_host =
                 std::env::var("SENDA_FORCE_DUPLICATE_HOSTS").ok().as_deref() == Some("1");
-            let should_dup = force_duplicate_host || n_clients >= 2 || req_count >= 10;
-            if !should_dup {
+            let want_duplicate = force_duplicate_host || n_clients >= 2 || req_count >= 10;
+            let dialable_serving = dialable_peer_routes_http(&model_name, &model_peers);
+
+            if currently_host {
+                // Sticky unless a dialable peer already took over and we
+                // are not in a deliberate multi-host regime.
+                if dialable_serving && !want_duplicate {
+                    emit_info(
+                        format!("[{model_name}] Yielding host — dialable peer already serving"),
+                        None,
+                    );
+                    false
+                } else {
+                    true
+                }
+            } else if dialable_serving {
+                if !want_duplicate {
+                    emit_info(
+                        format!(
+                            "[{model_name}] Peer already serving — standby (clients: {n_clients}, requests: {req_count})"
+                        ),
+                        None,
+                    );
+                } else if force_duplicate_host {
+                    emit_info(
+                        format!("[{model_name}] Forcing duplicate host for benchmark topology"),
+                        None,
+                    );
+                }
+                want_duplicate
+            } else {
                 emit_info(
-                    format!(
-                        "[{model_name}] Peer already serving — standby (clients: {n_clients}, requests: {req_count})"
-                    ),
+                    format!("[{model_name}] No dialable host — self-electing (force rehost)"),
                     None,
                 );
-            } else if force_duplicate_host {
-                emit_info(
-                    format!("[{model_name}] Forcing duplicate host for benchmark topology"),
-                    None,
-                );
+                true
             }
-            should_dup
         };
 
         // Lazy rpc-server: we need it up exactly when we're a pipeline WORKER
@@ -4345,8 +4399,13 @@ async fn update_targets(
     // the "no_capable_node" structured 503 path in the router.
     let mut filtered_only_candidates: HashMap<String, usize> = HashMap::new();
 
-    // All peers — group by model (multi-model aware)
+    // All peers — group by model (multi-model aware).
+    // Skip hosts with no measured path: we cannot proxy HTTP to them
+    // (Elevens/Gemma rtt=None → guaranteed 503 if listed as a target).
     for p in &peers {
+        if p.rtt_ms.is_none() {
+            continue;
+        }
         let peer_models = p.routable_models();
         if matches!(p.role, NodeRole::Host { .. }) {
             for serving in &peer_models {
@@ -6697,6 +6756,116 @@ mod tests {
         );
     }
 
+    /// Undialable Host (rtt=None) must not count as "someone else can solo"
+    /// — otherwise LYU/MSI drop Gemma and Elevens keeps the only copy while
+    /// every chat 503s (2026-07-21).
+    #[test]
+    fn select_serving_models_keeps_gemma_despite_undialable_solo_host() {
+        let gemma = "google_gemma-3-27b-it-Q4_K_M".to_string();
+        let gemma_bytes = 16_546_404_992u64;
+        let local_vram = 16 * 1024 * 1024 * 1024; // LYU-class
+        let mut sizes = HashMap::new();
+        sizes.insert(gemma.clone(), gemma_bytes);
+        let elevens_id = iroh::EndpointId::from(iroh::SecretKey::from_bytes(&[99; 32]).public());
+        let mut elevens = make_dense_peer(elevens_id, 26 * 1024 * 1024 * 1024, None, &gemma);
+        elevens.role = NodeRole::Host { http_port: 9337 };
+        elevens.hosted_models = vec![gemma.clone()];
+        elevens.hosted_models_known = true;
+        assert!(elevens.routes_http_model(&gemma));
+        assert!(elevens.rtt_ms.is_none());
+        let selected = select_serving_models_for_peer(
+            local_vram,
+            std::slice::from_ref(&gemma),
+            &sizes,
+            &HashSet::new(),
+            &HashMap::new(),
+            &[elevens],
+        );
+        assert_eq!(
+            selected,
+            vec![gemma],
+            "dialable peer must keep Gemma when the only Host is undialable"
+        );
+    }
+
+    #[test]
+    fn dialable_peer_routes_http_requires_measured_rtt() {
+        let model = "google_gemma-3-27b-it-Q4_K_M";
+        let id = iroh::EndpointId::from(iroh::SecretKey::from_bytes(&[11; 32]).public());
+        let mut undialable = make_dense_peer(id, 26 * 1024 * 1024 * 1024, None, model);
+        undialable.role = NodeRole::Host { http_port: 9337 };
+        undialable.hosted_models = vec![model.to_string()];
+        undialable.hosted_models_known = true;
+        assert!(!dialable_peer_routes_http(model, &[undialable.clone()]));
+
+        let mut dialable = undialable;
+        dialable.rtt_ms = Some(40);
+        assert!(dialable_peer_routes_http(model, &[dialable]));
+    }
+
+    /// Past-grace undialable Host is peeled from viable candidates so a
+    /// dialable runner-up can win force-rehost election.
+    #[test]
+    fn viable_host_candidates_peels_undialable_host_after_grace() {
+        let model = "google_gemma-3-27b-it-Q4_K_M";
+        let id_elevens = make_id(1);
+        let id_lyu = make_id(2);
+        let mut elevens = make_dense_peer(id_elevens, 26 * 1024 * 1024 * 1024, None, model);
+        elevens.role = NodeRole::Host { http_port: 9337 };
+        elevens.hosted_models = vec![model.to_string()];
+        elevens.hosted_models_known = true;
+        let mut lyu = make_dense_peer(id_lyu, 16 * 1024 * 1024 * 1024, Some(50), model);
+        lyu.role = NodeRole::Worker;
+        let peers = vec![elevens, lyu];
+        let t0 = std::time::Instant::now();
+        let mut first_observed = std::collections::HashMap::new();
+        first_observed.insert(id_elevens, t0);
+        first_observed.insert(id_lyu, t0);
+
+        let inside = t0 + HOST_CLAIM_GRACE / 2;
+        let during = viable_host_candidates(&peers, &first_observed, inside, HOST_CLAIM_GRACE);
+        assert!(
+            during.iter().any(|p| p.id == id_elevens),
+            "undialable Host stays viable during grace (RTT may still land)"
+        );
+
+        let after = t0 + HOST_CLAIM_GRACE + std::time::Duration::from_secs(1);
+        let past = viable_host_candidates(&peers, &first_observed, after, HOST_CLAIM_GRACE);
+        assert!(
+            !past.iter().any(|p| p.id == id_elevens),
+            "past-grace undialable Host must be peeled"
+        );
+        let fallback = fallback_host_candidates_after_grace(
+            &peers,
+            &first_observed,
+            after,
+            HOST_CLAIM_GRACE,
+            model,
+        );
+        assert!(
+            !fallback.iter().any(|p| p.id == id_elevens),
+            "fallback must not re-admit undialable Elevens"
+        );
+        assert!(
+            fallback.iter().any(|p| p.id == id_lyu),
+            "fallback must keep dialable LYU for force-rehost"
+        );
+        assert!(
+            should_be_host_for_model_with_solo_bias(
+                id_lyu,
+                16 * 1024 * 1024 * 1024,
+                64 * 1024 * 1024 * 1024,
+                16_546_404_992,
+                &fallback
+                    .iter()
+                    .filter(|p| p.id != id_lyu)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            ),
+            "LYU must self-elect once Elevens is peeled from the candidate pool"
+        );
+    }
+
     /// Elevens-style phantom: Worker advertising Gemma with 26 GB VRAM but
     /// not an HTTP Host. MSI (6 GB) must still keep Gemma so it can form a
     /// split with LYU — not drop every model and crash-loop.
@@ -6806,14 +6975,30 @@ mod tests {
         let id_msi = iroh::EndpointId::from(iroh::SecretKey::from_bytes(&[30; 32]).public());
         let id_lyu = iroh::EndpointId::from(iroh::SecretKey::from_bytes(&[40; 32]).public());
 
-        let mut mac = make_dense_peer(id_mac, 12 * 1024 * 1024 * 1024, None, "Qwen3-32B-Q4_K_M");
+        // All peers dialable — this pins the memory ranking, not the
+        // undialable-host peel (covered separately).
+        let mut mac = make_dense_peer(
+            id_mac,
+            12 * 1024 * 1024 * 1024,
+            Some(20),
+            "Qwen3-32B-Q4_K_M",
+        );
         mac.system_ram_bytes = 16 * 1024 * 1024 * 1024;
-        let mut manonas =
-            make_dense_peer(id_man, 10 * 1024 * 1024 * 1024, None, "Qwen3-32B-Q4_K_M");
+        let mut manonas = make_dense_peer(
+            id_man,
+            10 * 1024 * 1024 * 1024,
+            Some(25),
+            "Qwen3-32B-Q4_K_M",
+        );
         manonas.system_ram_bytes = 16 * 1024 * 1024 * 1024;
-        let mut msi = make_dense_peer(id_msi, 8 * 1024 * 1024 * 1024, None, "Qwen3-32B-Q4_K_M");
+        let mut msi = make_dense_peer(id_msi, 8 * 1024 * 1024 * 1024, Some(30), "Qwen3-32B-Q4_K_M");
         msi.system_ram_bytes = 32 * 1024 * 1024 * 1024;
-        let mut lyu = make_dense_peer(id_lyu, 16 * 1024 * 1024 * 1024, None, "Qwen3-32B-Q4_K_M");
+        let mut lyu = make_dense_peer(
+            id_lyu,
+            16 * 1024 * 1024 * 1024,
+            Some(15),
+            "Qwen3-32B-Q4_K_M",
+        );
         lyu.system_ram_bytes = 64 * 1024 * 1024 * 1024;
 
         let peers_seen_by_lyu = vec![mac.clone(), manonas.clone(), msi.clone()];

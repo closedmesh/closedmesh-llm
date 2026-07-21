@@ -2808,9 +2808,36 @@ async fn host_without_rtt_is_not_publicly_routable() -> Result<()> {
         "a host with no measured RTT must not appear in /v1/models"
     );
     // Still counted as "being served" for internal election/recovery.
-    assert_eq!(
-        node.models_being_served().await,
-        vec![model.to_string()]
+    assert_eq!(node.models_being_served().await, vec![model.to_string()]);
+    assert!(
+        node.hosts_for_model(model).await.is_empty(),
+        "hosts_for_model must also exclude undialable hosts (no chat 503 ghosts)"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn probe_undialable_http_host_demotes_without_chat_failures() -> Result<()> {
+    let node = make_test_node(super::NodeRole::Client).await?;
+    let model = "google_gemma-3-27b-it-Q4_K_M";
+    let host_id = EndpointId::from(iroh::SecretKey::from_bytes(&[0xDB; 32]).public());
+
+    let mut host = make_test_peer_info(host_id);
+    host.role = super::NodeRole::Host { http_port: 9337 };
+    host.serving_models = vec![model.to_string()];
+    host.hosted_models = vec![model.to_string()];
+    host.hosted_models_known = true;
+    host.rtt_ms = None;
+    // Empty addrs ⇒ dial_for_split fails immediately.
+    host.addr.addrs.clear();
+
+    node.insert_test_peer(host).await;
+    node.probe_undialable_http_hosts().await;
+
+    let demotions = node.active_demotions().await;
+    assert!(
+        demotions.contains(&(host_id, model.to_string())),
+        "proactive probe must demote undialable HTTP hosts before chat 503s"
     );
     Ok(())
 }
@@ -2880,12 +2907,14 @@ async fn hosts_for_model_prefers_idle_host_over_busy() -> Result<()> {
     busy.hosted_models = vec![model.to_string()];
     busy.hosted_models_known = true;
     busy.inflight_requests = 8;
+    busy.rtt_ms = Some(40);
 
     let mut idle = make_test_peer_info(idle_id);
     idle.role = super::NodeRole::Host { http_port: 9337 };
     idle.hosted_models = vec![model.to_string()];
     idle.hosted_models_known = true;
     idle.inflight_requests = 0;
+    idle.rtt_ms = Some(35);
 
     node.insert_test_peer(busy).await;
     node.insert_test_peer(idle).await;
@@ -2909,6 +2938,7 @@ async fn hosts_for_model_keeps_all_equal_load_hosts() -> Result<()> {
         host.hosted_models = vec![model.to_string()];
         host.hosted_models_known = true;
         host.inflight_requests = 2;
+        host.rtt_ms = Some(40);
         node.insert_test_peer(host).await;
     }
 
@@ -2997,11 +3027,10 @@ async fn record_target_failure_never_evicts_sole_target() -> Result<()> {
     // Below threshold: still routable, no eviction.
     assert!(!node.record_target_failure(target_id, Some(model)).await);
     assert!(!node.record_target_failure(target_id, Some(model)).await);
-    assert!(
-        node.models_being_served_routable()
-            .await
-            .contains(&model.to_string())
-    );
+    assert!(node
+        .models_being_served_routable()
+        .await
+        .contains(&model.to_string()));
     // Threshold: demote, never evict.
     assert_eq!(
         node.record_target_failure(target_id, Some(model)).await,

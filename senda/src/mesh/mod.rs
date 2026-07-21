@@ -1697,11 +1697,13 @@ impl Node {
         if count < TARGET_FAILURE_EVICT_THRESHOLD {
             return false;
         }
+        let mut demoted = false;
         if let Some(model) = model {
             let until = now + ROUTE_FAILURE_DEMOTION;
             state
                 .verifier_demotions
                 .insert((peer_id, model.to_string()), until);
+            demoted = true;
             tracing::warn!(
                 peer = %peer_id.fmt_short(),
                 model = model,
@@ -1726,8 +1728,18 @@ impl Node {
                     count = count,
                     "skipping eviction of sole remaining target for model — demoted from public routing instead"
                 );
+                drop(state);
+                // Wake election so dialable peers can force-rehost even when
+                // we refuse to evict the sole undialable target.
+                let count = self.state.lock().await.peers.len();
+                let _ = self.peer_change_tx.send(count);
                 return false;
             }
+        }
+        drop(state);
+        if demoted {
+            let count = self.state.lock().await.peers.len();
+            let _ = self.peer_change_tx.send(count);
         }
         true
     }
@@ -1774,6 +1786,106 @@ impl Node {
         let mut state = self.state.lock().await;
         state.verifier_demotions.retain(|_, until| *until > now);
         state.verifier_demotions.keys().cloned().collect()
+    }
+
+    /// Proactively dial HTTP hosts that still have `rtt_ms = None`.
+    ///
+    /// Transitive-only peers can sit in the table forever with no path
+    /// (Elevens via entry gossip). Waiting for chat 503s is too late —
+    /// demote their models and wake election so a dialable peer can
+    /// force-rehost before the next user request.
+    ///
+    /// Dial success alone is not enough: `dial_for_split` gossips async,
+    /// so a successful dial this tick just gives the next cycle a chance
+    /// to observe RTT. Demote only when dial fails, or when we already
+    /// have a connection but RTT is still missing after a sync gossip.
+    pub async fn probe_undialable_http_hosts(&self) {
+        let candidates: Vec<(EndpointId, Vec<String>, bool)> = {
+            let state = self.state.lock().await;
+            state
+                .peers
+                .values()
+                .filter(|p| p.rtt_ms.is_none() && p.accepts_http_inference())
+                .map(|p| {
+                    let models = p.http_routable_models();
+                    let connected = state.connections.contains_key(&p.id);
+                    (p.id, models, connected)
+                })
+                .filter(|(_, models, _)| !models.is_empty())
+                .collect()
+        };
+        if candidates.is_empty() {
+            return;
+        }
+
+        let mut demoted_any = false;
+        let until = std::time::Instant::now() + ROUTE_FAILURE_DEMOTION;
+        for (peer_id, models, connected) in candidates {
+            if !connected {
+                match self
+                    .dial_for_split(peer_id, std::time::Duration::from_secs(10))
+                    .await
+                {
+                    Ok(()) => {
+                        // Connection just landed; gossip is async. Wait one
+                        // heartbeat cycle for rtt_ms before demoting.
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            peer = %peer_id.fmt_short(),
+                            error = %e,
+                            "undialable HTTP host probe failed — demoting advertised models"
+                        );
+                        for model in &models {
+                            self.demote_peer_model(peer_id, model, until).await;
+                        }
+                        demoted_any = true;
+                        continue;
+                    }
+                }
+            }
+
+            // Already connected but still no RTT — force a sync gossip.
+            let conn = {
+                let state = self.state.lock().await;
+                state.connections.get(&peer_id).cloned()
+            };
+            if let Some(conn) = conn {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    self.initiate_gossip_inner(conn, peer_id, false),
+                )
+                .await;
+            }
+            let still_undialable = {
+                let state = self.state.lock().await;
+                state
+                    .peers
+                    .get(&peer_id)
+                    .map(|p| p.rtt_ms.is_none())
+                    .unwrap_or(true)
+            };
+            if still_undialable {
+                tracing::warn!(
+                    peer = %peer_id.fmt_short(),
+                    "HTTP host connected but RTT still unknown — demoting advertised models"
+                );
+                for model in &models {
+                    self.demote_peer_model(peer_id, model, until).await;
+                }
+                demoted_any = true;
+            } else {
+                for model in &models {
+                    self.clear_peer_model_demotion(peer_id, model).await;
+                }
+            }
+        }
+
+        if demoted_any {
+            let count = self.state.lock().await.peers.len();
+            let _ = self.peer_change_tx.send(count);
+        }
     }
 
     /// Record the latest sample-and-verify verdict for `(peer, model)`.
@@ -2929,17 +3041,27 @@ impl Node {
         };
         if let Some(peer) = updated_peer {
             tracing::info!("Peer {} RTT: {}ms", id.fmt_short(), rtt_ms);
-            // If RTT dropped from above the split threshold (80ms) to below it
-            // (e.g. relay → direct), trigger a re-election so the peer can now
-            // be included in split mode.
+            // Wake election when a path first appears (None → Some) or when
+            // RTT drops from above the split threshold to below it (relay →
+            // direct). First measurement unblocks force-rehost / catalog
+            // honesty for peers that were previously undialable.
+            let first_measurement = old_rtt.is_none();
             let was_above = old_rtt.is_some_and(|r| r > MAX_SPLIT_RTT_MS);
-            if was_above && rtt_ms <= MAX_SPLIT_RTT_MS {
-                emit_mesh_info(format!(
-                    "📡 Peer {} RTT improved ({}ms → {}ms) — re-electing for split",
-                    id.fmt_short(),
-                    old_rtt.unwrap_or(0),
-                    rtt_ms
-                ));
+            if first_measurement || (was_above && rtt_ms <= MAX_SPLIT_RTT_MS) {
+                if first_measurement {
+                    emit_mesh_info(format!(
+                        "📡 Peer {} first RTT: {}ms — waking election",
+                        id.fmt_short(),
+                        rtt_ms
+                    ));
+                } else {
+                    emit_mesh_info(format!(
+                        "📡 Peer {} RTT improved ({}ms → {}ms) — re-electing for split",
+                        id.fmt_short(),
+                        old_rtt.unwrap_or(0),
+                        rtt_ms
+                    ));
+                }
                 let count = self.state.lock().await.peers.len();
                 let _ = self.peer_change_tx.send(count);
             }
@@ -3710,6 +3832,10 @@ impl Node {
             .peers
             .values()
             .filter(|p| p.routes_http_model(model))
+            // Align with `models_being_served_routable`: no path ⇒ cannot
+            // proxy chat. Listing undialable hosts here is how Gemma 503'd
+            // while still appearing as a route candidate.
+            .filter(|p| p.rtt_ms.is_some())
             .filter(|p| {
                 !demotions
                     .get(&(p.id, model.to_string()))
