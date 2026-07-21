@@ -235,9 +235,9 @@ fn any_other_peer_can_solo(model: &str, model_bytes: u64, peers: &[mesh::PeerInf
     // WaitingForCapacity / Worker with empty `hosted_models`. MSI + LYU
     // then dropped Gemma ("someone else can solo"), hit an empty serving
     // list, and crash-looped the Windows Scheduled Task.
-    peers.iter().any(|p| {
-        p.routes_http_model(model) && peer_can_solo_model(p, model_bytes)
-    })
+    peers
+        .iter()
+        .any(|p| p.routes_http_model(model) && peer_can_solo_model(p, model_bytes))
 }
 
 fn demand_count(catalog_demand: &std::collections::HashMap<String, u64>, model: &str) -> u64 {
@@ -5209,8 +5209,13 @@ mod tests {
         // Both A and B are past-grace Workers, so viable is empty — the
         // production path uses fallback_host_candidates_after_grace, which
         // peels A (highest VRAM unhosted) and leaves B.
-        let fallback =
-            fallback_host_candidates_after_grace(&peers, &first_observed, after, HOST_CLAIM_GRACE, model);
+        let fallback = fallback_host_candidates_after_grace(
+            &peers,
+            &first_observed,
+            after,
+            HOST_CLAIM_GRACE,
+            model,
+        );
         assert!(
             !fallback.iter().any(|p| p.id == id_a),
             "fallback must not re-admit grace-failed A"
@@ -5257,8 +5262,13 @@ mod tests {
         first_observed.insert(id_msi, t0);
         let after = t0 + HOST_CLAIM_GRACE + std::time::Duration::from_secs(1);
 
-        let fallback =
-            fallback_host_candidates_after_grace(&peers, &first_observed, after, HOST_CLAIM_GRACE, model);
+        let fallback = fallback_host_candidates_after_grace(
+            &peers,
+            &first_observed,
+            after,
+            HOST_CLAIM_GRACE,
+            model,
+        );
         assert!(
             !fallback.iter().any(|p| p.id == id_elevens),
             "stuck Elevens must be peeled off host candidacy"
@@ -6685,8 +6695,7 @@ mod tests {
         let local_vram = 6 * 1024 * 1024 * 1024; // MSI
         let mut sizes = HashMap::new();
         sizes.insert(gemma.clone(), gemma_bytes);
-        let elevens_id =
-            iroh::EndpointId::from(iroh::SecretKey::from_bytes(&[99; 32]).public());
+        let elevens_id = iroh::EndpointId::from(iroh::SecretKey::from_bytes(&[99; 32]).public());
         let elevens = make_dense_peer(elevens_id, 26 * 1024 * 1024 * 1024, Some(140), &gemma);
         assert!(
             matches!(elevens.role, NodeRole::Worker),
