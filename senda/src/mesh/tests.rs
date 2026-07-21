@@ -2769,18 +2769,47 @@ async fn rpc_pipeline_workers_make_hosted_model_routable() -> Result<()> {
     host.serving_models = vec![model.to_string()];
     host.hosted_models = vec![model.to_string()];
     host.hosted_models_known = true;
+    host.rtt_ms = Some(12);
 
     let mut worker = make_test_peer_info(worker_id);
     worker.role = super::NodeRole::Worker;
     worker.serving_models = vec![model.to_string()];
     worker.hosted_models_known = true;
     worker.tunnel_port = None;
+    worker.rtt_ms = Some(18);
 
     node.insert_test_peer(host).await;
     node.insert_test_peer(worker).await;
 
     assert_eq!(
         node.models_being_served_routable().await,
+        vec![model.to_string()]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn host_without_rtt_is_not_publicly_routable() -> Result<()> {
+    let node = make_test_node(super::NodeRole::Client).await?;
+    let model = "google_gemma-3-27b-it-Q4_K_M";
+    let host_id = EndpointId::from(iroh::SecretKey::from_bytes(&[0xDA; 32]).public());
+
+    let mut host = make_test_peer_info(host_id);
+    host.role = super::NodeRole::Host { http_port: 9337 };
+    host.serving_models = vec![model.to_string()];
+    host.hosted_models = vec![model.to_string()];
+    host.hosted_models_known = true;
+    host.rtt_ms = None;
+
+    node.insert_test_peer(host).await;
+
+    assert!(
+        node.models_being_served_routable().await.is_empty(),
+        "a host with no measured RTT must not appear in /v1/models"
+    );
+    // Still counted as "being served" for internal election/recovery.
+    assert_eq!(
+        node.models_being_served().await,
         vec![model.to_string()]
     );
     Ok(())
@@ -2799,6 +2828,7 @@ async fn pipeline_worker_for_wrong_model_does_not_make_route_routable() -> Resul
     host.serving_models = vec![model.to_string()];
     host.hosted_models = vec![model.to_string()];
     host.hosted_models_known = true;
+    host.rtt_ms = Some(12);
 
     let mut worker = make_test_peer_info(worker_id);
     worker.role = super::NodeRole::Worker;
@@ -2946,8 +2976,8 @@ async fn record_target_failure_only_evicts_after_threshold() -> Result<()> {
 
 /// When the failing peer is the SOLE remaining target for a model, even
 /// the third failure must NOT authorize eviction — eviction would empty
-/// the cohort and surface as `503 all 1 target(s) failed` on the next
-/// request. Pins the v0.66.38 sole-target safety net.
+/// the cohort. It MUST still demote the peer so `/v1/models` stops
+/// advertising a host the router cannot dial (Elevens/Gemma 2026-07-21).
 #[tokio::test]
 async fn record_target_failure_never_evicts_sole_target() -> Result<()> {
     let node = make_test_node(super::NodeRole::Worker).await?;
@@ -2956,19 +2986,37 @@ async fn record_target_failure_never_evicts_sole_target() -> Result<()> {
     let target_id = EndpointId::from(target_key.public());
     {
         let mut target_peer = make_test_peer(target_id, Some(20), 16);
+        target_peer.role = super::NodeRole::Host { http_port: 9337 };
         target_peer.serving_models = vec![model.to_string()];
         target_peer.hosted_models = vec![model.to_string()];
         target_peer.hosted_models_known = true;
         target_peer.tunnel_port = Some(40000);
+        target_peer.rtt_ms = Some(20);
         node.insert_test_peer(target_peer).await;
     }
-    for _ in 0..10 {
-        assert_eq!(
-            node.record_target_failure(target_id, Some(model)).await,
-            false,
-            "sole target must never be evicted even after many failures"
-        );
-    }
+    // Below threshold: still routable, no eviction.
+    assert!(!node.record_target_failure(target_id, Some(model)).await);
+    assert!(!node.record_target_failure(target_id, Some(model)).await);
+    assert!(
+        node.models_being_served_routable()
+            .await
+            .contains(&model.to_string())
+    );
+    // Threshold: demote, never evict.
+    assert_eq!(
+        node.record_target_failure(target_id, Some(model)).await,
+        false,
+        "sole target must never be evicted even after many failures"
+    );
+    let demotions = node.active_demotions().await;
+    assert!(
+        demotions.contains(&(target_id, model.to_string())),
+        "sole target must be demoted so the public catalog drops it"
+    );
+    assert!(
+        node.models_being_served_routable().await.is_empty(),
+        "demoted sole target must leave /v1/models"
+    );
     Ok(())
 }
 

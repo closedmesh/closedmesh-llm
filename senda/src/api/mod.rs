@@ -1069,7 +1069,11 @@ impl MeshApi {
         let local_scan = self.local_inventory_snapshot().await;
         let all_peers = node.peers().await;
         let catalog = node.mesh_catalog_entries().await;
-        let served = node.models_being_served().await;
+        // Warm = publicly routable (dialable host), not merely "someone
+        // claims hosted_models". Chat selectors and status "available"
+        // counts key off this; advertising undialable hosts as warm was
+        // the Gemma/Elevens 503-while-listed bug.
+        let served = node.models_being_served_routable().await;
         let active_demand = node.active_demand().await;
         // Per-model routing metrics are current-node-only observations. They
         // help the management API explain recent local routing behavior without

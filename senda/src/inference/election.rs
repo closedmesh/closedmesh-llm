@@ -187,7 +187,12 @@ pub fn should_be_host_for_model(
 /// then split — which is exactly what we want to AVOID.
 ///
 /// Score tuple, compared lexicographically (largest wins):
-///   `(can_hold_solo, fast_memory_bytes, system_ram_bytes, endpoint_id)`
+///   `(can_hold_solo, has_measured_rtt, fast_memory_bytes, system_ram_bytes, endpoint_id)`
+///
+/// `has_measured_rtt`: self always scores true (locally dialable). Remote
+/// peers with `rtt_ms = None` lose to an otherwise-equal peer that has a
+/// path — so a high-VRAM ghost host that nobody can ping does not kidnap
+/// the election when a dialable runner-up exists (stability plan B2).
 ///
 /// The `endpoint_id` tiebreak preserves the legacy "higher id wins"
 /// behavior so deterministic cohorts elect the same peer pre/post-
@@ -200,7 +205,13 @@ pub fn should_be_host_for_model_with_solo_bias(
     model_bytes: u64,
     model_peers: &[mesh::PeerInfo],
 ) -> bool {
-    let my_score = (my_vram >= model_bytes, my_vram, my_system_ram_bytes, my_id);
+    let my_score = (
+        my_vram >= model_bytes,
+        true, // local node is always dialable to itself
+        my_vram,
+        my_system_ram_bytes,
+        my_id,
+    );
     for peer in model_peers {
         if matches!(peer.role, NodeRole::Client) {
             continue;
@@ -208,6 +219,7 @@ pub fn should_be_host_for_model_with_solo_bias(
         let peer_fast = peer.fast_memory_bytes();
         let peer_score = (
             peer_fast >= model_bytes,
+            peer.rtt_ms.is_some(),
             peer_fast,
             peer.system_ram_bytes,
             peer.id,

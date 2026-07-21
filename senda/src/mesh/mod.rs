@@ -1473,15 +1473,14 @@ struct MeshState {
     /// longer permanently evicts the cohort's only target. Cleared on
     /// successful Delivered.
     target_failures: HashMap<EndpointId, VecDeque<std::time::Instant>>,
-    /// Verifier-armed temporary route demotions, keyed by `(peer, model)` →
-    /// the `Instant` the demotion expires. While present and unexpired, that
-    /// `(peer, model)` pair is skipped by `hosts_for_model` and the election
-    /// target builder, so traffic for `model` routes elsewhere. This is a
-    /// *reversible* cooldown (not eviction): the peer stays in the mesh, keeps
-    /// getting re-probed, and is reinstated automatically when the cooldown
-    /// lapses or immediately on a verified `Match`. Only the verifier writes
-    /// here, and only when enforcement is explicitly enabled; with
-    /// enforcement off the map stays empty and every filter is a no-op.
+    /// Temporary route demotions, keyed by `(peer, model)` → the `Instant`
+    /// the demotion expires. While present and unexpired, that pair is
+    /// skipped by `hosts_for_model`, `models_being_served_routable`, and the
+    /// election target builder. Reversible cooldown (not eviction). Written
+    /// by (a) the verifier when enforcement is on, and (b) the OpenAI
+    /// routing layer after repeated dial/proxy failures — including when
+    /// the peer is the sole HTTP target (we still refuse to *evict* sole
+    /// targets, but we do demote them so the public catalog stops lying).
     verifier_demotions: HashMap<(EndpointId, String), std::time::Instant>,
     /// Latest sample-and-verify verdict per `(peer, model)`. Written by the
     /// verifier loop every audit tick (regardless of enforcement), read by the
@@ -1502,6 +1501,15 @@ pub const TARGET_FAILURE_WINDOW: std::time::Duration = std::time::Duration::from
 /// because the sole-target safety net (clause 2 of
 /// `Node::record_target_failure`) makes it safe.
 pub const TARGET_FAILURE_EVICT_THRESHOLD: usize = 3;
+
+/// How long a routing-layer demotion lasts after the failure threshold
+/// trips. Distinct from peer *eviction*: demotion keeps the peer in the
+/// mesh but skips it for `/v1/models`, `hosts_for_model`, and election
+/// target building so a ghost host (claims `hosted_models`, undialable
+/// from entry — Elevens/Gemma 2026-07-21) cannot advertise a 503 forever.
+/// Long enough for election / gossip to prefer a dialable runner-up;
+/// short enough that a recovered path returns within a few minutes.
+pub const ROUTE_FAILURE_DEMOTION: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Returns `true` if the given peer has completed gossip validation and is
 /// a full mesh member. Unadmitted peers are in `state.connections` but not
@@ -1659,19 +1667,20 @@ impl Node {
     /// Record a routing-layer failure to a remote peer and decide whether
     /// the peer should be evicted (i.e. `handle_peer_death` should run).
     ///
-    /// Returns `true` ONLY when:
+    /// When `model` is set and the failure count reaches
+    /// [`TARGET_FAILURE_EVICT_THRESHOLD`], the peer is always
+    /// **demoted** for that model for [`ROUTE_FAILURE_DEMOTION`] — even
+    /// when it is the sole HTTP target. Demotion withdraws the model from
+    /// the public catalog and routing table without killing the peer.
+    ///
+    /// Returns `true` (authorize eviction) ONLY when:
     ///   1. The peer has accumulated `TARGET_FAILURE_EVICT_THRESHOLD`
     ///      failures inside `TARGET_FAILURE_WINDOW`, AND
     ///   2. Evicting this peer would NOT empty the cohort serving `model`
     ///      (when `model` is provided).
     ///
-    /// The second clause is the v0.66.38 fix for the "sole-target
-    /// blacklist" symptom: pre-fix, any single timeout to manonas (the
-    /// only remote serving Qwen3-32B-Q4_K_M) tripped `handle_peer_death`
-    /// → next request found 0 candidates → 503 with `all 1 target(s)
-    /// failed`. Post-fix, the sole target is never permanently evicted
-    /// by the routing layer; recovery falls through to gossip
-    /// freshness / peer heartbeat.
+    /// Sole-target eviction stays forbidden (v0.66.38); sole-target
+    /// *demotion* is required so undialable hosts stop advertising.
     pub async fn record_target_failure(&self, peer_id: EndpointId, model: Option<&str>) -> bool {
         let now = std::time::Instant::now();
         let mut state = self.state.lock().await;
@@ -1689,6 +1698,17 @@ impl Node {
             return false;
         }
         if let Some(model) = model {
+            let until = now + ROUTE_FAILURE_DEMOTION;
+            state
+                .verifier_demotions
+                .insert((peer_id, model.to_string()), until);
+            tracing::warn!(
+                peer = %peer_id.fmt_short(),
+                model = model,
+                count = count,
+                demote_secs = ROUTE_FAILURE_DEMOTION.as_secs(),
+                "demoting peer for model after repeated route failures"
+            );
             let any_other = state.peers.values().any(|p| {
                 p.id != peer_id
                     && p.tunnel_port.is_some()
@@ -1704,7 +1724,7 @@ impl Node {
                     peer = %peer_id.fmt_short(),
                     model = model,
                     count = count,
-                    "skipping eviction of sole remaining target for model — will retry after backoff"
+                    "skipping eviction of sole remaining target for model — demoted from public routing instead"
                 );
                 return false;
             }
@@ -3574,7 +3594,11 @@ impl Node {
     /// routes the model has either (a) no cohort — solo serve — or
     /// (b) every cohort member is past the loading phase, signalled
     /// by a non-empty `hosted_models` (proof of llama_ready) or a
-    /// matching `served_model_runtime` entry with `ready: true`.
+    /// matching `served_model_runtime` entry with `ready: true`,
+    /// **and** the remote host is dialable from this node (a measured
+    /// `rtt_ms`). Hosts with `rtt_ms = None` are excluded: claiming
+    /// `hosted_models` without a path produces public chat 503s while
+    /// the model stays advertised (Elevens/Gemma, 2026-07-21).
     ///
     /// Internal routing (chat, election, gossip) intentionally keeps
     /// using `models_being_served` — degraded routes still return
@@ -3583,6 +3607,7 @@ impl Node {
     /// method is purely about telling truth on the public surface.
     pub async fn models_being_served_routable(&self) -> Vec<String> {
         let my_hosted_models = self.hosted_models.lock().await.clone();
+        let demotions = self.active_demotions().await;
         let peer_data: Vec<_> = {
             let state = self.state.lock().await;
             state.peers.values().cloned().collect()
@@ -3650,7 +3675,16 @@ impl Node {
             routable.insert(s.clone());
         }
         for peer in &peer_data {
+            // No measured path ⇒ this node cannot proxy HTTP to the
+            // host. Keep the model out of the public catalog so chat
+            // selectors don't offer a guaranteed 503.
+            if peer.rtt_ms.is_none() {
+                continue;
+            }
             for m in peer.http_routable_models() {
+                if demotions.contains(&(peer.id, m.clone())) {
+                    continue;
+                }
                 if route_is_healthy(peer, &m) {
                     routable.insert(m);
                 }
