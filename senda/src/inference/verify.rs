@@ -595,22 +595,49 @@ async fn run_one_audit(
     let idx = (rand::random::<u64>() as usize) % candidates.len();
     let (peer_id, model) = candidates.swap_remove(idx);
 
+    // Serving nodes also run this loop. A live 16-prompt `/completion` battery
+    // on the chat GPU (mid-burst dig, 2026-07-22) contends with user traffic on
+    // Metal `--parallel` slots and produces 5–30 s TTFT spikes. Defer the whole
+    // audit while we are busy, and never pile probes onto a peer that already
+    // has in-flight requests.
+    let local_busy = node.inflight_requests() > 0
+        || matches!(
+            node.seconds_since_last_local_request(),
+            Some(secs) if secs < 90
+        );
+    if local_busy && !local_ports.is_empty() {
+        anyhow::bail!("local node busy with user traffic; defer verify");
+    }
+    let peers = node.peers().await;
+    if peers
+        .iter()
+        .find(|p| p.id == peer_id)
+        .is_some_and(|p| p.inflight_requests > 0)
+    {
+        anyhow::bail!("peer has in-flight requests; defer verify");
+    }
+
     // ── Layer 1 (preferred): first-token top-k battery, gross-fraud scoped. ──
-    // Ground truth is our own model when we serve it (same-hardware capture),
-    // else the embedded/on-disk reference battery. A decisive verdict short-
-    // circuits; an `Inconclusive` (peer returned too few probes) falls through
-    // to the legacy fingerprint oracle below.
+    // Prefer the embedded/on-disk fixed battery so a serving node does not
+    // re-capture a 16-prompt reference on its own llama-server every tick.
+    // Live self-capture is only for models we serve that have no fixed ref,
+    // and only when the GPU is idle.
+    // A decisive verdict short-circuits; an `Inconclusive` (peer returned too
+    // few probes) falls through to the legacy fingerprint oracle below.
     let ref_battery: Option<(Vec<FirstTokenProbe>, &'static str)> =
-        if let Some(&port) = local_ports.get(&model) {
-            native_baseline::capture_reference_battery(port)
-                .await
-                .ok()
-                .map(|b| (b, "battery_self"))
+        if let Some(fixed) = battery_store.get(&model).cloned() {
+            Some((fixed, "battery_fixed"))
+        } else if let Some(&port) = local_ports.get(&model) {
+            if local_busy {
+                None
+            } else {
+                native_baseline::capture_reference_battery(port)
+                    .await
+                    .ok()
+                    .map(|b| (b, "battery_self"))
+            }
         } else {
-            battery_store
-                .get(&model)
-                .cloned()
-                .map(|b| (b, "battery_fixed"))
+            None
         };
     if let Some((reference, mode)) = ref_battery {
         // Cap per-probe wait so a stalled peer can't drag one tick across the

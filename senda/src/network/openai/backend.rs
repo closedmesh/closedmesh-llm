@@ -146,6 +146,28 @@ async fn handle_connection(mut stream: TcpStream, llama_port: u16, node: Node) -
         "backend_proxy.handle_connection accepted"
     );
 
+    let path_only = request.path.split('?').next().unwrap_or(request.path.as_str());
+    // User chat — stamp the chat clock so verify/keepwarm `/completion`
+    // probes can yield the GPU for ~90s after real traffic (mid-burst dig).
+    if path_only.ends_with("/chat/completions") {
+        node.note_chat_request();
+    }
+    // Defer fingerprint/verify batteries while chat is hot. They share
+    // llama-server `--parallel` slots and on Metal both sides stall for
+    // seconds when they overlap.
+    if path_only == "/completion"
+        && matches!(
+            node.seconds_since_last_chat_request(),
+            Some(secs) if secs < 90
+        )
+    {
+        tracing::debug!(
+            "backend proxy deferring /completion — chat request within 90s"
+        );
+        let _ = transport::send_503(stream, "busy: chat traffic; retry verify later").await;
+        return Ok(());
+    }
+
     let mut upstream = match TcpStream::connect(format!("127.0.0.1:{llama_port}")).await {
         Ok(stream) => stream,
         Err(err) => {

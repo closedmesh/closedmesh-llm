@@ -1307,6 +1307,12 @@ pub struct Node {
     /// every `begin_inflight_request`. Read by the keep-warm loop to decide
     /// whether to ping the local llama-server and hold its GPU residency hot.
     last_local_request_at: Arc<std::sync::atomic::AtomicU64>,
+    /// Unix-seconds of the last *chat* request through the backend proxy
+    /// (`/v1/chat/completions`). Distinct from [`Self::last_local_request_at`]
+    /// so verify/keepwarm `/completion` probes can be deferred while users
+    /// are actively chatting without the probes themselves resetting the
+    /// "user is here" clock.
+    last_chat_request_at: Arc<std::sync::atomic::AtomicU64>,
     routing_metrics: crate::network::metrics::RoutingMetrics,
     /// Disk-persisted rolling 7-day tally of completion tokens this node
     /// actually served, per model. Local-only (never gossiped); powers the
@@ -2020,6 +2026,24 @@ impl Node {
         }
     }
 
+    /// Record that a user chat request hit the local backend proxy.
+    pub fn note_chat_request(&self) {
+        self.last_chat_request_at
+            .store(now_secs(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Seconds since the last chat request, or `None` if never.
+    pub fn seconds_since_last_chat_request(&self) -> Option<u64> {
+        let last = self
+            .last_chat_request_at
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if last == 0 {
+            None
+        } else {
+            Some(now_secs().saturating_sub(last))
+        }
+    }
+
     pub fn inflight_change_rx(&self) -> watch::Receiver<u64> {
         self.inflight_change_tx.subscribe()
     }
@@ -2452,6 +2476,7 @@ impl Node {
             inflight_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             inflight_change_tx,
             last_local_request_at: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            last_chat_request_at: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             routing_metrics: crate::network::metrics::RoutingMetrics::default(),
             serving_tally: Arc::new(crate::network::serving_tally::ServingTally::new(
                 crate::network::serving_tally::tally_path(),
@@ -2567,6 +2592,7 @@ impl Node {
             inflight_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             inflight_change_tx,
             last_local_request_at: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            last_chat_request_at: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             routing_metrics: crate::network::metrics::RoutingMetrics::default(),
             serving_tally: Arc::new(crate::network::serving_tally::ServingTally::new(None)),
             local_request_metrics: Arc::new(LocalRequestMetricsSampler::default()),
