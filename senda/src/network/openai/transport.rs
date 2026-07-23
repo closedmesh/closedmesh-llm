@@ -1308,6 +1308,37 @@ async fn relay_translated_responses_json<R: AsyncRead + Unpin>(
     })
 }
 
+/// Inject `x-senda-serving-peer: <peer>` into a buffered HTTP response.
+///
+/// Used so the website credit ledger can attribute completed tokens to the
+/// host that actually served the request (Phase 5.A), instead of guessing
+/// from the SLA candidate ranking.
+fn inject_serving_peer_header(buffered: &mut Vec<u8>, peer_short: impl std::fmt::Display) {
+    let peer_short = peer_short.to_string();
+    if peer_short.is_empty() {
+        return;
+    }
+    let Some(header_end) = buffered
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|i| i + 4)
+    else {
+        return;
+    };
+    // Already present (e.g. nested relay) — leave untouched.
+    let headers = &buffered[..header_end];
+    let needle = b"x-senda-serving-peer:";
+    let already = headers
+        .windows(needle.len())
+        .any(|w| w.eq_ignore_ascii_case(needle));
+    if already {
+        return;
+    }
+    let insert_at = header_end.saturating_sub(2); // before final \r\n
+    let line = format!("x-senda-serving-peer: {peer_short}\r\n");
+    buffered.splice(insert_at..insert_at, line.into_bytes());
+}
+
 /// Inject `"mesh_hooks": true/false` into the JSON body of an HTTP request.
 ///
 /// Inserts the field right after the opening `{` in the body, then rebuilds
@@ -1790,8 +1821,13 @@ async fn route_local_attempt(
                 return RouteAttemptResult::RetryableUnavailable;
             }
             match probe_http_response_local(&mut upstream).await {
-                Ok(probe) => {
+                Ok(mut probe) => {
                     let status_code = probe.status_code;
+                    // Phase 5.A — credit ledger attribution for local serves.
+                    // Only on success: error remapping uses probe.header_end.
+                    if (200..300).contains(&status_code) {
+                        inject_serving_peer_header(&mut probe.buffered, node.id().fmt_short());
+                    }
                     match relay_probed_response(
                         tcp_stream,
                         &mut upstream,
@@ -1877,8 +1913,13 @@ async fn route_remote_attempt(
                 return RouteAttemptResult::RetryableUnavailable;
             }
             match probe_http_response(&mut quic_recv).await {
-                Ok(probe) => {
+                Ok(mut probe) => {
                     let status_code = probe.status_code;
+                    // Phase 5.A — credit ledger attribution for remote serves.
+                    // Only on success: error remapping uses probe.header_end.
+                    if (200..300).contains(&status_code) {
+                        inject_serving_peer_header(&mut probe.buffered, host_id.fmt_short());
+                    }
                     match relay_probed_response(
                         tcp_stream,
                         &mut quic_recv,
@@ -4668,5 +4709,25 @@ mod tests {
         let before = raw.clone();
         inject_mesh_hooks_flag(&mut raw, true);
         assert_eq!(raw, before, "GET with no body should be unchanged");
+    }
+
+    #[test]
+    fn test_inject_serving_peer_header() {
+        let mut buf = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nbody".to_vec();
+        inject_serving_peer_header(&mut buf, "227fd568e9");
+        let s = String::from_utf8_lossy(&buf);
+        assert!(
+            s.contains("x-senda-serving-peer: 227fd568e9\r\n"),
+            "missing header; got: {s}"
+        );
+        assert!(s.contains("\r\n\r\nbody"), "body framing broken; got: {s}");
+        // Idempotent — second inject must not duplicate.
+        inject_serving_peer_header(&mut buf, "other");
+        let s2 = String::from_utf8_lossy(&buf);
+        assert_eq!(
+            s2.matches("x-senda-serving-peer:").count(),
+            1,
+            "expected single header; got: {s2}"
+        );
     }
 }
