@@ -1801,10 +1801,12 @@ impl Node {
     /// demote their models and wake election so a dialable peer can
     /// force-rehost before the next user request.
     ///
-    /// Dial success alone is not enough: `dial_for_split` gossips async,
-    /// so a successful dial this tick just gives the next cycle a chance
-    /// to observe RTT. Demote only when dial fails, or when we already
-    /// have a connection but RTT is still missing after a sync gossip.
+    /// After a successful dial we force a sync gossip in the same tick
+    /// (do not wait another heartbeat) so `rtt_ms` can land before chat
+    /// retries give up. Never demote the *sole* HTTP host for a model —
+    /// that guarantees empty `hosts_for_model` / HTTP 429 for five minutes
+    /// (CI split smoke + real client-only peers hit this when Host ≠
+    /// join peer).
     pub async fn probe_undialable_http_hosts(&self) {
         let candidates: Vec<(EndpointId, Vec<String>, bool)> = {
             let state = self.state.lock().await;
@@ -1833,9 +1835,9 @@ impl Node {
                     .await
                 {
                     Ok(()) => {
-                        // Connection just landed; gossip is async. Wait one
-                        // heartbeat cycle for rtt_ms before demoting.
-                        continue;
+                        // Fall through to sync gossip this tick — waiting
+                        // another heartbeat left Host RTT null long enough
+                        // for CI client inference to exhaust retries.
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -1844,15 +1846,23 @@ impl Node {
                             "undialable HTTP host probe failed — demoting advertised models"
                         );
                         for model in &models {
+                            if self.is_sole_http_host_for_model(peer_id, model).await {
+                                tracing::warn!(
+                                    peer = %peer_id.fmt_short(),
+                                    model,
+                                    "skipping demotion — sole HTTP host for model; will keep probing"
+                                );
+                                continue;
+                            }
                             self.demote_peer_model(peer_id, model, until).await;
+                            demoted_any = true;
                         }
-                        demoted_any = true;
                         continue;
                     }
                 }
             }
 
-            // Already connected but still no RTT — force a sync gossip.
+            // Connected (or just dialed) but still no RTT — force a sync gossip.
             let conn = {
                 let state = self.state.lock().await;
                 state.connections.get(&peer_id).cloned()
@@ -1878,9 +1888,17 @@ impl Node {
                     "HTTP host connected but RTT still unknown — demoting advertised models"
                 );
                 for model in &models {
+                    if self.is_sole_http_host_for_model(peer_id, model).await {
+                        tracing::warn!(
+                            peer = %peer_id.fmt_short(),
+                            model,
+                            "skipping demotion — sole HTTP host for model; will keep probing"
+                        );
+                        continue;
+                    }
                     self.demote_peer_model(peer_id, model, until).await;
+                    demoted_any = true;
                 }
-                demoted_any = true;
             } else {
                 for model in &models {
                     self.clear_peer_model_demotion(peer_id, model).await;
@@ -1892,6 +1910,17 @@ impl Node {
             let count = self.state.lock().await.peers.len();
             let _ = self.peer_change_tx.send(count);
         }
+    }
+
+    /// True when `peer_id` is the only peer that currently routes HTTP for `model`.
+    async fn is_sole_http_host_for_model(&self, peer_id: EndpointId, model: &str) -> bool {
+        let state = self.state.lock().await;
+        let others = state
+            .peers
+            .values()
+            .filter(|p| p.id != peer_id && p.routes_http_model(model))
+            .count();
+        others == 0
     }
 
     /// Record the latest sample-and-verify verdict for `(peer, model)`.

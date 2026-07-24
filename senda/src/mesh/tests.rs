@@ -2822,6 +2822,7 @@ async fn probe_undialable_http_host_demotes_without_chat_failures() -> Result<()
     let node = make_test_node(super::NodeRole::Client).await?;
     let model = "google_gemma-3-27b-it-Q4_K_M";
     let host_id = EndpointId::from(iroh::SecretKey::from_bytes(&[0xDB; 32]).public());
+    let other_id = EndpointId::from(iroh::SecretKey::from_bytes(&[0xDC; 32]).public());
 
     let mut host = make_test_peer_info(host_id);
     host.role = super::NodeRole::Host { http_port: 9337 };
@@ -2832,13 +2833,52 @@ async fn probe_undialable_http_host_demotes_without_chat_failures() -> Result<()
     // Empty addrs ⇒ dial_for_split fails immediately.
     host.addr.addrs.clear();
 
+    // A second dialable host for the same model — sole-host protection
+    // must not block demoting this undialable peer.
+    let mut other = make_test_peer_info(other_id);
+    other.role = super::NodeRole::Host { http_port: 9338 };
+    other.serving_models = vec![model.to_string()];
+    other.hosted_models = vec![model.to_string()];
+    other.hosted_models_known = true;
+    other.rtt_ms = Some(12);
+
     node.insert_test_peer(host).await;
+    node.insert_test_peer(other).await;
     node.probe_undialable_http_hosts().await;
 
     let demotions = node.active_demotions().await;
     assert!(
         demotions.contains(&(host_id, model.to_string())),
         "proactive probe must demote undialable HTTP hosts before chat 503s"
+    );
+    assert!(
+        !demotions.contains(&(other_id, model.to_string())),
+        "dialable alternate host must not be demoted"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn probe_skips_demotion_for_sole_http_host() -> Result<()> {
+    let node = make_test_node(super::NodeRole::Client).await?;
+    let model = "google_gemma-3-27b-it-Q4_K_M";
+    let host_id = EndpointId::from(iroh::SecretKey::from_bytes(&[0xDD; 32]).public());
+
+    let mut host = make_test_peer_info(host_id);
+    host.role = super::NodeRole::Host { http_port: 9337 };
+    host.serving_models = vec![model.to_string()];
+    host.hosted_models = vec![model.to_string()];
+    host.hosted_models_known = true;
+    host.rtt_ms = None;
+    host.addr.addrs.clear();
+
+    node.insert_test_peer(host).await;
+    node.probe_undialable_http_hosts().await;
+
+    let demotions = node.active_demotions().await;
+    assert!(
+        !demotions.contains(&(host_id, model.to_string())),
+        "sole HTTP host must keep being probed — demoting it guarantees empty hosts_for_model"
     );
     Ok(())
 }

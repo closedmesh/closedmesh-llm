@@ -29,7 +29,9 @@ B_CONSOLE_PORT=3142
 C_API_PORT=9349
 C_CONSOLE_PORT=3143
 MAX_WAIT=180
-MAX_CLIENT_ROUTE_WAIT=60
+# Must cover dial + sync gossip for Host RTT when Host ≠ join peer
+# (hosts_for_model requires rtt_ms; see mesh::probe_undialable_http_hosts).
+MAX_CLIENT_ROUTE_WAIT=120
 MAX_INFERENCE_ATTEMPTS=15
 LOG_A=/tmp/senda-split-a.log
 LOG_B=/tmp/senda-split-b.log
@@ -216,11 +218,10 @@ done
 
 MODEL_NAME=$(basename "$MODEL" .gguf)
 
-# Wait until the client learns a truly routable Host for the requested model.
-# `serving_models` is advertised before the host is actually ready to accept
-# inference traffic; `hosted_models` is the durable signal that the host has
-# made the model routable through its local API proxy.
-echo "Waiting for client to learn a routable host for ${MODEL_NAME}..."
+# Wait until the client has a chat-routable Host: role=Host, model in
+# hosted_models, AND measured rtt_ms. Gossip can advertise Host before the
+# client dials it; hosts_for_model / chat proxy require rtt_ms (else HTTP 429).
+echo "Waiting for client to learn a dialable host for ${MODEL_NAME}..."
 for i in $(seq 1 "$MAX_CLIENT_ROUTE_WAIT"); do
     STATUS=$(curl -sf "http://localhost:${C_CONSOLE_PORT}/api/status" 2>/dev/null || echo "")
     if [ -n "$STATUS" ]; then
@@ -230,20 +231,21 @@ model = sys.argv[1]
 status = json.load(sys.stdin)
 for peer in status.get("peers", []):
     hosted_models = peer.get("hosted_models", []) or []
-    if peer.get("role") == "Host" and model in hosted_models:
+    rtt = peer.get("rtt_ms")
+    if peer.get("role") == "Host" and model in hosted_models and rtt is not None:
         print("1")
         break
 else:
     print("0")
 ' "$MODEL_NAME" 2>/dev/null || echo "0")
         if [ "$ROUTABLE" = "1" ]; then
-            echo "  ✅ Client sees a host for ${MODEL_NAME} in ${i}s"
+            echo "  ✅ Client sees a dialable host (rtt_ms set) for ${MODEL_NAME} in ${i}s"
             break
         fi
     fi
 
     if [ "$i" -eq "$MAX_CLIENT_ROUTE_WAIT" ]; then
-        echo "❌ Client never learned a routable host for ${MODEL_NAME}"
+        echo "❌ Client never learned a dialable host for ${MODEL_NAME}"
         echo "--- Client status ---"
         curl -sf "http://localhost:${C_CONSOLE_PORT}/api/status" || true
         echo ""
